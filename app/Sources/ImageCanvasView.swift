@@ -4,6 +4,7 @@ import AppKit
 /// controller keeps the two in sync.
 enum CanvasTool {
     case select
+    case move
     case brush
     case eraser
     case text
@@ -30,10 +31,11 @@ final class ImageCanvasView: NSView {
     var image: CGImage? {
         didSet {
             // The overlay lives at the image's pixel size: throw it away on a
-            // size change, otherwise clear it (this runs right after each
-            // commit's applyEdit round-trips, wiping the committed stroke).
+            // size change, otherwise clear it — EXCEPT mid-stroke, where the
+            // projection updates on every live-edit tick and the overlay is
+            // still accumulating the stroke's geometry.
             if let image = image, image.width == overlayWidth, image.height == overlayHeight {
-                clearOverlay()
+                if !strokeActive { clearOverlay() }
             } else {
                 destroyOverlay()
             }
@@ -46,11 +48,26 @@ final class ImageCanvasView: NSView {
         didSet { needsDisplay = true }
     }
 
+    /// The active layer's extent in image pixel coordinates, kept current by
+    /// the view controller. Paint tools draw its boundary when it differs
+    /// from the canvas rect, since paint outside it cannot land.
+    var activeLayerRect: CGRect? {
+        didSet {
+            if activeLayerRect != oldValue { needsDisplay = true }
+        }
+    }
+
     /// The active tool. The view controller commits any pending text session
-    /// before flipping this; the setter only abandons stroke state.
+    /// before flipping this; the setter only abandons stroke/drag state.
     var tool: CanvasTool = .select {
         didSet {
             cancelStroke()
+            if moveDragOrigin != nil {
+                // A tool switch mid-drag must still close the live edit so
+                // the drag-so-far becomes one undo step.
+                moveDragOrigin = nil
+                onMoveEnd?()
+            }
             window?.invalidateCursorRects(for: self)
             needsDisplay = true
         }
@@ -62,12 +79,36 @@ final class ImageCanvasView: NSView {
     var brushOpacity: CGFloat = 1.0
     var textFont: NSFont = .systemFont(ofSize: 48)
 
-    /// Called once per stroke / text placement with the overlay's
-    /// premultiplied RGBA8 bytes; the receiver routes them through
-    /// ImageDocument.applyEdit as a single undo step.
-    var onCommitOverlay: ((_ data: UnsafePointer<UInt8>, _ mode: RzCompositeMode, _ alpha: Double, _ actionName: String) -> Void)?
+    // Brush/eraser stroke pipeline. The overlay accumulates the stroke's
+    // geometry; every tick hands the WHOLE overlay to the receiver, which
+    // routes it through the document's live-edit machinery so the canvas
+    // previews the true projection (stacking, opacity, blend mode, per-layer
+    // erase) during the drag.
+
+    /// Fired before a stroke starts; return false to refuse it (hidden
+    /// layer) — the canvas beeps and never begins.
+    var onStrokeBegin: (() -> Bool)?
+    /// Fired after the initial stamp and after every drag tick with the
+    /// overlay's canvas-sized premultiplied RGBA8 bytes (top row first).
+    var onStrokeUpdate: ((_ data: UnsafePointer<UInt8>, _ mode: RzCompositeMode, _ alpha: Double) -> Void)?
+    var onStrokeEnd: ((_ actionName: String) -> Void)?
+    /// Fired when an in-progress stroke is abandoned (tool switch, Escape,
+    /// window close); the receiver rolls the live edit back.
+    var onStrokeCancel: (() -> Void)?
+
+    /// Called once per text-session commit with the overlay's premultiplied
+    /// RGBA8 bytes; the receiver routes them through ImageDocument.applyEdit
+    /// as a single undo step.
+    var onCommitTextOverlay: ((_ data: UnsafePointer<UInt8>, _ mode: RzCompositeMode, _ alpha: Double, _ actionName: String) -> Void)?
     var onToolKey: ((CanvasTool) -> Void)?
     var onBrushSizeKey: ((CGFloat) -> Void)?
+
+    // Move tool: the view only reports gestures; the view controller owns
+    // the active layer's offset and the document's live-edit session.
+    var onMoveBegin: (() -> Void)?
+    var onMoveUpdate: ((_ dx: Int, _ dy: Int) -> Void)?
+    var onMoveEnd: (() -> Void)?
+    var onMoveNudge: ((_ dx: Int, _ dy: Int) -> Void)?
 
     /// Current selection in image pixel coordinates; always integral and
     /// clamped to the image bounds.
@@ -79,16 +120,20 @@ final class ImageCanvasView: NSView {
 
     private var dragAnchor: CGPoint?
 
+    // Move-drag state: the unclamped image-space point the drag started at.
+    private var moveDragOrigin: CGPoint?
+
     // Stroke state (brush/eraser).
     private var strokeActive = false
     private var strokeLastPoint: CGPoint?
 
-    // Full-image premultiplied overlay for live strokes and text commits.
+    // Full-image premultiplied overlay accumulating stroke geometry and
+    // rendering text commits. Never drawn directly: the projection previews
+    // strokes via the live-edit round trip.
     private var overlayData: UnsafeMutableRawPointer?
     private var overlayContext: CGContext?
     private var overlayWidth = 0
     private var overlayHeight = 0
-    private var overlayHasContent = false
 
     private var activeTextView: CanvasTextView?
 
@@ -157,14 +202,12 @@ final class ImageCanvasView: NSView {
         overlayContext = context
         overlayWidth = width
         overlayHeight = height
-        overlayHasContent = false
         return context
     }
 
     private func clearOverlay() {
         guard let context = overlayContext else { return }
         context.clear(CGRect(x: 0, y: 0, width: overlayWidth, height: overlayHeight))
-        overlayHasContent = false
     }
 
     private func destroyOverlay() {
@@ -173,7 +216,6 @@ final class ImageCanvasView: NSView {
         overlayData = nil
         overlayWidth = 0
         overlayHeight = 0
-        overlayHasContent = false
     }
 
     // MARK: - Drawing
@@ -184,25 +226,21 @@ final class ImageCanvasView: NSView {
         Self.checkerboardColor.setFill()
         bounds.intersection(dirtyRect).fill()
 
+        // Live strokes preview through the projection itself (the live-edit
+        // round trip), so the image is always the truth; the overlay is
+        // never composited here.
         let context = NSGraphicsContext.current!.cgContext
-        let baseImage = previewImage ?? image
-        if tool == .eraser, overlayHasContent, let cgImage = baseImage,
-           let overlayImage = overlayContext?.makeImage() {
-            // The transparency layer makes destination-out punch through to
-            // the checkerboard correctly instead of erasing the checkerboard.
-            context.beginTransparencyLayer(auxiliaryInfo: nil)
+        if let cgImage = previewImage ?? image {
             drawFlipped(cgImage, in: context)
-            drawFlipped(overlayImage, in: context, blendMode: .destinationOut, alpha: brushOpacity)
-            context.endTransparencyLayer()
-        } else {
-            if let cgImage = baseImage {
-                drawFlipped(cgImage, in: context)
-            }
-            if overlayHasContent, let overlayImage = overlayContext?.makeImage() {
-                // Matches the committed result: the Rust composite scales the
-                // overlay's alpha by brushOpacity.
-                drawFlipped(overlayImage, in: context, alpha: brushOpacity)
-            }
+        }
+
+        // Paint can only land inside the active layer's extent; when that is
+        // smaller than the canvas, show the boundary so strokes and text
+        // outside it don't silently vanish.
+        if tool == .brush || tool == .eraser || tool == .text,
+           let layerRect = activeLayerRect,
+           layerRect != CGRect(origin: .zero, size: bounds.size) {
+            drawActiveLayerBounds(layerRect)
         }
 
         if let selection = selectionRect {
@@ -216,16 +254,11 @@ final class ImageCanvasView: NSView {
 
     /// Un-flips the context so the CGImage is not drawn upside down, then
     /// draws it over the full image rect.
-    private func drawFlipped(
-        _ cgImage: CGImage, in context: CGContext,
-        blendMode: CGBlendMode = .normal, alpha: CGFloat = 1
-    ) {
+    private func drawFlipped(_ cgImage: CGImage, in context: CGContext) {
         context.saveGState()
         context.interpolationQuality = magnification >= 1.0 ? .none : .high
         context.translateBy(x: 0, y: bounds.height)
         context.scaleBy(x: 1, y: -1)
-        context.setBlendMode(blendMode)
-        context.setAlpha(alpha)
         context.draw(cgImage, in: CGRect(origin: .zero, size: bounds.size))
         context.restoreGState()
     }
@@ -253,6 +286,26 @@ final class ImageCanvasView: NSView {
         whitePath.lineWidth = lineWidth
         whitePath.setLineDash(dashPattern, count: dashPattern.count, phase: 4 / scale)
         NSColor.white.setStroke()
+        whitePath.stroke()
+    }
+
+    /// Subtle dashed outline (selection stroke style, thinner) marking the
+    /// active layer's extent for the paint tools.
+    private func drawActiveLayerBounds(_ rect: CGRect) {
+        let scale = magnification
+        let lineWidth = 0.5 / scale
+        let dashPattern: [CGFloat] = [4 / scale, 4 / scale]
+
+        let blackPath = NSBezierPath(rect: rect)
+        blackPath.lineWidth = lineWidth
+        blackPath.setLineDash(dashPattern, count: dashPattern.count, phase: 0)
+        NSColor.black.withAlphaComponent(0.6).setStroke()
+        blackPath.stroke()
+
+        let whitePath = NSBezierPath(rect: rect)
+        whitePath.lineWidth = lineWidth
+        whitePath.setLineDash(dashPattern, count: dashPattern.count, phase: 4 / scale)
+        NSColor.white.withAlphaComponent(0.6).setStroke()
         whitePath.stroke()
     }
 
@@ -306,6 +359,11 @@ final class ImageCanvasView: NSView {
         switch tool {
         case .select:
             dragAnchor = point
+        case .move:
+            // Unclamped: deltas stay honest when the drag leaves the canvas.
+            moveDragOrigin = convert(event.locationInWindow, from: nil)
+            NSCursor.closedHand.set()
+            onMoveBegin?()
         case .brush, .eraser:
             beginStroke(at: point)
         case .text:
@@ -319,6 +377,10 @@ final class ImageCanvasView: NSView {
         case .select:
             guard let anchor = dragAnchor else { return }
             setSelection(rect(from: anchor, to: clamp(point: raw)))
+        case .move:
+            guard let origin = moveDragOrigin else { return }
+            NSCursor.closedHand.set()
+            onMoveUpdate?(Int((raw.x - origin.x).rounded()), Int((raw.y - origin.y).rounded()))
         case .brush, .eraser:
             // No clamping: the image-sized overlay context clips naturally,
             // so a stroke that leaves the canvas paints up to the edge and
@@ -347,6 +409,11 @@ final class ImageCanvasView: NSView {
             } else {
                 setSelection(dragged)
             }
+        case .move:
+            guard moveDragOrigin != nil else { return }
+            moveDragOrigin = nil
+            window?.invalidateCursorRects(for: self)
+            onMoveEnd?()
         case .brush, .eraser:
             endStroke()
         case .text:
@@ -371,7 +438,9 @@ final class ImageCanvasView: NSView {
     // MARK: - Brush / eraser strokes
 
     private func beginStroke(at point: CGPoint) {
-        guard let context = ensureOverlayContext() else {
+        // The begin callback opens the document's live-edit session and may
+        // refuse (hidden layer); it must not fire if the overlay is missing.
+        guard let context = ensureOverlayContext(), onStrokeBegin?() == true else {
             NSSound.beep()
             return
         }
@@ -406,8 +475,7 @@ final class ImageCanvasView: NSView {
             x: point.x - brushSize / 2, y: point.y - brushSize / 2,
             width: brushSize, height: brushSize)
         context.fillEllipse(in: dot)
-        overlayHasContent = true
-        setNeedsDisplay(dot.insetBy(dx: -brushSize, dy: -brushSize))
+        emitStrokeUpdate()
     }
 
     private func continueStroke(to point: CGPoint) {
@@ -422,9 +490,19 @@ final class ImageCanvasView: NSView {
         context.addLine(to: point)
         context.strokePath()
         strokeLastPoint = point
-        overlayHasContent = true
-        let inflation = brushSize + 2
-        setNeedsDisplay(rect(from: last, to: point).insetBy(dx: -inflation, dy: -inflation))
+        emitStrokeUpdate()
+    }
+
+    /// Hands the accumulated overlay to the receiver, which repaints it onto
+    /// the pre-stroke document and swaps in the resulting projection (which
+    /// is what redraws the canvas — the overlay itself is never drawn).
+    private func emitStrokeUpdate() {
+        guard let data = overlayData else { return }
+        let erasing = tool == .eraser
+        onStrokeUpdate?(
+            UnsafePointer(data.assumingMemoryBound(to: UInt8.self)),
+            erasing ? RZ_COMPOSITE_ERASE : RZ_COMPOSITE_OVER,
+            Double(brushOpacity))
     }
 
     private func endStroke() {
@@ -432,22 +510,21 @@ final class ImageCanvasView: NSView {
         overlayContext?.restoreGState()
         strokeActive = false
         strokeLastPoint = nil
-        guard overlayHasContent, let data = overlayData else { return }
-        let erasing = tool == .eraser
-        onCommitOverlay?(
-            UnsafePointer(data.assumingMemoryBound(to: UInt8.self)),
-            erasing ? RZ_COMPOSITE_ERASE : RZ_COMPOSITE_OVER,
-            Double(brushOpacity),
-            erasing ? "Erase" : "Brush Stroke")
+        clearOverlay()
+        // Always fires once a stroke began: the live-edit session must
+        // close even if the whole stroke missed the layer.
+        onStrokeEnd?(tool == .eraser ? "Erase" : "Brush Stroke")
     }
 
-    /// Abandons any in-progress stroke without committing (tool switches).
+    /// Abandons any in-progress stroke without committing (tool switches,
+    /// Escape, window close); the receiver rolls the live edit back.
     private func cancelStroke() {
         strokeLastPoint = nil
         guard strokeActive else { return }
         overlayContext?.restoreGState()
         strokeActive = false
         clearOverlay()
+        onStrokeCancel?()
         needsDisplay = true
     }
 
@@ -553,10 +630,9 @@ final class ImageCanvasView: NSView {
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             context: nil)
         NSGraphicsContext.restoreGraphicsState()
-        overlayHasContent = true
 
         if let data = overlayData {
-            onCommitOverlay?(
+            onCommitTextOverlay?(
                 UnsafePointer(data.assumingMemoryBound(to: UInt8.self)),
                 RZ_COMPOSITE_OVER, 1.0, "Add Text")
         }
@@ -580,22 +656,51 @@ final class ImageCanvasView: NSView {
 
     // MARK: - Keyboard and cursor
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        // A window closing mid-drag never delivers mouseUp; the live edit
+        // must still roll back and close.
+        if newWindow == nil {
+            cancelStroke()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // Escape
-            // Strokes commit on mouseUp, so Escape does nothing special for
-            // them; it keeps meaning deselect.
+            if strokeActive {
+                // Abandon the in-progress stroke; the live edit rolls back.
+                cancelStroke()
+                return
+            }
             setSelection(nil)
             return
         }
-        // Bare tool keys, handled here only (never as menu key equivalents —
-        // they would steal keystrokes from text editing). The text view is
-        // first responder during sessions anyway.
+        // Arrow-key nudges for the move tool (Shift: 10px). Down is +y in the
+        // flipped image coordinate space.
+        if tool == .move, !hasActiveTextSession,
+           event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+            let step = event.modifierFlags.contains(.shift) ? 10 : 1
+            switch event.keyCode {
+            case 123: onMoveNudge?(-step, 0); return // left
+            case 124: onMoveNudge?(step, 0); return // right
+            case 125: onMoveNudge?(0, step); return // down
+            case 126: onMoveNudge?(0, -step); return // up
+            default:
+                break
+            }
+        }
+        // Bare tool keys (Photoshop-style), handled here only (never as menu
+        // key equivalents — they would steal keystrokes from text editing).
+        // The text view is first responder during sessions anyway.
         if !hasActiveTextSession,
            event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
            let characters = event.charactersIgnoringModifiers?.lowercased() {
             switch characters {
-            case "v":
+            case "m":
                 onToolKey?(.select)
+                return
+            case "v":
+                onToolKey?(.move)
                 return
             case "b":
                 onToolKey?(.brush)
@@ -623,6 +728,8 @@ final class ImageCanvasView: NSView {
         switch tool {
         case .select, .brush, .eraser:
             addCursorRect(bounds, cursor: .crosshair)
+        case .move:
+            addCursorRect(bounds, cursor: moveDragOrigin == nil ? .openHand : .closedHand)
         case .text:
             addCursorRect(bounds, cursor: .iBeam)
         }

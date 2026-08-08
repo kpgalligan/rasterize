@@ -3,6 +3,7 @@ import AppKit
 private extension NSToolbarItem.Identifier {
     static let editorTools = NSToolbarItem.Identifier("EditorTools")
     static let editorToolSelect = NSToolbarItem.Identifier("rz.tool.select")
+    static let editorToolMove = NSToolbarItem.Identifier("rz.tool.move")
     static let editorToolBrush = NSToolbarItem.Identifier("rz.tool.brush")
     static let editorToolEraser = NSToolbarItem.Identifier("rz.tool.eraser")
     static let editorToolText = NSToolbarItem.Identifier("rz.tool.text")
@@ -24,9 +25,12 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate {
             defer: false)
         window.contentViewController = EditorViewController(document: document)
 
-        // Initial content size: image size in points, clamped to 80% of the
-        // main screen's visible frame, minimum 480x320.
-        var contentSize = document.image?.pixelSize ?? NSSize(width: 480, height: 320)
+        // Initial content size: canvas size plus the editor chrome (layers
+        // panel 236 + separator, status bar 27), clamped to 80% of the main
+        // screen's visible frame, minimum 480x320.
+        var contentSize = document.doc?.canvasSize ?? NSSize(width: 480, height: 320)
+        contentSize.width += 237
+        contentSize.height += 27
         if let screen = NSScreen.main {
             let limit = screen.visibleFrame
             contentSize.width = min(contentSize.width, limit.width * 0.8)
@@ -42,8 +46,8 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate {
         // Window title tracks the document name via the standard
         // synchronizeWindowTitleWithDocumentName behavior; only the subtitle
         // is managed here (and by the editor after edits).
-        if let image = document.image {
-            window.subtitle = "\(image.width) × \(image.height) px"
+        if let doc = document.doc {
+            window.subtitle = "\(doc.width) × \(doc.height) px"
         }
 
         let toolbar = NSToolbar(identifier: "EditorToolbar")
@@ -87,6 +91,11 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate {
                 makeToolItem(
                     .editorToolSelect, label: "Select", symbol: "cursorarrow",
                     action: #selector(EditorViewController.selectSelectTool(_:))),
+                makeToolItem(
+                    .editorToolMove, label: "Move",
+                    symbol: "arrow.up.and.down.and.arrow.left.and.right",
+                    fallbackSymbol: "hand.raised",
+                    action: #selector(EditorViewController.selectMoveTool(_:))),
                 makeToolItem(
                     .editorToolBrush, label: "Brush", symbol: "paintbrush.pointed",
                     action: #selector(EditorViewController.selectBrushTool(_:))),
@@ -141,7 +150,8 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate {
     }
 
     private func makeToolItem(
-        _ identifier: NSToolbarItem.Identifier, label: String, symbol: String, action: Selector
+        _ identifier: NSToolbarItem.Identifier, label: String, symbol: String,
+        fallbackSymbol: String = "paintbrush", action: Selector
     ) -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: identifier)
         item.label = label
@@ -149,7 +159,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate {
         item.toolTip = label
         // The segment falls back to its label if neither symbol resolves.
         item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-            ?? NSImage(systemSymbolName: "paintbrush", accessibilityDescription: label)
+            ?? NSImage(systemSymbolName: fallbackSymbol, accessibilityDescription: label)
         item.action = action
         item.target = nil // resolve through the responder chain
         return item

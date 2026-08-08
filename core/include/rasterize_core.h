@@ -114,6 +114,197 @@ RzImage *rz_image_sharpen(const RzImage *img, float amount);
 bool rz_image_save(const RzImage *img, const char *path, RzFormat format,
                    uint8_t jpeg_quality, char **err_out);
 
+/* ------------------------------------------------------------------------ */
+/* Layered documents                                                         */
+/* ------------------------------------------------------------------------ */
+
+/* Opaque layered document: a canvas size plus an ordered stack of layers
+ * (index 0 = BOTTOM). Every layer has straight-alpha RGBA8 pixels of its own
+ * size, an integer canvas offset, a name, opacity, a blend mode, and a
+ * visibility flag. Layer pixel buffers are immutable and shared between
+ * document handles (copy-on-write), so rz_doc_clone and the pure "with_"/
+ * stack operations are cheap: they copy only what they change. Documents
+ * always contain at least one layer. Like RzImage, a given handle is not
+ * thread-safe; callers must serialize access to it. */
+typedef struct RzDocument RzDocument;
+
+/* Separable blend modes, W3C compositing semantics, sRGB-encoded f32 math. */
+typedef enum {
+  RZ_BLEND_NORMAL = 0,
+  RZ_BLEND_MULTIPLY = 1,
+  RZ_BLEND_SCREEN = 2,
+  RZ_BLEND_OVERLAY = 3,
+  RZ_BLEND_SOFT_LIGHT = 4,
+  RZ_BLEND_HARD_LIGHT = 5,
+  RZ_BLEND_DARKEN = 6,
+  RZ_BLEND_LIGHTEN = 7,
+  RZ_BLEND_DIFFERENCE = 8,
+  RZ_BLEND_EXCLUSION = 9,
+  RZ_BLEND_COLOR_DODGE = 10,
+  RZ_BLEND_COLOR_BURN = 11,
+  RZ_BLEND_ADDITION = 12,
+  RZ_BLEND_SUBTRACT = 13,
+} RzBlendMode;
+
+/* Opens a document. Sniffing order: files starting "RZDC" are native
+ * Rasterize documents (layers preserved); "8BPS" are Photoshop documents,
+ * imported as one layer per PSD raster layer (name, visibility, opacity,
+ * best-effort blend-mode mapping; on any per-layer failure falls back to a
+ * single flattened layer); anything else decodes via rz_image_open rules to
+ * a single "Background" layer. Errors as in rz_image_open. */
+RzDocument *rz_doc_open(const char *path, char **err_out);
+
+/* Wraps an image as a single-"Background"-layer document. NULL if img NULL. */
+RzDocument *rz_doc_from_image(const RzImage *img);
+
+/* Cheap copy (shares layer pixels). NULL only if doc is NULL. */
+RzDocument *rz_doc_clone(const RzDocument *doc);
+void rz_doc_free(RzDocument *doc);
+
+/* Writes the native RZDC format (all layers preserved). Atomic like
+ * rz_image_save. The writer enforces the reader's limits so every file it
+ * produces can be read back: more than 1024 layers or a layer PNG over
+ * 512 MiB is an error; layer names longer than 64 KiB are truncated on a
+ * UTF-8 character boundary. Layout (little-endian): "RZDC", u32 version=1,
+ * u32 canvas width, u32 canvas height, u32 layer count; then per layer
+ * bottom-to-top: u32 name byte length + UTF-8 name, i32 offset x, i32
+ * offset y, f32 opacity, u32 blend mode, u8 visible, u32 PNG byte length +
+ * PNG-encoded RGBA8 layer pixels. */
+bool rz_doc_save_native(const RzDocument *doc, const char *path,
+                        char **err_out);
+
+uint32_t rz_doc_width(const RzDocument *doc);
+uint32_t rz_doc_height(const RzDocument *doc);
+size_t rz_doc_layer_count(const RzDocument *doc);
+
+/* Layer getters. Out-of-range idx: NULL / 0 / RZ_BLEND_NORMAL / false.
+ * rz_doc_layer_name returns a heap string freed with rz_string_free. */
+char *rz_doc_layer_name(const RzDocument *doc, size_t idx);
+float rz_doc_layer_opacity(const RzDocument *doc, size_t idx);
+RzBlendMode rz_doc_layer_blend_mode(const RzDocument *doc, size_t idx);
+bool rz_doc_layer_visible(const RzDocument *doc, size_t idx);
+int32_t rz_doc_layer_offset_x(const RzDocument *doc, size_t idx);
+int32_t rz_doc_layer_offset_y(const RzDocument *doc, size_t idx);
+uint32_t rz_doc_layer_width(const RzDocument *doc, size_t idx);
+uint32_t rz_doc_layer_height(const RzDocument *doc, size_t idx);
+
+/* Copy of a layer's pixels at the layer's own size. */
+RzImage *rz_doc_layer_image(const RzDocument *doc, size_t idx);
+
+/* Aspect-fit thumbnail of a layer, longest side == max_side (min 1). */
+RzImage *rz_doc_layer_thumbnail(const RzDocument *doc, size_t idx,
+                                uint32_t max_side);
+
+/* Canvas-sized projection: visible layers composited bottom-to-top in f32,
+ * straight-alpha result. Compositing follows the W3C model: with backdrop
+ * (Cb, ab), source layer (Cs, as' = as * opacity) and blend function B:
+ *   ao = as' + ab*(1-as')
+ *   Co = ( as'*(1-ab)*Cs + as'*ab*B(Cb,Cs) + (1-as')*ab*Cb ) / ao   (ao > 0)
+ * Invisible layers are skipped; areas a layer does not cover use Cb. */
+RzImage *rz_doc_flattened(const RzDocument *doc);
+
+/* Pure per-layer setters: return a NEW document (input untouched), NULL on
+ * out-of-range idx or NULL args. Opacity is clamped to [0,1]. */
+RzDocument *rz_doc_with_layer_name(const RzDocument *doc, size_t idx,
+                                   const char *name);
+RzDocument *rz_doc_with_layer_opacity(const RzDocument *doc, size_t idx,
+                                      float opacity);
+RzDocument *rz_doc_with_layer_blend_mode(const RzDocument *doc, size_t idx,
+                                         RzBlendMode mode);
+RzDocument *rz_doc_with_layer_visible(const RzDocument *doc, size_t idx,
+                                      bool visible);
+RzDocument *rz_doc_with_layer_offset(const RzDocument *doc, size_t idx,
+                                     int32_t x, int32_t y);
+
+/* Replaces a layer's pixels (any size; offset and properties kept). */
+RzDocument *rz_doc_with_layer_pixels(const RzDocument *doc, size_t idx,
+                                     const RzImage *img);
+
+/* Stack operations (all pure). Insertion index semantics: the new layer is
+ * inserted ABOVE idx (i.e. at position idx+1); idx must be in range. */
+RzDocument *rz_doc_adding_layer(const RzDocument *doc, size_t idx,
+                                const char *name); /* transparent, canvas-sized, offset 0 */
+RzDocument *rz_doc_adding_image_layer(const RzDocument *doc, size_t idx,
+                                      const RzImage *img, const char *name);
+RzDocument *rz_doc_duplicating_layer(const RzDocument *doc, size_t idx);
+RzDocument *rz_doc_removing_layer(const RzDocument *doc, size_t idx); /* NULL if last layer */
+RzDocument *rz_doc_moving_layer(const RzDocument *doc, size_t from, size_t to);
+
+/* Merges layer idx (idx >= 1) into the layer below it. BOTH layers' blend
+ * modes and opacities are baked into the merged pixels (same math as the
+ * projection, the lower compositing onto a transparent backdrop), so the
+ * merged layer is RZ_BLEND_NORMAL at opacity 1.0; it keeps only the LOWER
+ * layer's name and visibility and covers the union of both layers' extents.
+ * An invisible upper layer is simply removed. NULL if idx == 0 / out of
+ * range, or if the LOWER layer is hidden (the merge would discard the upper
+ * layer's content). */
+RzDocument *rz_doc_merging_down(const RzDocument *doc, size_t idx);
+
+/* Single-layer document containing the projection, named "Background". */
+RzDocument *rz_doc_flattening(const RzDocument *doc);
+
+/* Paints a CANVAS-frame premultiplied overlay (as in rz_image_composite;
+ * w/h must equal the canvas size) onto layer idx, mapped through the
+ * layer's offset. Overlay areas outside the layer's extent are ignored
+ * (the layer does NOT grow). Modes/alpha as rz_image_composite. NULL when
+ * the layer's extent does not intersect the canvas at all (no pixel could
+ * change, so there is nothing to paint). */
+RzDocument *rz_doc_painting_layer(const RzDocument *doc, size_t idx,
+                                  const uint8_t *src, uint32_t w, uint32_t h,
+                                  RzCompositeMode mode, float alpha);
+
+/* Whole-document geometry: every layer's pixels and offset transform
+ * together with the canvas. */
+RzDocument *rz_doc_rotate90(const RzDocument *doc);
+RzDocument *rz_doc_rotate180(const RzDocument *doc);
+RzDocument *rz_doc_rotate270(const RzDocument *doc);
+RzDocument *rz_doc_flip_horizontal(const RzDocument *doc);
+RzDocument *rz_doc_flip_vertical(const RzDocument *doc);
+
+/* Crop moves the canvas window: canvas becomes w*h, layer offsets shift by
+ * (-x, -y), layer pixels are untouched (content outside the canvas is
+ * retained and can be revealed by moving layers). Bounds-checked like
+ * rz_image_crop against the CANVAS rect. */
+RzDocument *rz_doc_crop(const RzDocument *doc, uint32_t x, uint32_t y,
+                        uint32_t w, uint32_t h);
+
+/* Scales the canvas and every layer (sizes and offsets) proportionally.
+ * Limits as rz_image_resize. */
+RzDocument *rz_doc_resize(const RzDocument *doc, uint32_t w, uint32_t h,
+                          RzResizeFilter filter);
+
+/* ------------------------------------------------------------------------ */
+/* Additional filters (pure RzImage operations, NULL on invalid args)       */
+/* ------------------------------------------------------------------------ */
+
+/* Rotates hue by degrees (any finite value; NULL on NaN). Alpha untouched. */
+RzImage *rz_image_hue_rotate(const RzImage *img, float degrees);
+
+/* Levels: maps [black, white] to [0,1] then applies gamma (out = t^(1/g)).
+ * Requires 0 <= black < white <= 1 and gamma in [0.1, 10]; NULL otherwise. */
+RzImage *rz_image_levels(const RzImage *img, float black, float white,
+                         float gamma);
+
+/* Luma threshold at level in [0,1]: output pixels become opaque-preserving
+ * black or white by Rec.709 luma; alpha untouched. */
+RzImage *rz_image_threshold(const RzImage *img, float level);
+
+/* Reduces each color channel to `levels` evenly spaced values (2..=64). */
+RzImage *rz_image_posterize(const RzImage *img, uint32_t levels);
+
+/* Mosaic: block*block cells (1..=1024) averaged (alpha-weighted). */
+RzImage *rz_image_pixelate(const RzImage *img, uint32_t block);
+
+/* Additive uniform noise, amount in (0,1]; deterministic for a given seed.
+ * Alpha untouched. */
+RzImage *rz_image_noise(const RzImage *img, float amount, uint64_t seed);
+
+/* Sobel edge magnitude on luma, rendered as an opaque grayscale image. */
+RzImage *rz_image_edge_detect(const RzImage *img);
+
+/* Emboss: 3x3 directional relief kernel on luma around mid-gray, opaque. */
+RzImage *rz_image_emboss(const RzImage *img);
+
 /* Frees strings returned via err_out parameters. NULL is a safe no-op. */
 void rz_string_free(char *s);
 

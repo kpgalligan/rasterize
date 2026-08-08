@@ -4,6 +4,7 @@ import AppKit
 /// segment indices.
 enum EditorTool: Int {
     case select = 0
+    case move
     case brush
     case eraser
     case text
@@ -37,6 +38,21 @@ final class EditorViewController: NSViewController {
     private var scrollTopToRoot: NSLayoutConstraint!
     private var scrollTopToOptions: NSLayoutConstraint!
 
+    // Layers panel (right side, toggled by View > Show/Hide Layers).
+    private var layersPanel: LayersPanelViewController!
+    private var panelSeparator: NSBox!
+    private var scrollTrailingToRoot: NSLayoutConstraint!
+    private var scrollTrailingToPanel: NSLayoutConstraint!
+    private var layersPanelVisible = true
+
+    // Move-tool drag state: the active layer's offset when the drag began.
+    private var moveStartOffset: (x: Int, y: Int)?
+
+    // Brush/eraser drag state: the document handle when the stroke began.
+    // Every stroke tick repaints the whole overlay onto this base, so the
+    // live projection always shows the committed result.
+    private var strokeBase: RasterDocument?
+
     // Last-used paint options (session-only; no persistence).
     private var brushSize: CGFloat = 24
     private var brushOpacity: CGFloat = 1.0
@@ -65,7 +81,7 @@ final class EditorViewController: NSViewController {
     // MARK: - View construction
 
     override func loadView() {
-        let root = FileDropView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let root = FileDropView(frame: NSRect(x: 0, y: 0, width: 1040, height: 600))
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.allowsMagnification = true
@@ -79,21 +95,65 @@ final class EditorViewController: NSViewController {
         scrollView.usesPredominantAxisScrolling = false
         scrollView.documentView = canvas
 
-        if let image = document?.image {
-            canvas.frame = NSRect(origin: .zero, size: image.pixelSize)
-            canvas.image = image.makeCGImage()
+        if let document = document, let doc = document.doc {
+            canvas.frame = NSRect(origin: .zero, size: doc.canvasSize)
+            canvas.image = document.projection?.makeCGImage()
         }
         canvas.onSelectionChange = { [weak self] _ in self?.updateStatus() }
-        canvas.onCommitOverlay = { [weak self] data, mode, alpha, actionName in
-            self?.performEdit(actionName) {
-                $0.composited(
-                    premultipliedOverlay: data, width: $0.width, height: $0.height,
-                    mode: mode, alpha: alpha)
+        canvas.onStrokeBegin = { [weak self] in
+            guard let self = self, let document = self.document, let doc = document.doc,
+                  doc.layerInfo(document.activeLayerIndex)?.visible == true
+            else { return false } // hidden layer: refuse instead of painting invisibly
+            self.strokeBase = doc
+            document.beginLiveEdit()
+            return true
+        }
+        canvas.onStrokeUpdate = { [weak self] data, mode, alpha in
+            guard let self = self, let document = self.document, let base = self.strokeBase
+            else { return }
+            let idx = document.activeLayerIndex
+            // nil = the stroke has missed the layer's extent entirely so far;
+            // skip the tick (the projection is already correct).
+            if let updated = base.paintingLayer(idx, overlay: data, w: base.width, h: base.height,
+                                                mode: mode, alpha: alpha) {
+                document.updateLiveEdit(updated)
+            }
+        }
+        canvas.onStrokeEnd = { [weak self] actionName in
+            guard let self = self, let document = self.document else { return }
+            self.strokeBase = nil
+            // endLiveEdit no-ops when the handle never changed, so a stroke
+            // that entirely missed the layer registers no undo step.
+            document.endLiveEdit(actionName)
+        }
+        canvas.onStrokeCancel = { [weak self] in
+            guard let self = self, let document = self.document,
+                  let base = self.strokeBase
+            else { return }
+            self.strokeBase = nil
+            // Restoring the snapshot makes endLiveEdit a same-handle no-op:
+            // the abandoned stroke leaves no undo step and no image change.
+            document.updateLiveEdit(base)
+            document.endLiveEdit("Cancel Stroke")
+        }
+        canvas.onCommitTextOverlay = { [weak self] data, mode, alpha, actionName in
+            guard let self = self, let document = self.document else { return }
+            let idx = document.activeLayerIndex
+            // The session is already torn down; committing onto a hidden
+            // layer would invisibly dirty the document, so refuse.
+            guard document.doc?.layerInfo(idx)?.visible == true else {
+                NSSound.beep()
+                return
+            }
+            document.applyEdit(actionName) { doc in
+                doc.paintingLayer(idx, overlay: data, w: doc.width, h: doc.height,
+                                  mode: mode, alpha: alpha)
             }
         }
         canvas.onToolKey = { [weak self] tool in
             switch tool {
             case .select: self?.selectTool(.select)
+            case .move: self?.selectTool(.move)
             case .brush: self?.selectTool(.brush)
             case .eraser: self?.selectTool(.eraser)
             case .text: self?.selectTool(.text)
@@ -105,6 +165,35 @@ final class EditorViewController: NSViewController {
             self.sizeSlider.doubleValue = Double(newSize)
             self.sizeField.integerValue = Int(newSize.rounded())
             self.canvas.brushSize = newSize
+        }
+        canvas.onMoveBegin = { [weak self] in
+            guard let self = self, let document = self.document, let doc = document.doc,
+                  let info = doc.layerInfo(document.activeLayerIndex)
+            else { return }
+            self.moveStartOffset = (info.offsetX, info.offsetY)
+            document.beginLiveEdit()
+        }
+        canvas.onMoveUpdate = { [weak self] dx, dy in
+            guard let self = self, let document = self.document, let doc = document.doc,
+                  let start = self.moveStartOffset
+            else { return }
+            let idx = document.activeLayerIndex
+            if let updated = doc.withLayerOffset(idx, start.x + dx, start.y + dy) {
+                document.updateLiveEdit(updated)
+            }
+        }
+        canvas.onMoveEnd = { [weak self] in
+            guard let self = self, let document = self.document else { return }
+            self.moveStartOffset = nil
+            document.endLiveEdit("Move Layer")
+        }
+        canvas.onMoveNudge = { [weak self] dx, dy in
+            guard let self = self, let document = self.document else { return }
+            let idx = document.activeLayerIndex
+            document.applyEdit("Move Layer") { doc in
+                guard let info = doc.layerInfo(idx) else { return nil }
+                return doc.withLayerOffset(idx, info.offsetX + dx, info.offsetY + dy)
+            }
         }
 
         buildOptionsBar()
@@ -148,11 +237,28 @@ final class EditorViewController: NSViewController {
         zoomPopup = popup
         zoomTitleItem = titleItem
 
+        // Layers panel + its 1px separator line.
+        layersPanel = LayersPanelViewController()
+        layersPanel.document = document
+        layersPanel.onActiveLayerChange = { [weak self] in
+            self?.updateStatus()
+            self?.updateActiveLayerRect()
+        }
+        addChild(layersPanel)
+        let panelView = layersPanel.view
+        panelView.translatesAutoresizingMaskIntoConstraints = false
+
+        panelSeparator = NSBox()
+        panelSeparator.boxType = .separator
+        panelSeparator.translatesAutoresizingMaskIntoConstraints = false
+
         statusBar.addSubview(separator)
         statusBar.addSubview(statusLabel)
         statusBar.addSubview(popup)
         root.addSubview(optionsBar)
         root.addSubview(scrollView)
+        root.addSubview(panelSeparator)
+        root.addSubview(panelView)
         root.addSubview(statusBar)
 
         NSLayoutConstraint.activate([
@@ -162,8 +268,17 @@ final class EditorViewController: NSViewController {
             optionsBar.heightAnchor.constraint(equalToConstant: 30),
 
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+
+            panelView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            panelView.widthAnchor.constraint(equalToConstant: 236),
+            panelView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            panelView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+
+            panelSeparator.trailingAnchor.constraint(equalTo: panelView.leadingAnchor),
+            panelSeparator.widthAnchor.constraint(equalToConstant: 1),
+            panelSeparator.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            panelSeparator.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             statusBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             statusBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -187,6 +302,12 @@ final class EditorViewController: NSViewController {
         // tool, bar hidden) and the options bar's bottom (all other tools).
         scrollTopToRoot = scrollView.topAnchor.constraint(equalTo: root.topAnchor)
         scrollTopToOptions = scrollView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor)
+        // The scroll view's trailing swaps between the panel separator
+        // (layers visible) and the window edge (layers hidden).
+        scrollTrailingToRoot = scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor)
+        scrollTrailingToPanel = scrollView.trailingAnchor.constraint(
+            equalTo: panelSeparator.leadingAnchor)
+        scrollTrailingToPanel.isActive = true
 
         view = root
         updateOptionsBar()
@@ -295,6 +416,7 @@ final class EditorViewController: NSViewController {
             self, selector: #selector(imageDidChange(_:)),
             name: .imageDocumentImageDidChange, object: document)
         updateStatus()
+        updateActiveLayerRect()
         updateZoomLabel()
     }
 
@@ -302,10 +424,10 @@ final class EditorViewController: NSViewController {
         super.viewDidAppear()
         guard !didRunInitialZoom else { return }
         didRunInitialZoom = true
-        guard let image = document?.image else { return }
-        canvas.setFrameSize(image.pixelSize)
+        guard let doc = document?.doc else { return }
+        canvas.setFrameSize(doc.canvasSize)
         let visible = scrollView.contentSize
-        if image.pixelSize.width > visible.width || image.pixelSize.height > visible.height {
+        if doc.canvasSize.width > visible.width || doc.canvasSize.height > visible.height {
             zoomToFit()
         } else {
             applyZoom(1.0)
@@ -322,6 +444,7 @@ final class EditorViewController: NSViewController {
         currentTool = tool
         switch tool {
         case .select: canvas.tool = .select
+        case .move: canvas.tool = .move
         case .brush: canvas.tool = .brush
         case .eraser: canvas.tool = .eraser
         case .text: canvas.tool = .text
@@ -331,6 +454,7 @@ final class EditorViewController: NSViewController {
     }
 
     @objc func selectSelectTool(_ sender: Any?) { selectTool(.select) }
+    @objc func selectMoveTool(_ sender: Any?) { selectTool(.move) }
     @objc func selectBrushTool(_ sender: Any?) { selectTool(.brush) }
     @objc func selectEraserTool(_ sender: Any?) { selectTool(.eraser) }
     @objc func selectTextTool(_ sender: Any?) { selectTool(.text) }
@@ -349,7 +473,7 @@ final class EditorViewController: NSViewController {
         fontPopup.isHidden = tool != .text
         fontSizeField.isHidden = tool != .text
 
-        let barHidden = tool == .select
+        let barHidden = tool == .select || tool == .move
         optionsBar.isHidden = barHidden
         scrollTopToRoot.isActive = false
         scrollTopToOptions.isActive = false
@@ -439,8 +563,8 @@ final class EditorViewController: NSViewController {
     }
 
     func zoomToFit() {
-        guard let image = document?.image else { return }
-        let size = image.pixelSize
+        guard let doc = document?.doc else { return }
+        let size = doc.canvasSize
         guard size.width > 0, size.height > 0 else { return }
         let margin: CGFloat = 16
         let available = NSSize(
@@ -450,16 +574,16 @@ final class EditorViewController: NSViewController {
         applyZoom(min(scale, 8)) // fit may exceed 100% for small images, capped at 8
     }
 
-    // MARK: - Image change
+    // MARK: - Document change
 
     @objc private func imageDidChange(_ note: Notification) {
         guard let document = document,
               (note.object as? ImageDocument) === document,
-              let image = document.image
+              let doc = document.doc
         else { return }
-        let newSize = image.pixelSize
+        let newSize = doc.canvasSize
         let dimensionsChanged = canvas.frame.size != newSize
-        canvas.image = image.makeCGImage()
+        canvas.image = document.projection?.makeCGImage()
         canvas.previewImage = nil
         canvas.setFrameSize(newSize)
         if dimensionsChanged {
@@ -470,21 +594,40 @@ final class EditorViewController: NSViewController {
         }
         canvas.needsDisplay = true
         updateStatus()
-        view.window?.subtitle = "\(image.width) × \(image.height) px"
+        updateActiveLayerRect()
+        view.window?.subtitle = "\(doc.width) × \(doc.height) px"
     }
 
     // MARK: - Status bar
 
     private func updateStatus() {
-        guard let image = document?.image else {
+        guard let document = document, let doc = document.doc else {
             statusLabel.stringValue = ""
             return
         }
-        var text = "\(image.width) × \(image.height) px"
+        var text = "\(doc.width) × \(doc.height) px"
         if let selection = canvas.selectionRect {
             text += " — sel \(Int(selection.width))×\(Int(selection.height))"
         }
+        if let info = doc.layerInfo(document.activeLayerIndex) {
+            text += " · \(info.name)"
+        }
         statusLabel.stringValue = text
+    }
+
+    /// Pushes the active layer's extent (image-pixel coordinates) to the
+    /// canvas, which shows the boundary while a paint tool is active and
+    /// the layer doesn't cover the whole canvas.
+    private func updateActiveLayerRect() {
+        guard let document = document, let doc = document.doc,
+              let info = doc.layerInfo(document.activeLayerIndex)
+        else {
+            canvas.activeLayerRect = nil
+            return
+        }
+        canvas.activeLayerRect = CGRect(
+            x: CGFloat(info.offsetX), y: CGFloat(info.offsetY),
+            width: CGFloat(info.width), height: CGFloat(info.height))
     }
 
     private func updateZoomLabel() {
@@ -506,12 +649,20 @@ final class EditorViewController: NSViewController {
 
     // MARK: - Edit actions (responder chain)
 
-    private func performEdit(_ actionName: String, _ transform: (RasterImage) -> RasterImage?) {
+    private func performEdit(_ actionName: String, _ transform: (RasterDocument) -> RasterDocument?) {
         guard let document = document else {
             NSSound.beep()
             return
         }
         document.applyEdit(actionName, transform)
+    }
+
+    private func performLayerEdit(_ actionName: String, _ op: (RasterImage) -> RasterImage?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        document.applyToActiveLayer(actionName, op)
     }
 
     @objc func rotateCW(_ sender: Any?) {
@@ -539,8 +690,8 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        document.applyEdit("Crop") { image in
-            image.cropped(
+        document.applyEdit("Crop") { doc in
+            doc.cropped(
                 x: Int(selection.minX), y: Int(selection.minY),
                 w: Int(selection.width), h: Int(selection.height))
         }
@@ -554,6 +705,108 @@ final class EditorViewController: NSViewController {
         }
         presentAsSheet(ResizeSheetController(document: document))
     }
+
+    // MARK: - Layer actions (Layer menu + panel footer buttons)
+
+    @objc func newLayer(_ sender: Any?) {
+        guard let document = document, let doc = document.doc else {
+            NSSound.beep()
+            return
+        }
+        let idx = document.activeLayerIndex
+        let name = "Layer \(doc.layerCount + 1)"
+        let before = document.doc
+        document.applyEdit("New Layer") { $0.addingLayer(above: idx, name: name) }
+        guard document.doc !== before else { return }
+        document.activeLayerIndex = min(idx + 1, document.doc.layerCount - 1)
+        layersPanel.reload()
+        updateStatus()
+        updateActiveLayerRect()
+    }
+
+    @objc func duplicateLayer(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        let idx = document.activeLayerIndex
+        let before = document.doc
+        document.applyEdit("Duplicate Layer") { $0.duplicatingLayer(idx) }
+        guard document.doc !== before else { return }
+        document.activeLayerIndex = min(idx + 1, document.doc.layerCount - 1)
+        layersPanel.reload()
+        updateStatus()
+        updateActiveLayerRect()
+    }
+
+    @objc func deleteLayer(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        let idx = document.activeLayerIndex
+        document.applyEdit("Delete Layer") { $0.removingLayer(idx) }
+        // applyEdit re-clamps activeLayerIndex; the layer below (same index,
+        // or the new top) ends up selected.
+        layersPanel.reload()
+        updateStatus()
+        updateActiveLayerRect()
+    }
+
+    @objc func mergeDown(_ sender: Any?) {
+        guard let document = document, document.activeLayerIndex >= 1 else {
+            NSSound.beep()
+            return
+        }
+        let idx = document.activeLayerIndex
+        let before = document.doc
+        document.applyEdit("Merge Down") { $0.mergingDown(idx) }
+        guard document.doc !== before else { return }
+        document.activeLayerIndex = idx - 1
+        layersPanel.reload()
+        updateStatus()
+        updateActiveLayerRect()
+    }
+
+    @objc func flattenImage(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        document.applyEdit("Flatten Image") { $0.flattening() }
+        layersPanel.reload()
+        updateStatus()
+        updateActiveLayerRect()
+    }
+
+    @objc func pasteAsNewLayer(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        document.pasteAsNewLayer()
+        layersPanel.reload()
+        updateStatus()
+        updateActiveLayerRect()
+    }
+
+    // Bound to ⌘V through the responder chain, so a focused field editor
+    // (layer rename, sheet fields, canvas text session) claims paste: first
+    // and pastes text normally; canvas focus pastes as a new layer.
+    @objc func paste(_ sender: Any?) {
+        pasteAsNewLayer(sender)
+    }
+
+    @objc func toggleLayersPanel(_ sender: Any?) {
+        layersPanelVisible.toggle()
+        layersPanel.view.isHidden = !layersPanelVisible
+        panelSeparator.isHidden = !layersPanelVisible
+        scrollTrailingToRoot.isActive = false
+        scrollTrailingToPanel.isActive = false
+        (layersPanelVisible ? scrollTrailingToPanel : scrollTrailingToRoot).isActive = true
+    }
+
+    // MARK: - Filter sheets
 
     @objc func showAdjustments(_ sender: Any?) {
         guard let document = document else {
@@ -571,20 +824,78 @@ final class EditorViewController: NSViewController {
         presentAsSheet(BlurSheetController(document: document, canvas: canvas))
     }
 
+    @objc func showHueRotate(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(SliderSheetController.hueRotate(document: document, canvas: canvas))
+    }
+
+    @objc func showLevels(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(SliderSheetController.levels(document: document, canvas: canvas))
+    }
+
+    @objc func showThreshold(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(SliderSheetController.threshold(document: document, canvas: canvas))
+    }
+
+    @objc func showPosterize(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(SliderSheetController.posterize(document: document, canvas: canvas))
+    }
+
+    @objc func showPixelate(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(SliderSheetController.pixelate(document: document, canvas: canvas))
+    }
+
+    @objc func showAddNoise(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(SliderSheetController.addNoise(document: document, canvas: canvas))
+    }
+
+    // MARK: - One-shot filters (active layer)
+
     @objc func applyGrayscale(_ sender: Any?) {
-        performEdit("Grayscale") { $0.grayscaled() }
+        performLayerEdit("Grayscale") { $0.grayscaled() }
     }
 
     @objc func applyInvert(_ sender: Any?) {
-        performEdit("Invert") { $0.inverted() }
+        performLayerEdit("Invert") { $0.inverted() }
     }
 
     @objc func applySepia(_ sender: Any?) {
-        performEdit("Sepia") { $0.sepia() }
+        performLayerEdit("Sepia") { $0.sepia() }
     }
 
     @objc func applySharpen(_ sender: Any?) {
-        performEdit("Sharpen") { $0.sharpened(amount: 1.5) }
+        performLayerEdit("Sharpen") { $0.sharpened(amount: 1.5) }
+    }
+
+    @objc func applyEdgeDetect(_ sender: Any?) {
+        performLayerEdit("Edge Detect") { $0.edgeDetected() }
+    }
+
+    @objc func applyEmboss(_ sender: Any?) {
+        performLayerEdit("Emboss") { $0.embossed() }
     }
 
     // MARK: - Zoom actions
@@ -605,17 +916,17 @@ final class EditorViewController: NSViewController {
     }
 
     @objc func copy(_ sender: Any?) {
-        guard let image = document?.image else {
+        guard let projection = document?.projection else {
             NSSound.beep()
             return
         }
         let source: RasterImage?
         if let selection = canvas.selectionRect {
-            source = image.cropped(
+            source = projection.cropped(
                 x: Int(selection.minX), y: Int(selection.minY),
                 w: Int(selection.width), h: Int(selection.height))
         } else {
-            source = image
+            source = projection
         }
         guard let cgImage = source?.makeCGImage() else {
             NSSound.beep()
@@ -634,8 +945,6 @@ final class EditorViewController: NSViewController {
         pasteboard.writeObjects([item])
     }
 }
-
-// MARK: - Validation
 
 // MARK: - Undo plumbing
 
@@ -661,9 +970,12 @@ extension EditorViewController {
     }
 }
 
+// MARK: - Validation
+
 extension EditorViewController: NSUserInterfaceValidations {
     private static let toolActions: [Selector: EditorTool] = [
         #selector(selectSelectTool(_:)): .select,
+        #selector(selectMoveTool(_:)): .move,
         #selector(selectBrushTool(_:)): .brush,
         #selector(selectEraserTool(_:)): .eraser,
         #selector(selectTextTool(_:)): .text,
@@ -677,7 +989,7 @@ extension EditorViewController: NSUserInterfaceValidations {
     ]
 
     func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
-        guard document?.image != nil else { return false }
+        guard document?.doc != nil else { return false }
         // While a preview sheet is up, its captured base and the document must
         // not diverge: block every edit action delivered via key equivalents.
         guard view.window?.attachedSheet == nil else { return false }
@@ -702,6 +1014,22 @@ extension EditorViewController: NSUserInterfaceValidations {
         switch item.action {
         case #selector(cropToSelection(_:)), #selector(deselect(_:)):
             return canvas.selectionRect != nil
+        case #selector(deleteLayer(_:)):
+            return (document?.doc?.layerCount ?? 1) > 1
+        case #selector(mergeDown(_:)):
+            // The core refuses to merge into a hidden layer; mirror that
+            // here (and match the panel's merge button).
+            let active = document?.activeLayerIndex ?? 0
+            return active >= 1 && document?.doc?.layerInfo(active - 1)?.visible == true
+        case #selector(flattenImage(_:)):
+            return (document?.doc?.layerCount ?? 1) > 1
+        case #selector(pasteAsNewLayer(_:)), #selector(paste(_:)):
+            return NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
+        case #selector(toggleLayersPanel(_:)):
+            if let menuItem = item as? NSMenuItem {
+                menuItem.title = layersPanelVisible ? "Hide Layers" : "Show Layers"
+            }
+            return true
         case #selector(undo(_:)):
             if let menuItem = item as? NSMenuItem, let manager = activeUndoManager {
                 menuItem.title = manager.undoMenuItemTitle

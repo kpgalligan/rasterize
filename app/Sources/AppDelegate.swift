@@ -21,32 +21,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - New from Clipboard
 
     /// Opens the frontmost pasteboard image as a new untitled document
-    /// (Preview's ⌘N behavior). The bitmap is normalized to PNG and routed
-    /// through the Rust core so the document behaves exactly like an opened
-    /// file.
+    /// (Preview's ⌘N behavior). RasterImage.fromPasteboard normalizes the
+    /// bitmap to PNG and routes it through the Rust core so the document
+    /// behaves exactly like an opened file.
     @objc func newFromClipboard(_ sender: Any?) {
-        guard let pasted = NSImage(pasteboard: .general),
-              let tiff = pasted.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:])
+        guard let raster = RasterImage.fromPasteboard(),
+              let document = ImageDocument.makeUntitled(with: raster)
         else {
             NSSound.beep()
             return
         }
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(
-                "rasterize-clipboard-\(ProcessInfo.processInfo.globallyUniqueString).png")
-        do {
-            try png.write(to: tempURL)
-            defer { try? FileManager.default.removeItem(at: tempURL) }
-            let raster = try RasterImage.open(url: tempURL)
-            let document = ImageDocument.makeUntitled(with: raster)
-            NSDocumentController.shared.addDocument(document)
-            document.makeWindowControllers()
-            document.showWindows()
-        } catch {
-            NSApp.presentError(error)
-        }
+        NSDocumentController.shared.addDocument(document)
+        document.makeWindowControllers()
+        document.showWindows()
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -64,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(submenuItem(fileMenu()))
         mainMenu.addItem(submenuItem(editMenu()))
         mainMenu.addItem(submenuItem(imageMenu()))
+        mainMenu.addItem(submenuItem(layerMenu()))
         mainMenu.addItem(submenuItem(filtersMenu()))
         mainMenu.addItem(submenuItem(toolsMenu()))
         mainMenu.addItem(submenuItem(viewMenu()))
@@ -144,6 +132,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Redo", Selector(("redo:")), "z", [.command, .shift]))
         menu.addItem(.separator())
         menu.addItem(item("Copy", #selector(EditorViewController.copy(_:)), "c"))
+        menu.addItem(
+            item("Paste", Selector(("paste:")), "v"))
         menu.addItem(.separator())
         menu.addItem(item("Select All", #selector(EditorViewController.selectAll(_:)), "a"))
         menu.addItem(item("Deselect", #selector(EditorViewController.deselect(_:)), "d"))
@@ -169,18 +159,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return menu
     }
 
+    private func layerMenu() -> NSMenu {
+        let menu = NSMenu(title: "Layer")
+        menu.addItem(
+            item("New Layer", #selector(EditorViewController.newLayer(_:)), "n", [.command, .shift]))
+        menu.addItem(item("Duplicate Layer", #selector(EditorViewController.duplicateLayer(_:)), "j"))
+        menu.addItem(item("Delete Layer", #selector(EditorViewController.deleteLayer(_:))))
+        menu.addItem(.separator())
+        menu.addItem(
+            item("Merge Down", #selector(EditorViewController.mergeDown(_:)), "e", [.command, .shift]))
+        menu.addItem(item("Flatten Image", #selector(EditorViewController.flattenImage(_:))))
+        return menu
+    }
+
     private func filtersMenu() -> NSMenu {
         let menu = NSMenu(title: "Filters")
         menu.addItem(
             item(
                 "Adjust Colors…", #selector(EditorViewController.showAdjustments(_:)), "a",
                 [.command, .option]))
+        menu.addItem(item("Levels…", #selector(EditorViewController.showLevels(_:))))
+        menu.addItem(item("Hue Rotate…", #selector(EditorViewController.showHueRotate(_:))))
+        menu.addItem(item("Threshold…", #selector(EditorViewController.showThreshold(_:))))
+        menu.addItem(item("Posterize…", #selector(EditorViewController.showPosterize(_:))))
+        menu.addItem(.separator())
         menu.addItem(item("Grayscale", #selector(EditorViewController.applyGrayscale(_:))))
         menu.addItem(item("Invert", #selector(EditorViewController.applyInvert(_:)), "i"))
         menu.addItem(item("Sepia", #selector(EditorViewController.applySepia(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Gaussian Blur…", #selector(EditorViewController.showBlur(_:))))
         menu.addItem(item("Sharpen", #selector(EditorViewController.applySharpen(_:))))
+        menu.addItem(item("Pixelate…", #selector(EditorViewController.showPixelate(_:))))
+        menu.addItem(item("Add Noise…", #selector(EditorViewController.showAddNoise(_:))))
+        menu.addItem(item("Edge Detect", #selector(EditorViewController.applyEdgeDetect(_:))))
+        menu.addItem(item("Emboss", #selector(EditorViewController.applyEmboss(_:))))
         return menu
     }
 
@@ -190,6 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // from text editing.
         let menu = NSMenu(title: "Tools")
         menu.addItem(item("Select Tool", #selector(EditorViewController.selectSelectTool(_:))))
+        menu.addItem(item("Move Tool", #selector(EditorViewController.selectMoveTool(_:))))
         menu.addItem(item("Brush Tool", #selector(EditorViewController.selectBrushTool(_:))))
         menu.addItem(item("Eraser Tool", #selector(EditorViewController.selectEraserTool(_:))))
         menu.addItem(item("Text Tool", #selector(EditorViewController.selectTextTool(_:))))
@@ -207,6 +220,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Zoom Out", #selector(EditorViewController.zoomOutAction(_:)), "-"))
         menu.addItem(item("Actual Size", #selector(EditorViewController.zoomActualAction(_:)), "0"))
         menu.addItem(item("Zoom to Fit", #selector(EditorViewController.zoomFitAction(_:)), "9"))
+        menu.addItem(.separator())
+        // Title toggles between Show/Hide Layers in validateUserInterfaceItem.
+        menu.addItem(
+            item(
+                "Hide Layers", #selector(EditorViewController.toggleLayersPanel(_:)), "l",
+                [.command, .option]))
         return menu
     }
 

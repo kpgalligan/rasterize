@@ -41,7 +41,18 @@ targets:
         NSPrincipalClass: NSApplication
         NSHighResolutionCapable: true
         NSHumanReadableCopyright: ""
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.kgalligan.rasterize-document
+            UTTypeDescription: Rasterize Document
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification:
+              public.filename-extension: [rz]
         CFBundleDocumentTypes:
+          - CFBundleTypeName: Rasterize Document
+            LSItemContentTypes: [com.kgalligan.rasterize-document]
+            CFBundleTypeRole: Editor
+            NSDocumentClass: Rasterize.ImageDocument
+            LSHandlerRank: Owner
           - CFBundleTypeName: PNG Image
             LSItemContentTypes: [public.png]
             CFBundleTypeRole: Editor

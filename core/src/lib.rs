@@ -4,8 +4,12 @@
 //! The safe internal API lives here and in [`ops`]; all unsafe code is
 //! confined to [`ffi`].
 
+pub mod doc;
 pub mod ffi;
+pub mod ffi_doc;
+pub mod ffi_filters;
 mod ops;
+mod ops_filters;
 
 use std::fs::File;
 use std::io::{BufWriter, Write};

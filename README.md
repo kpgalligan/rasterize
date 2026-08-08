@@ -5,15 +5,24 @@ decoding, encoding, and manipulation.
 
 ## Features
 
-- Open PNG, JPEG, Photoshop (PSD, flattened composite), TIFF, BMP, GIF, WebP
+- **Layers**: full layer stack with per-layer opacity, visibility, offsets,
+  and 14 blend modes (W3C separable set: Multiply, Screen, Overlay, Soft/Hard
+  Light, Darken, Lighten, Difference, Exclusion, Dodge, Burn, Add, Subtract);
+  layers panel with thumbnails, inline rename, drag-reorder, and
+  new/delete/duplicate/merge-down/flatten; Move tool (V) with arrow-key
+  nudges; Paste as New Layer; PSD files import with their real layers; the
+  native `.rz` format saves the full layer stack losslessly
+- Open PNG, JPEG, Photoshop (PSD, layered), TIFF, BMP, GIF, WebP
   — EXIF orientation is applied on open, so camera photos display upright
 - Export a copy to PNG, JPEG (with quality control), TIFF, BMP, GIF, WebP;
   failed saves never truncate or delete an existing destination file
 - Smooth zoom (pinch, ⌘+/⌘-, fit, actual size) and pan
 - Rotate 90°/180°, flip horizontal/vertical
 - Selection-based crop, image resize with filter choice (up to 100 MP)
-- Brightness / contrast / saturation adjustments with live preview
-- Grayscale, invert, sepia, Gaussian blur, sharpen
+- Brightness / contrast / saturation, Levels, Hue Rotate, Threshold, and
+  Posterize adjustments with live in-context preview on the active layer
+- Grayscale, invert, sepia, Gaussian blur, sharpen, Pixelate, Add Noise,
+  Edge Detect, Emboss
 - Brush and eraser (size, opacity, color; `[`/`]` resize; 1 px pixel-snapped
   mode; strokes confine to an active selection) and on-canvas text
   (font/size/color, ⌘Return commits, Escape cancels) — tools switch via

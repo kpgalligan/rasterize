@@ -75,6 +75,52 @@ final class RasterImage {
     func sharpened(amount: Double) -> RasterImage? { wrap(rz_image_sharpen(ptr, Float(amount))) }
     func clone() -> RasterImage? { wrap(rz_image_clone(ptr)) }
 
+    func hueRotated(degrees: Double) -> RasterImage? {
+        wrap(rz_image_hue_rotate(ptr, Float(degrees)))
+    }
+
+    func levels(black: Double, white: Double, gamma: Double) -> RasterImage? {
+        wrap(rz_image_levels(ptr, Float(black), Float(white), Float(gamma)))
+    }
+
+    func thresholded(level: Double) -> RasterImage? {
+        wrap(rz_image_threshold(ptr, Float(level)))
+    }
+
+    func posterized(levels: Int) -> RasterImage? {
+        guard levels >= 2, levels <= 64 else { return nil }
+        return wrap(rz_image_posterize(ptr, UInt32(levels)))
+    }
+
+    func pixelated(block: Int) -> RasterImage? {
+        guard block >= 1, block <= 1024 else { return nil }
+        return wrap(rz_image_pixelate(ptr, UInt32(block)))
+    }
+
+    func noised(amount: Double, seed: UInt64) -> RasterImage? {
+        wrap(rz_image_noise(ptr, Float(amount), seed))
+    }
+
+    func edgeDetected() -> RasterImage? { wrap(rz_image_edge_detect(ptr)) }
+    func embossed() -> RasterImage? { wrap(rz_image_emboss(ptr)) }
+
+    /// Opens the frontmost pasteboard image as a RasterImage. The bitmap is
+    /// normalized to PNG and routed through the Rust core via a temp file so
+    /// the result behaves exactly like an opened file.
+    static func fromPasteboard(_ pasteboard: NSPasteboard = .general) -> RasterImage? {
+        guard let pasted = NSImage(pasteboard: pasteboard),
+              let tiff = pasted.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:])
+        else { return nil }
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "rasterize-clipboard-\(ProcessInfo.processInfo.globallyUniqueString).png")
+        guard (try? png.write(to: tempURL)) != nil else { return nil }
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        return try? RasterImage.open(url: tempURL)
+    }
+
     /// Composites a full-frame premultiplied RGBA8 overlay (top row first, no
     /// row padding) onto this image. `data` must point to width*height*4
     /// bytes; the dimensions must match this image exactly.
@@ -131,6 +177,232 @@ final class RasterImage {
             decode: nil,
             shouldInterpolate: true,
             intent: .defaultIntent)
+    }
+}
+
+extension RzBlendMode {
+    /// Header-order display list for the layers panel's blend-mode popup.
+    static let allBlendModes: [(RzBlendMode, String)] = [
+        (RZ_BLEND_NORMAL, "Normal"),
+        (RZ_BLEND_MULTIPLY, "Multiply"),
+        (RZ_BLEND_SCREEN, "Screen"),
+        (RZ_BLEND_OVERLAY, "Overlay"),
+        (RZ_BLEND_SOFT_LIGHT, "Soft Light"),
+        (RZ_BLEND_HARD_LIGHT, "Hard Light"),
+        (RZ_BLEND_DARKEN, "Darken"),
+        (RZ_BLEND_LIGHTEN, "Lighten"),
+        (RZ_BLEND_DIFFERENCE, "Difference"),
+        (RZ_BLEND_EXCLUSION, "Exclusion"),
+        (RZ_BLEND_COLOR_DODGE, "Color Dodge"),
+        (RZ_BLEND_COLOR_BURN, "Color Burn"),
+        (RZ_BLEND_ADDITION, "Addition"),
+        (RZ_BLEND_SUBTRACT, "Subtract"),
+    ]
+}
+
+/// Owning Swift wrapper around an `RzDocument *` handle from the Rust core:
+/// a canvas size plus a bottom-first layer stack. Handles are immutable;
+/// every operation returns a new handle. Handles share unchanged layer pixel
+/// buffers (copy-on-write), so clones and per-layer edits are cheap and the
+/// undo stack can keep whole-document snapshots.
+final class RasterDocument {
+    let ptr: OpaquePointer
+
+    init(owning pointer: OpaquePointer) {
+        self.ptr = pointer
+    }
+
+    deinit {
+        rz_doc_free(ptr)
+    }
+
+    static func open(url: URL) throws -> RasterDocument {
+        var err: UnsafeMutablePointer<CChar>? = nil
+        guard let handle = rz_doc_open(url.path, &err) else {
+            throw RasterCoreError(
+                message: takeErrorMessage(err, fallback: "Could not open \(url.lastPathComponent)."))
+        }
+        return RasterDocument(owning: handle)
+    }
+
+    /// Wraps an image as a single-"Background"-layer document.
+    static func from(image: RasterImage) -> RasterDocument? {
+        rz_doc_from_image(image.ptr).map { RasterDocument(owning: $0) }
+    }
+
+    func clone() -> RasterDocument? { wrap(rz_doc_clone(ptr)) }
+
+    var width: Int { Int(rz_doc_width(ptr)) }
+    var height: Int { Int(rz_doc_height(ptr)) }
+    var canvasSize: NSSize { NSSize(width: width, height: height) }
+    var layerCount: Int { Int(rz_doc_layer_count(ptr)) }
+
+    /// Value snapshot of one layer's metadata (index 0 = bottom layer).
+    struct LayerInfo {
+        let name: String
+        let opacity: Double
+        let blendMode: RzBlendMode
+        let visible: Bool
+        let offsetX: Int
+        let offsetY: Int
+        let width: Int
+        let height: Int
+    }
+
+    private func isValidIndex(_ idx: Int) -> Bool {
+        idx >= 0 && idx < layerCount
+    }
+
+    private func wrap(_ result: OpaquePointer?) -> RasterDocument? {
+        result.map { RasterDocument(owning: $0) }
+    }
+
+    private func wrapImage(_ result: OpaquePointer?) -> RasterImage? {
+        result.map { RasterImage(owning: $0) }
+    }
+
+    func layerInfo(_ idx: Int) -> LayerInfo? {
+        guard isValidIndex(idx) else { return nil }
+        let i = idx
+        var name = ""
+        if let cName = rz_doc_layer_name(ptr, i) {
+            name = String(cString: cName)
+            rz_string_free(cName)
+        }
+        return LayerInfo(
+            name: name,
+            opacity: Double(rz_doc_layer_opacity(ptr, i)),
+            blendMode: rz_doc_layer_blend_mode(ptr, i),
+            visible: rz_doc_layer_visible(ptr, i),
+            offsetX: Int(rz_doc_layer_offset_x(ptr, i)),
+            offsetY: Int(rz_doc_layer_offset_y(ptr, i)),
+            width: Int(rz_doc_layer_width(ptr, i)),
+            height: Int(rz_doc_layer_height(ptr, i)))
+    }
+
+    /// Copy of a layer's pixels at the layer's own size.
+    func layerImage(_ idx: Int) -> RasterImage? {
+        guard isValidIndex(idx) else { return nil }
+        return wrapImage(rz_doc_layer_image(ptr, idx))
+    }
+
+    /// Aspect-fit thumbnail of a layer, longest side == maxSide.
+    func layerThumbnail(_ idx: Int, maxSide: Int) -> RasterImage? {
+        guard isValidIndex(idx), maxSide > 0 else { return nil }
+        return wrapImage(rz_doc_layer_thumbnail(ptr, idx, UInt32(maxSide)))
+    }
+
+    /// Canvas-sized projection of the visible layers.
+    func flattened() -> RasterImage? { wrapImage(rz_doc_flattened(ptr)) }
+
+    // MARK: - Pure per-layer edits
+
+    func withLayerName(_ idx: Int, _ name: String) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_with_layer_name(ptr, idx, name))
+    }
+
+    func withLayerOpacity(_ idx: Int, _ opacity: Double) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_with_layer_opacity(ptr, idx, Float(opacity)))
+    }
+
+    func withLayerBlendMode(_ idx: Int, _ mode: RzBlendMode) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_with_layer_blend_mode(ptr, idx, mode))
+    }
+
+    func withLayerVisible(_ idx: Int, _ visible: Bool) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_with_layer_visible(ptr, idx, visible))
+    }
+
+    func withLayerOffset(_ idx: Int, _ x: Int, _ y: Int) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_with_layer_offset(ptr, idx, Int32(clamping: x), Int32(clamping: y)))
+    }
+
+    /// Replaces a layer's pixels (any size; offset and properties kept).
+    func withLayerPixels(_ idx: Int, _ image: RasterImage) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_with_layer_pixels(ptr, idx, image.ptr))
+    }
+
+    // MARK: - Stack operations
+
+    /// Inserts a transparent canvas-sized layer ABOVE `idx`.
+    func addingLayer(above idx: Int, name: String) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_adding_layer(ptr, idx, name))
+    }
+
+    /// Inserts `image` as a new layer ABOVE `idx`.
+    func addingImageLayer(above idx: Int, _ image: RasterImage, name: String) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_adding_image_layer(ptr, idx, image.ptr, name))
+    }
+
+    func duplicatingLayer(_ idx: Int) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_duplicating_layer(ptr, idx))
+    }
+
+    /// nil when removing the last remaining layer.
+    func removingLayer(_ idx: Int) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_removing_layer(ptr, idx))
+    }
+
+    func movingLayer(from: Int, to: Int) -> RasterDocument? {
+        guard isValidIndex(from), isValidIndex(to) else { return nil }
+        return wrap(rz_doc_moving_layer(ptr, from, to))
+    }
+
+    /// Merges layer `idx` (idx >= 1) into the layer below it.
+    func mergingDown(_ idx: Int) -> RasterDocument? {
+        guard idx >= 1, isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_merging_down(ptr, idx))
+    }
+
+    /// Single-layer document containing the projection.
+    func flattening() -> RasterDocument? { wrap(rz_doc_flattening(ptr)) }
+
+    /// Paints a CANVAS-frame premultiplied overlay (top row first, no row
+    /// padding) onto layer `idx`, mapped through the layer's offset. `w`/`h`
+    /// must equal the canvas size exactly.
+    func paintingLayer(
+        _ idx: Int, overlay data: UnsafePointer<UInt8>, w: Int, h: Int,
+        mode: RzCompositeMode, alpha: Double
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), w == width, h == height else { return nil }
+        return wrap(rz_doc_painting_layer(ptr, idx, data, UInt32(w), UInt32(h), mode, Float(alpha)))
+    }
+
+    // MARK: - Whole-document geometry
+
+    func rotated90() -> RasterDocument? { wrap(rz_doc_rotate90(ptr)) }
+    func rotated180() -> RasterDocument? { wrap(rz_doc_rotate180(ptr)) }
+    func rotated270() -> RasterDocument? { wrap(rz_doc_rotate270(ptr)) }
+    func flippedH() -> RasterDocument? { wrap(rz_doc_flip_horizontal(ptr)) }
+    func flippedV() -> RasterDocument? { wrap(rz_doc_flip_vertical(ptr)) }
+
+    func cropped(x: Int, y: Int, w: Int, h: Int) -> RasterDocument? {
+        guard x >= 0, y >= 0, w > 0, h > 0, x + w <= width, y + h <= height else { return nil }
+        return wrap(rz_doc_crop(ptr, UInt32(x), UInt32(y), UInt32(w), UInt32(h)))
+    }
+
+    func resized(w: Int, h: Int, filter: RzResizeFilter) -> RasterDocument? {
+        guard w > 0, h > 0, w * h <= RasterImage.maxResizePixels else { return nil }
+        return wrap(rz_doc_resize(ptr, UInt32(w), UInt32(h), filter))
+    }
+
+    /// Writes the native RZDC format (all layers preserved).
+    func saveNative(to url: URL) throws {
+        var err: UnsafeMutablePointer<CChar>? = nil
+        guard rz_doc_save_native(ptr, url.path, &err) else {
+            throw RasterCoreError(
+                message: takeErrorMessage(err, fallback: "Could not save \(url.lastPathComponent)."))
+        }
     }
 }
 
