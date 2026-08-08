@@ -1,0 +1,18 @@
+[package]
+name = "rasterize-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rasterize_core"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+image = "0.25"
+psd = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true

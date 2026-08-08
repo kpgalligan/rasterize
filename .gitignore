@@ -1,0 +1,7 @@
+/core/target/
+/build/
+/Rasterize.xcodeproj/
+/app/Info.plist
+xcuserdata/
+.DS_Store
+.idea/
