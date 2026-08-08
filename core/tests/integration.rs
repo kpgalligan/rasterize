@@ -665,8 +665,8 @@ fn exif_orientation_is_applied() {
         b'E', b'x', b'i', b'f', 0, 0, // Exif header
         0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, // TIFF, little-endian
         0x01, 0x00, // one IFD entry
-        0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, // no next IFD
+        0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // no next IFD
     ]);
     tagged.extend_from_slice(&plain[2..]);
     let tagged_path = dir.path().join("oriented.jpg");
@@ -676,7 +676,11 @@ fn exif_orientation_is_applied() {
     assert_eq!(dims(plain_img), (20, 10), "untagged JPEG keeps stored dims");
     free(plain_img);
     let oriented = open_ok(&tagged_path);
-    assert_eq!(dims(oriented), (10, 20), "orientation 6 must transpose dims");
+    assert_eq!(
+        dims(oriented),
+        (10, 20),
+        "orientation 6 must transpose dims"
+    );
     free(oriented);
 }
 
@@ -700,7 +704,10 @@ fn sixteen_bit_psd_is_rejected_with_error() {
     let c = cpath(&path);
     let mut err: *mut c_char = ptr::null_mut();
     let img = unsafe { rz_image_open(c.as_ptr(), &mut err) };
-    assert!(img.is_null(), "16-bit PSD must be rejected, not mis-decoded");
+    assert!(
+        img.is_null(),
+        "16-bit PSD must be rejected, not mis-decoded"
+    );
     let msg = take_err_string(err);
     assert!(
         msg.to_lowercase().contains("unsupported"),
@@ -733,6 +740,271 @@ fn failed_save_preserves_existing_destination() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.contains("rz-tmp"))
         .collect();
-    assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "temp files left behind: {leftovers:?}"
+    );
+    free(img);
+}
+
+// ------------------------------------------------------------- composite --
+
+const COMPOSITE_OVER: c_int = 0;
+const COMPOSITE_ERASE: c_int = 1;
+
+/// A `w`x`h` overlay buffer of PREMULTIPLIED RGBA8, every pixel `px`.
+fn solid_overlay(w: u32, h: u32, px: [u8; 4]) -> Vec<u8> {
+    px.iter()
+        .copied()
+        .cycle()
+        .take((w * h * 4) as usize)
+        .collect()
+}
+
+fn composite_ok(
+    img: *const RzImage,
+    src: &[u8],
+    w: u32,
+    h: u32,
+    mode: c_int,
+    alpha: f32,
+) -> *mut RzImage {
+    assert_eq!(src.len(), (w * h * 4) as usize, "test overlay sized wrong");
+    let out = unsafe { rz_image_composite(img, src.as_ptr(), w, h, mode, alpha) };
+    assert!(
+        !out.is_null(),
+        "composite(mode {mode}, alpha {alpha}) failed"
+    );
+    out
+}
+
+#[test]
+fn composite_transparent_overlay_is_byte_identical() {
+    let dir = tempfile::tempdir().unwrap();
+    let pattern = test_pattern(64, 48);
+    let img = open_pattern(&dir, "pattern.png", &pattern);
+    let overlay = vec![0u8; 64 * 48 * 4];
+    for mode in [COMPOSITE_OVER, COMPOSITE_ERASE] {
+        let out = composite_ok(img, &overlay, 64, 48, mode, 1.0);
+        assert_eq!(dims(out), (64, 48));
+        assert_eq!(
+            pixels(out),
+            *pattern.as_raw(),
+            "transparent overlay (mode {mode}) must be byte-identical"
+        );
+        free(out);
+    }
+    free(img);
+}
+
+#[test]
+fn composite_opaque_overlay_replaces_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let img = open_pattern(&dir, "pattern.png", &test_pattern(64, 48));
+    let red = solid_overlay(64, 48, [255, 0, 0, 255]);
+    let out = composite_ok(img, &red, 64, 48, COMPOSITE_OVER, 1.0);
+    assert_eq!(dims(out), (64, 48));
+    for (i, chunk) in pixels(out).chunks_exact(4).enumerate() {
+        assert_eq!(chunk, &[255, 0, 0, 255], "pixel {i} not opaque red");
+    }
+    free(out);
+    free(img);
+}
+
+#[test]
+fn composite_half_red_over_white() {
+    let dir = tempfile::tempdir().unwrap();
+    let white = RgbaImage::from_pixel(16, 12, Rgba([255, 255, 255, 255]));
+    let img = open_pattern(&dir, "white.png", &white);
+    // Premultiplied half-transparent red.
+    let overlay = solid_overlay(16, 12, [128, 0, 0, 128]);
+    let out = composite_ok(img, &overlay, 16, 12, COMPOSITE_OVER, 1.0);
+    for (i, chunk) in pixels(out).chunks_exact(4).enumerate() {
+        let expect = [255i32, 127, 127, 255];
+        for (c, (&got, want)) in chunk.iter().zip(expect).enumerate() {
+            assert!(
+                (i32::from(got) - want).abs() <= 2,
+                "pixel {i} channel {c}: got {got}, want ~{want}"
+            );
+        }
+    }
+    free(out);
+    free(img);
+}
+
+#[test]
+fn composite_sub_rect_leaves_outside_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let pattern = opaque_pattern(64, 48);
+    let img = open_pattern(&dir, "pattern.png", &pattern);
+    // Half-transparent red only inside x 8..24, y 4..16; transparent outside.
+    let (rx, ry, rw, rh) = (8u32, 4u32, 16u32, 12u32);
+    let mut overlay = vec![0u8; 64 * 48 * 4];
+    for y in ry..ry + rh {
+        for x in rx..rx + rw {
+            let i = ((y * 64 + x) * 4) as usize;
+            overlay[i..i + 4].copy_from_slice(&[128, 0, 0, 128]);
+        }
+    }
+    let out = composite_ok(img, &overlay, 64, 48, COMPOSITE_OVER, 1.0);
+    let op = pixels(out);
+    let src = pattern.as_raw();
+    let sa = 128.0f32 / 255.0;
+    for y in 0..48u32 {
+        for x in 0..64u32 {
+            let i = ((y * 64 + x) * 4) as usize;
+            let inside = (rx..rx + rw).contains(&x) && (ry..ry + rh).contains(&y);
+            if !inside {
+                assert_eq!(
+                    &op[i..i + 4],
+                    &src[i..i + 4],
+                    "outside pixel ({x},{y}) changed"
+                );
+                continue;
+            }
+            // Destination is opaque, so out_a = 1 and
+            // out_c = scp + dc * (1 - sa).
+            let scp = [128.0f32 / 255.0, 0.0, 0.0];
+            for c in 0..3 {
+                let dc = f32::from(src[i + c]) / 255.0;
+                let want = ((scp[c] + dc * (1.0 - sa)) * 255.0).round();
+                let got = f32::from(op[i + c]);
+                assert!(
+                    (got - want).abs() <= 2.0,
+                    "inside pixel ({x},{y}) channel {c}: got {got}, want ~{want}"
+                );
+            }
+            assert_eq!(op[i + 3], 255, "inside pixel ({x},{y}) alpha");
+        }
+    }
+    free(out);
+    free(img);
+}
+
+#[test]
+fn composite_alpha_parameter_scales_and_clamps() {
+    let dir = tempfile::tempdir().unwrap();
+    let img = open_pattern(&dir, "pattern.png", &test_pattern(64, 48));
+    let opaque_red = solid_overlay(64, 48, [255, 0, 0, 255]);
+    let half_red = solid_overlay(64, 48, [128, 0, 0, 128]);
+
+    // alpha 0.5 with an opaque overlay ~= overlay alpha 128 at alpha 1.0.
+    let scaled = composite_ok(img, &opaque_red, 64, 48, COMPOSITE_OVER, 0.5);
+    let baked = composite_ok(img, &half_red, 64, 48, COMPOSITE_OVER, 1.0);
+    for (i, (&a, &b)) in pixels(scaled).iter().zip(pixels(baked).iter()).enumerate() {
+        assert!(
+            (i32::from(a) - i32::from(b)).abs() <= 2,
+            "byte {i}: alpha 0.5 gave {a}, overlay 128 gave {b}"
+        );
+    }
+    free(scaled);
+    free(baked);
+
+    // Out-of-range alpha clamps to the [0, 1] endpoints exactly.
+    let hi = composite_ok(img, &opaque_red, 64, 48, COMPOSITE_OVER, 1.5);
+    let one = composite_ok(img, &opaque_red, 64, 48, COMPOSITE_OVER, 1.0);
+    assert_eq!(pixels(hi), pixels(one), "alpha 1.5 must behave like 1.0");
+    free(hi);
+    free(one);
+    let lo = composite_ok(img, &opaque_red, 64, 48, COMPOSITE_OVER, -0.5);
+    let zero = composite_ok(img, &opaque_red, 64, 48, COMPOSITE_OVER, 0.0);
+    assert_eq!(pixels(lo), pixels(zero), "alpha -0.5 must behave like 0.0");
+    free(lo);
+    free(zero);
+
+    // NaN alpha -> NULL.
+    let p =
+        unsafe { rz_image_composite(img, opaque_red.as_ptr(), 64, 48, COMPOSITE_OVER, f32::NAN) };
+    assert!(p.is_null(), "NaN alpha must return NULL");
+    free(img);
+}
+
+#[test]
+fn composite_erase_semantics() {
+    let dir = tempfile::tempdir().unwrap();
+    let pattern = test_pattern(64, 48);
+    let img = open_pattern(&dir, "pattern.png", &pattern);
+    let src = pattern.as_raw();
+
+    // Opaque overlay erases all alpha; color bytes unchanged.
+    let full = solid_overlay(64, 48, [77, 200, 13, 255]);
+    let erased = composite_ok(img, &full, 64, 48, COMPOSITE_ERASE, 1.0);
+    for (i, chunk) in pixels(erased).chunks_exact(4).enumerate() {
+        assert_eq!(
+            &chunk[..3],
+            &src[i * 4..i * 4 + 3],
+            "pixel {i} color changed"
+        );
+        assert_eq!(chunk[3], 0, "pixel {i} alpha not erased");
+    }
+    free(erased);
+
+    // Alpha-128 overlay (any color) halves destination alpha; color unchanged.
+    let half = solid_overlay(64, 48, [64, 32, 128, 128]);
+    let halved = composite_ok(img, &half, 64, 48, COMPOSITE_ERASE, 1.0);
+    for (i, chunk) in pixels(halved).chunks_exact(4).enumerate() {
+        assert_eq!(
+            &chunk[..3],
+            &src[i * 4..i * 4 + 3],
+            "pixel {i} color changed"
+        );
+        let want = f32::from(src[i * 4 + 3]) / 2.0;
+        assert!(
+            (f32::from(chunk[3]) - want).abs() <= 1.0,
+            "pixel {i} alpha: got {}, want ~{want}",
+            chunk[3]
+        );
+    }
+    free(halved);
+    free(img);
+}
+
+#[test]
+fn composite_guards() {
+    let dir = tempfile::tempdir().unwrap();
+    let img = open_pattern(&dir, "pattern.png", &test_pattern(64, 48));
+    // Oversized buffer so mismatched-dimension calls could never read past it
+    // even if the guard were broken.
+    let overlay = solid_overlay(65, 49, [0, 0, 0, 255]);
+
+    // Dimension mismatches -> NULL.
+    for (w, h) in [(65u32, 48u32), (64, 49), (63, 48), (64, 47), (0, 0)] {
+        let p = unsafe { rz_image_composite(img, overlay.as_ptr(), w, h, COMPOSITE_OVER, 1.0) };
+        assert!(p.is_null(), "dims ({w},{h}) must return NULL");
+    }
+
+    // NULL src -> NULL.
+    let p = unsafe { rz_image_composite(img, ptr::null(), 64, 48, COMPOSITE_OVER, 1.0) };
+    assert!(p.is_null(), "NULL src must return NULL");
+
+    // NULL img -> NULL.
+    let p =
+        unsafe { rz_image_composite(ptr::null(), overlay.as_ptr(), 64, 48, COMPOSITE_OVER, 1.0) };
+    assert!(p.is_null(), "NULL img must return NULL");
+
+    // Unknown mode -> NULL.
+    let good = solid_overlay(64, 48, [0, 0, 0, 255]);
+    let p = unsafe { rz_image_composite(img, good.as_ptr(), 64, 48, 99, 1.0) };
+    assert!(p.is_null(), "mode 99 must return NULL");
+
+    free(img);
+}
+
+#[test]
+fn composite_over_transparent_destination_unpremultiplies() {
+    let dir = tempfile::tempdir().unwrap();
+    // Fully transparent destination with junk color bytes underneath.
+    let clear = RgbaImage::from_pixel(16, 12, Rgba([9, 200, 33, 0]));
+    let img = open_pattern(&dir, "clear.png", &clear);
+    let overlay = solid_overlay(16, 12, [30, 200, 90, 255]);
+    let out = composite_ok(img, &overlay, 16, 12, COMPOSITE_OVER, 1.0);
+    for (i, chunk) in pixels(out).chunks_exact(4).enumerate() {
+        assert_eq!(
+            chunk,
+            &[30, 200, 90, 255],
+            "pixel {i}: opaque overlay over transparent dst must show its straight color"
+        );
+    }
+    free(out);
     free(img);
 }

@@ -75,6 +75,18 @@ final class RasterImage {
     func sharpened(amount: Double) -> RasterImage? { wrap(rz_image_sharpen(ptr, Float(amount))) }
     func clone() -> RasterImage? { wrap(rz_image_clone(ptr)) }
 
+    /// Composites a full-frame premultiplied RGBA8 overlay (top row first, no
+    /// row padding) onto this image. `data` must point to width*height*4
+    /// bytes; the dimensions must match this image exactly.
+    func composited(
+        premultipliedOverlay data: UnsafePointer<UInt8>,
+        width: Int, height: Int,
+        mode: RzCompositeMode, alpha: Double
+    ) -> RasterImage? {
+        guard width == self.width, height == self.height else { return nil }
+        return wrap(rz_image_composite(ptr, data, UInt32(width), UInt32(height), mode, Float(alpha)))
+    }
+
     func save(to url: URL, format: RzFormat, jpegQuality: Int) throws {
         var err: UnsafeMutablePointer<CChar>? = nil
         let quality = UInt8(min(max(jpegQuality, 1), 100))

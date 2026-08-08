@@ -81,6 +81,25 @@ RzImage *rz_image_grayscale(const RzImage *img);
 RzImage *rz_image_invert(const RzImage *img);
 RzImage *rz_image_sepia(const RzImage *img);
 
+typedef enum {
+  RZ_COMPOSITE_OVER = 0,  /* source-over painting (brush, text) */
+  RZ_COMPOSITE_ERASE = 1, /* source alpha removes destination alpha */
+} RzCompositeMode;
+
+/* Composites a full-frame overlay onto the image, returning a NEW image.
+ * `src` points to w*h*4 bytes of PREMULTIPLIED RGBA8 (the CoreGraphics
+ * bitmap-context layout), row-major, top row first, no row padding; w and h
+ * must equal the image's dimensions exactly. `alpha` is clamped to [0, 1] and
+ * scales the overlay's alpha before compositing; the result remains
+ * non-premultiplied. RZ_COMPOSITE_OVER paints the overlay over the image;
+ * RZ_COMPOSITE_ERASE uses the overlay's alpha to erase destination alpha and
+ * ignores the overlay's color. Where the overlay is fully transparent the
+ * destination bytes pass through exactly. Returns NULL if img or src is
+ * NULL, on dimension mismatch, on an unknown mode, or if alpha is NaN. */
+RzImage *rz_image_composite(const RzImage *img, const uint8_t *src,
+                            uint32_t w, uint32_t h, RzCompositeMode mode,
+                            float alpha);
+
 /* Gaussian blur. NULL if sigma <= 0 or not finite. */
 RzImage *rz_image_blur(const RzImage *img, float sigma);
 

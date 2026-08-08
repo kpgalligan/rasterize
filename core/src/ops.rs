@@ -127,6 +127,91 @@ pub(crate) fn sepia(img: &RgbaImage) -> RgbaImage {
     out
 }
 
+/// Composite mode, mirroring `RzCompositeMode` in the C header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompositeMode {
+    Over,
+    Erase,
+}
+
+impl CompositeMode {
+    /// Maps a raw `RzCompositeMode` value coming across the FFI.
+    pub(crate) fn from_c(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(CompositeMode::Over),
+            1 => Some(CompositeMode::Erase),
+            _ => None,
+        }
+    }
+}
+
+/// Composites a full-frame PREMULTIPLIED RGBA8 overlay (`src`, row-major, no
+/// row padding) onto the non-premultiplied `dst`, returning a new
+/// non-premultiplied image. `alpha` is clamped to [0, 1] and scales the
+/// overlay's alpha first. [`CompositeMode::Over`] paints the overlay over the
+/// destination; [`CompositeMode::Erase`] uses the overlay's alpha to erase
+/// destination alpha and ignores the overlay's color. Where the overlay is
+/// fully transparent the destination bytes pass through exactly.
+///
+/// Returns `None` if `alpha` is NaN or `src` is not exactly
+/// `width * height * 4` bytes.
+pub(crate) fn composite(
+    dst: &RgbaImage,
+    src: &[u8],
+    mode: CompositeMode,
+    alpha: f32,
+) -> Option<RgbaImage> {
+    if alpha.is_nan() {
+        return None;
+    }
+    let (w, h) = dst.dimensions();
+    let expected = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+    if src.len() != expected {
+        return None;
+    }
+    let a = alpha.clamp(0.0, 1.0);
+    let mut out = dst.clone();
+    for (op, sp) in out.pixels_mut().zip(src.chunks_exact(4)) {
+        // Fast path: a fully transparent overlay pixel passes the destination
+        // bytes through exactly (no float round-trip). For OVER the color
+        // bytes must also be zero — they always are in well-formed
+        // premultiplied data; malformed pixels fall through to the math.
+        let src_transparent = sp[3] == 0
+            && match mode {
+                CompositeMode::Over => sp[0] == 0 && sp[1] == 0 && sp[2] == 0,
+                CompositeMode::Erase => true,
+            };
+        if src_transparent {
+            continue;
+        }
+        let sa = (f32::from(sp[3]) / 255.0) * a;
+        let da = f32::from(op[3]) / 255.0;
+        match mode {
+            CompositeMode::Over => {
+                let out_a = sa + da * (1.0 - sa);
+                if out_a < 1e-6 {
+                    // Keep the destination color bytes so fully transparent
+                    // regions do not invent color fringes.
+                    op[3] = 0;
+                } else {
+                    for c in 0..3 {
+                        let scp = (f32::from(sp[c]) / 255.0) * a;
+                        let dc = f32::from(op[c]) / 255.0;
+                        let v = (scp + dc * da * (1.0 - sa)) / out_a;
+                        op[c] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    }
+                    op[3] = (out_a.clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            }
+            CompositeMode::Erase => {
+                let out_a = da * (1.0 - sa);
+                op[3] = (out_a.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+    }
+    Some(out)
+}
+
 /// Gaussian blur. Returns `None` if `sigma` is not finite or not positive.
 pub(crate) fn blur(img: &RgbaImage, sigma: f32) -> Option<RgbaImage> {
     if !sigma.is_finite() || sigma <= 0.0 {

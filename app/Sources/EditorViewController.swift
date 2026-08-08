@@ -1,5 +1,14 @@
 import AppKit
 
+/// Tools offered by the editor UI. Raw values are the toolbar group's
+/// segment indices.
+enum EditorTool: Int {
+    case select = 0
+    case brush
+    case eraser
+    case text
+}
+
 final class EditorViewController: NSViewController {
     private weak var document: ImageDocument?
 
@@ -9,6 +18,31 @@ final class EditorViewController: NSViewController {
     private var zoomPopup: NSPopUpButton!
     private var zoomTitleItem: NSMenuItem!
     private var didRunInitialZoom = false
+
+    private(set) var currentTool: EditorTool = .select
+
+    // Options bar (between the window content top and the scroll view).
+    private let optionsBar = NSStackView()
+    private let sizeLabel = NSTextField(labelWithString: "Size")
+    private let sizeSlider = NSSlider(value: 24, minValue: 1, maxValue: 200, target: nil, action: nil)
+    private let sizeField = NSTextField(string: "24")
+    private let opacityLabel = NSTextField(labelWithString: "Opacity")
+    private let opacitySlider = NSSlider(
+        value: 1.0, minValue: 0.05, maxValue: 1.0, target: nil, action: nil)
+    private let opacityValueLabel = NSTextField(labelWithString: "100%")
+    private let colorWell = NSColorWell()
+    private let fontLabel = NSTextField(labelWithString: "Font")
+    private let fontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let fontSizeField = NSTextField(string: "48")
+    private var scrollTopToRoot: NSLayoutConstraint!
+    private var scrollTopToOptions: NSLayoutConstraint!
+
+    // Last-used paint options (session-only; no persistence).
+    private var brushSize: CGFloat = 24
+    private var brushOpacity: CGFloat = 1.0
+    private var paintColor: NSColor = .black
+    private var fontFamily = "Helvetica Neue"
+    private var fontSize: CGFloat = 48
 
     private static let zoomLadder: [CGFloat] = [
         0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32,
@@ -50,6 +84,34 @@ final class EditorViewController: NSViewController {
             canvas.image = image.makeCGImage()
         }
         canvas.onSelectionChange = { [weak self] _ in self?.updateStatus() }
+        canvas.onCommitOverlay = { [weak self] data, mode, alpha, actionName in
+            self?.performEdit(actionName) {
+                $0.composited(
+                    premultipliedOverlay: data, width: $0.width, height: $0.height,
+                    mode: mode, alpha: alpha)
+            }
+        }
+        canvas.onToolKey = { [weak self] tool in
+            switch tool {
+            case .select: self?.selectTool(.select)
+            case .brush: self?.selectTool(.brush)
+            case .eraser: self?.selectTool(.eraser)
+            case .text: self?.selectTool(.text)
+            }
+        }
+        canvas.onBrushSizeKey = { [weak self] newSize in
+            guard let self = self else { return }
+            self.brushSize = newSize
+            self.sizeSlider.doubleValue = Double(newSize)
+            self.sizeField.integerValue = Int(newSize.rounded())
+            self.canvas.brushSize = newSize
+        }
+
+        buildOptionsBar()
+        canvas.brushSize = brushSize
+        canvas.paintColor = paintColor
+        canvas.brushOpacity = brushOpacity
+        canvas.textFont = currentFont()
 
         let statusBar = NSView()
         statusBar.translatesAutoresizingMaskIntoConstraints = false
@@ -89,11 +151,16 @@ final class EditorViewController: NSViewController {
         statusBar.addSubview(separator)
         statusBar.addSubview(statusLabel)
         statusBar.addSubview(popup)
+        root.addSubview(optionsBar)
         root.addSubview(scrollView)
         root.addSubview(statusBar)
 
         NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: root.topAnchor),
+            optionsBar.topAnchor.constraint(equalTo: root.topAnchor),
+            optionsBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            optionsBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            optionsBar.heightAnchor.constraint(equalToConstant: 30),
+
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
@@ -116,8 +183,98 @@ final class EditorViewController: NSViewController {
             popup.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
             popup.widthAnchor.constraint(greaterThanOrEqualToConstant: 76),
         ])
+        // The scroll view's top swaps between the window content top (select
+        // tool, bar hidden) and the options bar's bottom (all other tools).
+        scrollTopToRoot = scrollView.topAnchor.constraint(equalTo: root.topAnchor)
+        scrollTopToOptions = scrollView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor)
 
         view = root
+        updateOptionsBar()
+    }
+
+    private func buildOptionsBar() {
+        optionsBar.translatesAutoresizingMaskIntoConstraints = false
+        optionsBar.orientation = .horizontal
+        optionsBar.alignment = .centerY
+        optionsBar.spacing = 8
+        optionsBar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
+
+        for label in [sizeLabel, opacityLabel, fontLabel] {
+            label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        }
+
+        sizeSlider.isContinuous = true
+        sizeSlider.controlSize = .small
+        sizeSlider.target = self
+        sizeSlider.action = #selector(sizeSliderChanged(_:))
+        sizeSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        sizeSlider.doubleValue = Double(brushSize)
+
+        let sizeFormatter = NumberFormatter()
+        sizeFormatter.numberStyle = .none
+        sizeFormatter.allowsFloats = false
+        sizeFormatter.minimum = 1
+        sizeFormatter.maximum = 200
+        sizeField.formatter = sizeFormatter
+        sizeField.controlSize = .small
+        sizeField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        sizeField.integerValue = Int(brushSize)
+        sizeField.target = self
+        sizeField.action = #selector(sizeFieldChanged(_:))
+        sizeField.widthAnchor.constraint(equalToConstant: 44).isActive = true
+
+        opacitySlider.isContinuous = true
+        opacitySlider.controlSize = .small
+        opacitySlider.target = self
+        opacitySlider.action = #selector(opacitySliderChanged(_:))
+        opacitySlider.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        opacitySlider.doubleValue = Double(brushOpacity)
+
+        opacityValueLabel.font = NSFont.monospacedDigitSystemFont(
+            ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        opacityValueLabel.alignment = .right
+        opacityValueLabel.widthAnchor.constraint(equalToConstant: 40).isActive = true
+
+        colorWell.color = paintColor
+        colorWell.target = self
+        colorWell.action = #selector(colorChanged(_:))
+        colorWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        colorWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
+
+        let families = NSFontManager.shared.availableFontFamilies.sorted()
+        fontPopup.controlSize = .small
+        fontPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        fontPopup.addItems(withTitles: families)
+        if !families.contains(fontFamily) {
+            fontFamily = families.first ?? NSFont.systemFont(ofSize: fontSize).fontName
+        }
+        fontPopup.selectItem(withTitle: fontFamily)
+        fontPopup.target = self
+        fontPopup.action = #selector(fontFamilyChanged(_:))
+        fontPopup.widthAnchor.constraint(equalToConstant: 160).isActive = true
+
+        let fontSizeFormatter = NumberFormatter()
+        fontSizeFormatter.numberStyle = .none
+        fontSizeFormatter.allowsFloats = false
+        fontSizeFormatter.minimum = 6
+        fontSizeFormatter.maximum = 500
+        fontSizeField.formatter = fontSizeFormatter
+        fontSizeField.controlSize = .small
+        fontSizeField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        fontSizeField.integerValue = Int(fontSize)
+        fontSizeField.target = self
+        fontSizeField.action = #selector(fontSizeChanged(_:))
+        fontSizeField.widthAnchor.constraint(equalToConstant: 44).isActive = true
+
+        let controls: [NSView] = [
+            sizeLabel, sizeSlider, sizeField,
+            opacityLabel, opacitySlider, opacityValueLabel,
+            colorWell,
+            fontLabel, fontPopup, fontSizeField,
+        ]
+        for control in controls {
+            optionsBar.addArrangedSubview(control)
+        }
     }
 
     override func viewDidLoad() {
@@ -154,6 +311,98 @@ final class EditorViewController: NSViewController {
             applyZoom(1.0)
         }
         updateStatus()
+    }
+
+    // MARK: - Tools
+
+    func selectTool(_ tool: EditorTool) {
+        if currentTool == .text, tool != .text {
+            canvas.commitTextSession()
+        }
+        currentTool = tool
+        switch tool {
+        case .select: canvas.tool = .select
+        case .brush: canvas.tool = .brush
+        case .eraser: canvas.tool = .eraser
+        case .text: canvas.tool = .text
+        }
+        updateOptionsBar()
+        (view.window?.windowController as? EditorWindowController)?.reflectSelectedTool(tool)
+    }
+
+    @objc func selectSelectTool(_ sender: Any?) { selectTool(.select) }
+    @objc func selectBrushTool(_ sender: Any?) { selectTool(.brush) }
+    @objc func selectEraserTool(_ sender: Any?) { selectTool(.eraser) }
+    @objc func selectTextTool(_ sender: Any?) { selectTool(.text) }
+
+    private func updateOptionsBar() {
+        let tool = currentTool
+        let paintTool = tool == .brush || tool == .eraser
+        for control in [sizeLabel, sizeSlider, sizeField] as [NSView] {
+            control.isHidden = !paintTool
+        }
+        for control in [opacityLabel, opacitySlider, opacityValueLabel] as [NSView] {
+            control.isHidden = !paintTool
+        }
+        colorWell.isHidden = !(tool == .brush || tool == .text)
+        fontLabel.isHidden = tool != .text
+        fontPopup.isHidden = tool != .text
+        fontSizeField.isHidden = tool != .text
+
+        let barHidden = tool == .select
+        optionsBar.isHidden = barHidden
+        scrollTopToRoot.isActive = false
+        scrollTopToOptions.isActive = false
+        (barHidden ? scrollTopToRoot : scrollTopToOptions).isActive = true
+    }
+
+    private func currentFont() -> NSFont {
+        NSFontManager.shared.font(withFamily: fontFamily, traits: [], weight: 5, size: fontSize)
+            ?? .systemFont(ofSize: fontSize)
+    }
+
+    // MARK: - Options bar actions
+
+    @objc private func sizeSliderChanged(_ sender: Any?) {
+        brushSize = CGFloat(sizeSlider.doubleValue)
+        sizeField.integerValue = Int(sizeSlider.doubleValue.rounded())
+        canvas.brushSize = brushSize
+    }
+
+    @objc private func sizeFieldChanged(_ sender: Any?) {
+        let clamped = min(max(sizeField.integerValue, 1), 200)
+        sizeField.integerValue = clamped
+        brushSize = CGFloat(clamped)
+        sizeSlider.doubleValue = Double(clamped)
+        canvas.brushSize = brushSize
+    }
+
+    @objc private func opacitySliderChanged(_ sender: Any?) {
+        brushOpacity = CGFloat(opacitySlider.doubleValue)
+        opacityValueLabel.stringValue = "\(Int((opacitySlider.doubleValue * 100).rounded()))%"
+        canvas.brushOpacity = brushOpacity
+    }
+
+    @objc private func colorChanged(_ sender: Any?) {
+        paintColor = colorWell.color
+        canvas.paintColor = paintColor
+        canvas.updateActiveTextSessionStyle()
+    }
+
+    @objc private func fontFamilyChanged(_ sender: Any?) {
+        if let family = fontPopup.titleOfSelectedItem {
+            fontFamily = family
+        }
+        canvas.textFont = currentFont()
+        canvas.updateActiveTextSessionStyle()
+    }
+
+    @objc private func fontSizeChanged(_ sender: Any?) {
+        let clamped = min(max(fontSizeField.integerValue, 6), 500)
+        fontSizeField.integerValue = clamped
+        fontSize = CGFloat(clamped)
+        canvas.textFont = currentFont()
+        canvas.updateActiveTextSessionStyle()
     }
 
     // MARK: - Zoom
@@ -388,15 +637,81 @@ final class EditorViewController: NSViewController {
 
 // MARK: - Validation
 
+// MARK: - Undo plumbing
+
+extension EditorViewController {
+    // Intercept the nil-target undo:/redo: menu actions ahead of NSWindow so
+    // the text-session and preview-sheet guards in validateUserInterfaceItem
+    // apply to them; otherwise Cmd-Z reaches the document's undo manager
+    // directly and mutates the image underneath an open session or sheet.
+    @objc func undo(_ sender: Any?) { activeUndoManager?.undo() }
+    @objc func redo(_ sender: Any?) { activeUndoManager?.redo() }
+
+    /// Mirrors NSWindow's resolution: a focused field editor (options-bar and
+    /// sheet text fields) keeps its own typing undo; everything else gets the
+    /// document's manager.
+    private var activeUndoManager: UndoManager? {
+        view.window?.firstResponder?.undoManager ?? document?.undoManager
+    }
+
+    /// Called by ImageDocument on save/close/export so an in-progress text
+    /// session is never silently dropped from the written file.
+    func commitPendingTextSession() {
+        canvas.commitTextSession()
+    }
+}
+
 extension EditorViewController: NSUserInterfaceValidations {
+    private static let toolActions: [Selector: EditorTool] = [
+        #selector(selectSelectTool(_:)): .select,
+        #selector(selectBrushTool(_:)): .brush,
+        #selector(selectEraserTool(_:)): .eraser,
+        #selector(selectTextTool(_:)): .text,
+    ]
+
+    private static let zoomActions: Set<Selector> = [
+        #selector(zoomInAction(_:)),
+        #selector(zoomOutAction(_:)),
+        #selector(zoomActualAction(_:)),
+        #selector(zoomFitAction(_:)),
+    ]
+
     func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         guard document?.image != nil else { return false }
         // While a preview sheet is up, its captured base and the document must
         // not diverge: block every edit action delivered via key equivalents.
         guard view.window?.attachedSheet == nil else { return false }
+
+        if let action = item.action, let tool = Self.toolActions[action] {
+            if let menuItem = item as? NSMenuItem {
+                menuItem.state = currentTool == tool ? .on : .off
+            }
+            return true
+        }
+
+        // While a text session is active, only tool switching (which commits
+        // the session) and zooming are safe; edit/filter/clipboard actions
+        // must not mutate the image underneath the session.
+        if canvas.hasActiveTextSession {
+            if let action = item.action, Self.zoomActions.contains(action) {
+                return true
+            }
+            return false
+        }
+
         switch item.action {
         case #selector(cropToSelection(_:)), #selector(deselect(_:)):
             return canvas.selectionRect != nil
+        case #selector(undo(_:)):
+            if let menuItem = item as? NSMenuItem, let manager = activeUndoManager {
+                menuItem.title = manager.undoMenuItemTitle
+            }
+            return activeUndoManager?.canUndo ?? false
+        case #selector(redo(_:)):
+            if let menuItem = item as? NSMenuItem, let manager = activeUndoManager {
+                menuItem.title = manager.redoMenuItemTitle
+            }
+            return activeUndoManager?.canRedo ?? false
         default:
             return true
         }

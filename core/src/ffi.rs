@@ -338,6 +338,46 @@ pub unsafe extern "C" fn rz_image_sepia(img: *const RzImage) -> *mut RzImage {
     }
 }
 
+/// Composites a full-frame PREMULTIPLIED RGBA8 overlay (`src`, `w * h * 4`
+/// bytes, row-major, no row padding) onto the image, returning a NEW
+/// non-premultiplied image. `alpha` is clamped to [0, 1] and scales the
+/// overlay's alpha. Where the overlay is fully transparent the destination
+/// bytes pass through exactly. Returns NULL if `img` or `src` is NULL, on
+/// dimension mismatch, on an unknown mode, or if `alpha` is NaN.
+///
+/// # Safety
+/// `img` must be NULL or a valid pointer to a live `RzImage`; `src` must be
+/// NULL or a valid pointer to at least `w * h * 4` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_image_composite(
+    img: *const RzImage,
+    src: *const u8,
+    w: u32,
+    h: u32,
+    mode: c_int,
+    alpha: f32,
+) -> *mut RzImage {
+    if img.is_null() || src.is_null() {
+        return ptr::null_mut();
+    }
+    let image = unsafe { &*img };
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let mode = ops::CompositeMode::from_c(mode)?;
+        // Validate against the image dimensions before touching `src`, so the
+        // raw read below is bounded by the destination buffer size.
+        if w != image.pixels.width() || h != image.pixels.height() {
+            return None;
+        }
+        let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+        let src = unsafe { std::slice::from_raw_parts(src, len) };
+        ops::composite(&image.pixels, src, mode, alpha).map(|pixels| RzImage { pixels })
+    }));
+    match outcome {
+        Ok(Some(result)) => Box::into_raw(Box::new(result)),
+        _ => ptr::null_mut(),
+    }
+}
+
 /// Gaussian blur; NULL if `sigma` is not finite or not positive.
 ///
 /// # Safety

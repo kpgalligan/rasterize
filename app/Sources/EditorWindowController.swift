@@ -1,6 +1,11 @@
 import AppKit
 
 private extension NSToolbarItem.Identifier {
+    static let editorTools = NSToolbarItem.Identifier("EditorTools")
+    static let editorToolSelect = NSToolbarItem.Identifier("rz.tool.select")
+    static let editorToolBrush = NSToolbarItem.Identifier("rz.tool.brush")
+    static let editorToolEraser = NSToolbarItem.Identifier("rz.tool.eraser")
+    static let editorToolText = NSToolbarItem.Identifier("rz.tool.text")
     static let editorZoomOut = NSToolbarItem.Identifier("EditorZoomOut")
     static let editorZoomIn = NSToolbarItem.Identifier("EditorZoomIn")
     static let editorZoomFit = NSToolbarItem.Identifier("EditorZoomFit")
@@ -9,6 +14,8 @@ private extension NSToolbarItem.Identifier {
 }
 
 final class EditorWindowController: NSWindowController, NSToolbarDelegate {
+    private var toolGroup: NSToolbarItemGroup?
+
     init(document: ImageDocument) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
@@ -54,7 +61,11 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate {
     // MARK: - NSToolbarDelegate
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.editorZoomOut, .editorZoomIn, .editorZoomFit, .editorActualSize, .flexibleSpace, .editorCrop]
+        [
+            .editorTools, .space,
+            .editorZoomOut, .editorZoomIn, .editorZoomFit, .editorActualSize,
+            .flexibleSpace, .editorCrop,
+        ]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -67,6 +78,28 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate {
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
         switch itemIdentifier {
+        case .editorTools:
+            let group = NSToolbarItemGroup(itemIdentifier: itemIdentifier)
+            group.selectionMode = .selectOne
+            group.label = "Tools"
+            group.paletteLabel = "Tools"
+            group.subitems = [
+                makeToolItem(
+                    .editorToolSelect, label: "Select", symbol: "cursorarrow",
+                    action: #selector(EditorViewController.selectSelectTool(_:))),
+                makeToolItem(
+                    .editorToolBrush, label: "Brush", symbol: "paintbrush.pointed",
+                    action: #selector(EditorViewController.selectBrushTool(_:))),
+                makeToolItem(
+                    .editorToolEraser, label: "Eraser", symbol: "eraser",
+                    action: #selector(EditorViewController.selectEraserTool(_:))),
+                makeToolItem(
+                    .editorToolText, label: "Text", symbol: "textformat",
+                    action: #selector(EditorViewController.selectTextTool(_:))),
+            ]
+            group.selectedIndex = EditorTool.select.rawValue
+            toolGroup = group
+            return group
         case .editorZoomOut:
             return makeItem(
                 itemIdentifier, label: "Zoom Out", symbol: "minus.magnifyingglass",
@@ -105,5 +138,28 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate {
         item.target = nil // resolve through the responder chain
         item.isBordered = true
         return item
+    }
+
+    private func makeToolItem(
+        _ identifier: NSToolbarItem.Identifier, label: String, symbol: String, action: Selector
+    ) -> NSToolbarItem {
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.label = label
+        item.paletteLabel = label
+        item.toolTip = label
+        // The segment falls back to its label if neither symbol resolves.
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+            ?? NSImage(systemSymbolName: "paintbrush", accessibilityDescription: label)
+        item.action = action
+        item.target = nil // resolve through the responder chain
+        return item
+    }
+
+    // MARK: - Tool selection display
+
+    /// Mirrors the editor's current tool into the toolbar group. Display
+    /// only: setting selectedIndex does not re-dispatch the segment action.
+    func reflectSelectedTool(_ tool: EditorTool) {
+        toolGroup?.selectedIndex = tool.rawValue
     }
 }

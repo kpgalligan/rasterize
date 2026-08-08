@@ -65,6 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(submenuItem(editMenu()))
         mainMenu.addItem(submenuItem(imageMenu()))
         mainMenu.addItem(submenuItem(filtersMenu()))
+        mainMenu.addItem(submenuItem(toolsMenu()))
         mainMenu.addItem(submenuItem(viewMenu()))
 
         let windowMenu = self.windowMenu()
@@ -180,6 +181,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(item("Gaussian Blur…", #selector(EditorViewController.showBlur(_:))))
         menu.addItem(item("Sharpen", #selector(EditorViewController.applySharpen(_:))))
+        return menu
+    }
+
+    private func toolsMenu() -> NSMenu {
+        // Deliberately no key equivalents: the bare tool keys (v/b/e/t) are
+        // handled in ImageCanvasView.keyDown so they never steal keystrokes
+        // from text editing.
+        let menu = NSMenu(title: "Tools")
+        menu.addItem(item("Select Tool", #selector(EditorViewController.selectSelectTool(_:))))
+        menu.addItem(item("Brush Tool", #selector(EditorViewController.selectBrushTool(_:))))
+        menu.addItem(item("Eraser Tool", #selector(EditorViewController.selectEraserTool(_:))))
+        menu.addItem(item("Text Tool", #selector(EditorViewController.selectTextTool(_:))))
         return menu
     }
 

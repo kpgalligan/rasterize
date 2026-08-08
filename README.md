@@ -14,6 +14,10 @@ decoding, encoding, and manipulation.
 - Selection-based crop, image resize with filter choice (up to 100 MP)
 - Brightness / contrast / saturation adjustments with live preview
 - Grayscale, invert, sepia, Gaussian blur, sharpen
+- Brush and eraser (size, opacity, color; `[`/`]` resize; 1 px pixel-snapped
+  mode; strokes confine to an active selection) and on-canvas text
+  (font/size/color, ⌘Return commits, Escape cancels) — tools switch via
+  toolbar, Tools menu, or V/B/E/T
 - Full undo/redo, copy to clipboard, recent files
 - Drag image files onto a window to open them; File > New from Clipboard (⌘N)
 - Checkerboard backdrop for transparency

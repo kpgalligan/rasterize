@@ -135,10 +135,43 @@ final class ImageDocument: NSDocument {
         NotificationCenter.default.post(name: .imageDocumentImageDidChange, object: self)
     }
 
+    // MARK: - Text-session safety
+
+    /// Commits any in-progress canvas text session so save/close/export
+    /// paths never silently drop text the user can see on the canvas. The
+    /// commit runs through applyEdit, which also dirties the document, so
+    /// close paths then show the standard unsaved-changes prompt.
+    private func commitPendingTextSessions() {
+        for controller in windowControllers {
+            (controller.contentViewController as? EditorViewController)?
+                .commitPendingTextSession()
+        }
+    }
+
+    override func save(_ sender: Any?) {
+        commitPendingTextSessions()
+        super.save(sender)
+    }
+
+    override func saveAs(_ sender: Any?) {
+        commitPendingTextSessions()
+        super.saveAs(sender)
+    }
+
+    override func canClose(
+        withDelegate delegate: Any, shouldClose shouldCloseSelector: Selector?,
+        contextInfo: UnsafeMutableRawPointer?
+    ) {
+        commitPendingTextSessions()
+        super.canClose(
+            withDelegate: delegate, shouldClose: shouldCloseSelector, contextInfo: contextInfo)
+    }
+
     // MARK: - Export
 
     /// "Save a copy" flow: does not change fileURL or clear the dirty state.
     @IBAction func exportDocument(_ sender: Any?) {
+        commitPendingTextSessions()
         guard let image = image, let window = windowForSheet else {
             NSSound.beep()
             return
