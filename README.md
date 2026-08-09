@@ -6,8 +6,10 @@ decoding, encoding, and manipulation.
 ## Features
 
 - **Layers**: full layer stack with per-layer opacity, visibility, offsets,
-  and 14 blend modes (W3C separable set: Multiply, Screen, Overlay, Soft/Hard
-  Light, Darken, Lighten, Difference, Exclusion, Dodge, Burn, Add, Subtract);
+  and the full 27-mode Photoshop blend set — the separable W3C modes plus
+  Dissolve, Vivid/Linear/Pin Light, Hard Mix, Divide, Darker/Lighter Color,
+  and the non-separable Hue/Saturation/Color/Luminosity — grouped in the
+  panel exactly like Photoshop's menu;
   layers panel with thumbnails, inline rename, drag-reorder, and
   new/delete/duplicate/merge-down/flatten; Move tool (V) with arrow-key
   nudges; Paste as New Layer; PSD files import with their real layers; the

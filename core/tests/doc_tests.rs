@@ -27,6 +27,20 @@ const BLEND_COLOR_DODGE: c_int = 10;
 const BLEND_COLOR_BURN: c_int = 11;
 const BLEND_ADDITION: c_int = 12;
 const BLEND_SUBTRACT: c_int = 13;
+const BLEND_DISSOLVE: c_int = 14;
+const BLEND_LINEAR_BURN: c_int = 15;
+const BLEND_DARKER_COLOR: c_int = 16;
+const BLEND_LIGHTER_COLOR: c_int = 17;
+const BLEND_VIVID_LIGHT: c_int = 18;
+const BLEND_LINEAR_LIGHT: c_int = 19;
+const BLEND_PIN_LIGHT: c_int = 20;
+const BLEND_HARD_MIX: c_int = 21;
+const BLEND_DIVIDE: c_int = 22;
+const BLEND_HUE: c_int = 23;
+const BLEND_SATURATION: c_int = 24;
+const BLEND_COLOR: c_int = 25;
+const BLEND_LUMINOSITY: c_int = 26;
+const BLEND_MODE_COUNT: c_int = 27;
 
 const COMPOSITE_OVER: c_int = 0;
 const COMPOSITE_ERASE: c_int = 1;
@@ -421,6 +435,255 @@ fn blend_full_formula_with_opacity_and_transparency() {
         0.0,
     );
     assert_eq!(got, [10, 20, 30, 255]);
+}
+
+#[test]
+fn blend_mode_math_new_separable_modes() {
+    let dir = TempDir::new().unwrap();
+    // (tag, mode, bottom RGB, top RGB, expected RGB on the 255 scale) —
+    // hand-computed from the header's formulas, covering both branches of the
+    // piecewise modes and the cs==0 / cs==1 edges. All values here are exact
+    // (byte arithmetic), so a wrong branch or formula misses by far more than
+    // the 1-count quantization tolerance.
+    #[allow(clippy::type_complexity)]
+    let cases: &[(&str, c_int, [u8; 3], [u8; 3], [f32; 3])] = &[
+        // (cb + cs - 1).max(0): 200+100-255=45; 50+100-255<0 -> 0; 255+200-255.
+        (
+            "lburn",
+            BLEND_LINEAR_BURN,
+            [200, 50, 255],
+            [100, 100, 200],
+            [45.0, 0.0, 200.0],
+        ),
+        // cs<=0.5 -> burn(cb, 2cs) = 1 - (127/255)/(128/255) = 1/128 -> 1.99;
+        // cs>0.5 -> dodge(cb, 2cs-1) = (64/255)/(1 - 127/255) = 0.5 -> 127.5;
+        // cs==1 -> dodge edge -> 1.
+        (
+            "vivid",
+            BLEND_VIVID_LIGHT,
+            [128, 64, 100],
+            [64, 191, 255],
+            [1.99, 127.5, 255.0],
+        ),
+        // cb + 2cs - 1 clamped: 100+200-255=45; 30+100-255<0 -> 0;
+        // 200+400-255=345 -> 255.
+        (
+            "llight",
+            BLEND_LINEAR_LIGHT,
+            [100, 30, 200],
+            [100, 50, 200],
+            [45.0, 0.0, 255.0],
+        ),
+        // cs<=0.5 -> min(cb, 2cs): min(200,120), min(50,120);
+        // cs>0.5 -> max(cb, 2cs-1): max(100, 145).
+        (
+            "pin",
+            BLEND_PIN_LIGHT,
+            [200, 50, 100],
+            [60, 60, 200],
+            [120.0, 50.0, 145.0],
+        ),
+        // cb+cs >= 1 -> 1 else 0: 256/255 -> 1; 200/255 -> 0; exactly 1 -> 1.
+        (
+            "hmix",
+            BLEND_HARD_MIX,
+            [128, 100, 255],
+            [128, 100, 0],
+            [255.0, 0.0, 255.0],
+        ),
+        // cb/cs clamped: 100/200 -> 127.5; 200/100 -> clamp 255; 60/180 -> 85.
+        (
+            "div",
+            BLEND_DIVIDE,
+            [100, 200, 60],
+            [200, 100, 180],
+            [127.5, 255.0, 85.0],
+        ),
+        // cs == 0 -> 1 regardless of cb (including cb == 0).
+        (
+            "div0",
+            BLEND_DIVIDE,
+            [50, 0, 128],
+            [0, 0, 0],
+            [255.0, 255.0, 255.0],
+        ),
+    ];
+    for &(tag, mode, cb, cs, want) in cases {
+        let got = blended_pixel(
+            &dir,
+            tag,
+            [cb[0], cb[1], cb[2], 255],
+            [cs[0], cs[1], cs[2], 255],
+            mode,
+            1.0,
+        );
+        for c in 0..3 {
+            assert!(
+                (f32::from(got[c]) - want[c]).abs() <= 1.0,
+                "{tag} channel {c}: got {}, want ~{}",
+                got[c],
+                want[c]
+            );
+        }
+        assert_eq!(got[3], 255, "{tag}: opaque stack must stay opaque");
+    }
+}
+
+#[test]
+fn blend_mode_math_non_separable() {
+    let dir = TempDir::new().unwrap();
+    // cb = (128, 64, 192)/255, cs = (51, 204, 102)/255 = (0.2, 0.8, 0.4).
+    // Expectations hand-executed from the W3C SetLum/SetSat pseudocode with
+    // Lum = 0.3R + 0.59G + 0.11B, all on the 255 scale:
+    //   lum(cb) = 0.3*128 + 0.59*64 + 0.11*192 = 97.28
+    //   lum(cs) = 0.3*51 + 0.59*204 + 0.11*102 = 146.88
+    //   sat(cb) = 192-64 = 128, sat(cs) = 204-51 = 153
+    // hue = set_lum(set_sat(cs, 128), 97.28):
+    //   set_sat(cs, 128): min r->0, max g->128, mid b->(102-51)*128/153=42.667
+    //   lum(0, 128, 42.667) = 80.213; d = 17.067 -> (17.07, 145.07, 59.73),
+    //   in gamut so ClipColor is the identity.
+    // saturation = set_lum(set_sat(cb, 153), 97.28):
+    //   set_sat(cb, 153): min g->0, max b->153, mid r->(128-64)*153/128=76.5
+    //   lum(76.5, 0, 153) = 39.78; d = 57.5 -> (134, 57.5, 210.5).
+    // color = set_lum(cs, 97.28): d = 97.28-146.88 = -49.6
+    //   -> (1.4, 154.4, 52.4).
+    // luminosity = set_lum(cb, 146.88): d = 49.6 -> (177.6, 113.6, 241.6).
+    let cb = [128u8, 64, 192];
+    let cs = [51u8, 204, 102];
+    let cases: &[(&str, c_int, [f32; 3])] = &[
+        ("hue", BLEND_HUE, [17.07, 145.07, 59.73]),
+        ("nsat", BLEND_SATURATION, [134.0, 57.5, 210.5]),
+        ("ncol", BLEND_COLOR, [1.4, 154.4, 52.4]),
+        ("nlum", BLEND_LUMINOSITY, [177.6, 113.6, 241.6]),
+    ];
+    for &(tag, mode, want) in cases {
+        let got = blended_pixel(
+            &dir,
+            tag,
+            [cb[0], cb[1], cb[2], 255],
+            [cs[0], cs[1], cs[2], 255],
+            mode,
+            1.0,
+        );
+        for c in 0..3 {
+            assert!(
+                (f32::from(got[c]) - want[c]).abs() <= 1.0,
+                "{tag} channel {c}: got {}, want ~{}",
+                got[c],
+                want[c]
+            );
+        }
+        assert_eq!(got[3], 255, "{tag}: opaque stack must stay opaque");
+    }
+}
+
+#[test]
+fn darker_and_lighter_color_pick_whole_pixels() {
+    let dir = TempDir::new().unwrap();
+    // Red has lum 0.3, blue lum 0.11.
+    let red = [255, 0, 0, 255];
+    let blue = [0, 0, 255, 255];
+    // Darker color keeps the whole lower-luma pixel (blue); a per-channel
+    // darken of the same pair would produce black.
+    let got = blended_pixel(&dir, "dkcl", red, blue, BLEND_DARKER_COLOR, 1.0);
+    assert_eq!(got, blue, "darker color must keep the whole blue pixel");
+    // Lighter color keeps the whole higher-luma pixel (red, the backdrop); a
+    // per-channel lighten would produce magenta (255, 0, 255).
+    let got = blended_pixel(&dir, "ltcl", red, blue, BLEND_LIGHTER_COLOR, 1.0);
+    assert_eq!(got, red, "lighter color must keep the whole red pixel");
+}
+
+#[test]
+fn dissolve_is_deterministic_and_dithers_by_alpha() {
+    let dir = TempDir::new().unwrap();
+    let backdrop = [10, 20, 30, 255];
+    let source = [200, 150, 100, 255];
+    let doc = doc_from(&dir, "dis-bg.png", &solid(100, 100, backdrop));
+    let doc = add_layer(
+        &dir,
+        "dis-top.png",
+        doc,
+        0,
+        &solid(100, 100, source),
+        "Dissolve",
+    );
+    let doc = apply(doc, |d| unsafe {
+        rz_doc_with_layer_blend_mode(d, 1, BLEND_DISSOLVE)
+    });
+    let doc = apply(doc, |d| unsafe { rz_doc_with_layer_opacity(d, 1, 0.5) });
+
+    // Deterministic: flattening twice yields byte-identical output.
+    let flat = flat_pixels(doc);
+    assert_eq!(flat, flat_pixels(doc), "dissolve must be deterministic");
+
+    // Every output pixel is either the untouched backdrop or the fully
+    // opaque source; at 50% effective alpha the dissolved fraction over
+    // 10000 pixels must land close to one half.
+    let mut dissolved = 0usize;
+    for (i, px) in flat.chunks_exact(4).enumerate() {
+        let px = [px[0], px[1], px[2], px[3]];
+        assert!(
+            px == source || px == backdrop,
+            "pixel {i}: dissolve output {px:?} is neither opaque source nor backdrop"
+        );
+        if px == source {
+            dissolved += 1;
+        }
+    }
+    let fraction = dissolved as f64 / 10_000.0;
+    assert!(
+        (0.45..=0.55).contains(&fraction),
+        "dissolved fraction {fraction} outside 45-55%"
+    );
+    unsafe { rz_doc_free(doc) };
+}
+
+#[test]
+fn rzdc_round_trip_preserves_all_blend_modes() {
+    let dir = TempDir::new().unwrap();
+    let mut doc = doc_from(&dir, "modes.png", &solid(2, 2, [9, 9, 9, 255]));
+    let lname = CString::new("L").unwrap();
+    for _ in 1..BLEND_MODE_COUNT {
+        doc = apply(doc, |d| unsafe {
+            rz_doc_adding_layer(d, 0, lname.as_ptr())
+        });
+    }
+    for mode in 0..BLEND_MODE_COUNT {
+        doc = apply(doc, |d| unsafe {
+            rz_doc_with_layer_blend_mode(d, mode as usize, mode)
+        });
+    }
+    // The first value past the end of the enum is rejected.
+    assert!(unsafe { rz_doc_with_layer_blend_mode(doc, 0, BLEND_MODE_COUNT) }.is_null());
+
+    let path = dir.path().join("modes.rzdc");
+    let c = cpath(&path);
+    let mut err: *mut c_char = ptr::null_mut();
+    assert!(
+        unsafe { rz_doc_save_native(doc, c.as_ptr(), &mut err) },
+        "save failed: {}",
+        take_err_string(err)
+    );
+    let mut err: *mut c_char = ptr::null_mut();
+    let reopened = unsafe { rz_doc_open(c.as_ptr(), &mut err) };
+    assert!(
+        !reopened.is_null(),
+        "reopen failed: {}",
+        take_err_string(err)
+    );
+    assert_eq!(
+        unsafe { rz_doc_layer_count(reopened) },
+        BLEND_MODE_COUNT as usize
+    );
+    for mode in 0..BLEND_MODE_COUNT {
+        assert_eq!(
+            unsafe { rz_doc_layer_blend_mode(reopened, mode as usize) },
+            mode,
+            "layer {mode} blend mode after round trip"
+        );
+    }
+    unsafe { rz_doc_free(reopened) };
+    unsafe { rz_doc_free(doc) };
 }
 
 #[test]

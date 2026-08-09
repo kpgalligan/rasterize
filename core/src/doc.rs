@@ -29,7 +29,10 @@ const MAX_RZDC_PNG_LEN: u32 = 512 * 1024 * 1024;
 /// to stack layers until memory is exhausted.
 const MAX_RZDC_TOTAL_LAYER_PIXELS: u64 = 4 * MAX_PIXELS;
 
-/// Separable blend modes, mirroring `RzBlendMode` in the C header.
+/// The blend-mode set, mirroring `RzBlendMode` in the C header: 0-13 and
+/// 15-22 are separable (per-channel W3C formulas), 23-26 non-separable
+/// (whole-RGB-triple SetLum/SetSat math), and Dissolve (14) replaces alpha
+/// compositing with a deterministic per-canvas-position dither.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum BlendMode {
@@ -47,6 +50,19 @@ pub enum BlendMode {
     ColorBurn = 11,
     Addition = 12,
     Subtract = 13,
+    Dissolve = 14,
+    LinearBurn = 15,
+    DarkerColor = 16,
+    LighterColor = 17,
+    VividLight = 18,
+    LinearLight = 19,
+    PinLight = 20,
+    HardMix = 21,
+    Divide = 22,
+    Hue = 23,
+    Saturation = 24,
+    Color = 25,
+    Luminosity = 26,
 }
 
 impl BlendMode {
@@ -67,6 +83,19 @@ impl BlendMode {
             11 => Some(BlendMode::ColorBurn),
             12 => Some(BlendMode::Addition),
             13 => Some(BlendMode::Subtract),
+            14 => Some(BlendMode::Dissolve),
+            15 => Some(BlendMode::LinearBurn),
+            16 => Some(BlendMode::DarkerColor),
+            17 => Some(BlendMode::LighterColor),
+            18 => Some(BlendMode::VividLight),
+            19 => Some(BlendMode::LinearLight),
+            20 => Some(BlendMode::PinLight),
+            21 => Some(BlendMode::HardMix),
+            22 => Some(BlendMode::Divide),
+            23 => Some(BlendMode::Hue),
+            24 => Some(BlendMode::Saturation),
+            25 => Some(BlendMode::Color),
+            26 => Some(BlendMode::Luminosity),
             _ => None,
         }
     }
@@ -164,25 +193,193 @@ fn b_subtract(cb: f32, cs: f32) -> f32 {
     (cb - cs).max(0.0)
 }
 
-/// The per-channel blend function for a mode (data table, resolved once per
-/// layer rather than per pixel).
-fn blend_fn(mode: BlendMode) -> fn(f32, f32) -> f32 {
-    match mode {
-        BlendMode::Normal => b_normal,
-        BlendMode::Multiply => b_multiply,
-        BlendMode::Screen => b_screen,
-        BlendMode::Overlay => b_overlay,
-        BlendMode::SoftLight => b_soft_light,
-        BlendMode::HardLight => b_hard_light,
-        BlendMode::Darken => b_darken,
-        BlendMode::Lighten => b_lighten,
-        BlendMode::Difference => b_difference,
-        BlendMode::Exclusion => b_exclusion,
-        BlendMode::ColorDodge => b_color_dodge,
-        BlendMode::ColorBurn => b_color_burn,
-        BlendMode::Addition => b_addition,
-        BlendMode::Subtract => b_subtract,
+fn b_linear_burn(cb: f32, cs: f32) -> f32 {
+    (cb + cs - 1.0).max(0.0)
+}
+
+fn b_vivid_light(cb: f32, cs: f32) -> f32 {
+    // At cs == 0.5 exactly, burn(cb, 1.0) == cb, matching the dodge branch's
+    // limit, so the seam is continuous.
+    if cs <= 0.5 {
+        b_color_burn(cb, 2.0 * cs)
+    } else {
+        b_color_dodge(cb, 2.0 * cs - 1.0)
     }
+}
+
+fn b_linear_light(cb: f32, cs: f32) -> f32 {
+    (cb + 2.0 * cs - 1.0).clamp(0.0, 1.0)
+}
+
+fn b_pin_light(cb: f32, cs: f32) -> f32 {
+    if cs <= 0.5 {
+        cb.min(2.0 * cs)
+    } else {
+        cb.max(2.0 * cs - 1.0)
+    }
+}
+
+fn b_hard_mix(cb: f32, cs: f32) -> f32 {
+    if cb + cs >= 1.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn b_divide(cb: f32, cs: f32) -> f32 {
+    if cs == 0.0 {
+        1.0
+    } else {
+        (cb / cs).min(1.0)
+    }
+}
+
+// W3C non-separable blend machinery (compositing-1 spec pseudocode) operating
+// on RGB triples in [0, 1]. Lum uses the spec's 0.3/0.59/0.11 weights.
+
+fn lum(c: [f32; 3]) -> f32 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+/// ClipColor: pulls out-of-gamut channels back toward the triple's
+/// luminosity, preserving it. The divisors are safe: `l` is always a real
+/// color's luminosity (in [0, 1]), so `n < 0` implies `l - n > 0` and `x > 1`
+/// implies `x - l > 0`.
+fn clip_color(mut c: [f32; 3]) -> [f32; 3] {
+    let l = lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    if n < 0.0 {
+        for ch in &mut c {
+            *ch = l + (*ch - l) * l / (l - n);
+        }
+    }
+    if x > 1.0 {
+        for ch in &mut c {
+            *ch = l + (*ch - l) * (1.0 - l) / (x - l);
+        }
+    }
+    c
+}
+
+/// SetLum: shifts the triple to luminosity `l`, then clips into gamut.
+fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
+    let d = l - lum(c);
+    clip_color([c[0] + d, c[1] + d, c[2] + d])
+}
+
+fn sat(c: [f32; 3]) -> f32 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+/// SetSat: rescales the triple to saturation `s` — min channel to 0, max to
+/// `s`, mid proportionally between them (spec pseudocode).
+fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
+    let mut idx = [0usize, 1, 2];
+    idx.sort_by(|&a, &b| c[a].total_cmp(&c[b]));
+    let [lo, mid, hi] = idx;
+    let mut out = [0.0f32; 3];
+    if c[hi] > c[lo] {
+        out[mid] = (c[mid] - c[lo]) * s / (c[hi] - c[lo]);
+        out[hi] = s;
+    }
+    out
+}
+
+fn b_hue(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    set_lum(set_sat(cs, sat(cb)), lum(cb))
+}
+
+fn b_saturation(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    set_lum(set_sat(cb, sat(cs)), lum(cb))
+}
+
+fn b_color(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    set_lum(cs, lum(cb))
+}
+
+fn b_luminosity(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    set_lum(cb, lum(cs))
+}
+
+/// Whole-pixel pick: the lower-luma triple wins (backdrop on a tie).
+fn b_darker_color(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    if lum(cs) < lum(cb) {
+        cs
+    } else {
+        cb
+    }
+}
+
+/// Whole-pixel pick: the higher-luma triple wins (backdrop on a tie).
+fn b_lighter_color(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    if lum(cs) > lum(cb) {
+        cs
+    } else {
+        cb
+    }
+}
+
+/// How a blend mode participates in compositing: per-channel `B(cb, cs)`,
+/// whole-RGB-triple `B(Cb, Cs)`, or the Dissolve dither (which replaces the
+/// compositing formula entirely).
+#[derive(Clone, Copy)]
+enum BlendKind {
+    Separable(fn(f32, f32) -> f32),
+    NonSeparable(fn([f32; 3], [f32; 3]) -> [f32; 3]),
+    Dissolve,
+}
+
+/// The blend behavior for a mode (data table, resolved once per layer rather
+/// than per pixel).
+fn blend_kind(mode: BlendMode) -> BlendKind {
+    match mode {
+        BlendMode::Normal => BlendKind::Separable(b_normal),
+        BlendMode::Multiply => BlendKind::Separable(b_multiply),
+        BlendMode::Screen => BlendKind::Separable(b_screen),
+        BlendMode::Overlay => BlendKind::Separable(b_overlay),
+        BlendMode::SoftLight => BlendKind::Separable(b_soft_light),
+        BlendMode::HardLight => BlendKind::Separable(b_hard_light),
+        BlendMode::Darken => BlendKind::Separable(b_darken),
+        BlendMode::Lighten => BlendKind::Separable(b_lighten),
+        BlendMode::Difference => BlendKind::Separable(b_difference),
+        BlendMode::Exclusion => BlendKind::Separable(b_exclusion),
+        BlendMode::ColorDodge => BlendKind::Separable(b_color_dodge),
+        BlendMode::ColorBurn => BlendKind::Separable(b_color_burn),
+        BlendMode::Addition => BlendKind::Separable(b_addition),
+        BlendMode::Subtract => BlendKind::Separable(b_subtract),
+        BlendMode::Dissolve => BlendKind::Dissolve,
+        BlendMode::LinearBurn => BlendKind::Separable(b_linear_burn),
+        BlendMode::DarkerColor => BlendKind::NonSeparable(b_darker_color),
+        BlendMode::LighterColor => BlendKind::NonSeparable(b_lighter_color),
+        BlendMode::VividLight => BlendKind::Separable(b_vivid_light),
+        BlendMode::LinearLight => BlendKind::Separable(b_linear_light),
+        BlendMode::PinLight => BlendKind::Separable(b_pin_light),
+        BlendMode::HardMix => BlendKind::Separable(b_hard_mix),
+        BlendMode::Divide => BlendKind::Separable(b_divide),
+        BlendMode::Hue => BlendKind::NonSeparable(b_hue),
+        BlendMode::Saturation => BlendKind::NonSeparable(b_saturation),
+        BlendMode::Color => BlendKind::NonSeparable(b_color),
+        BlendMode::Luminosity => BlendKind::NonSeparable(b_luminosity),
+    }
+}
+
+/// Deterministic Dissolve threshold for a canvas position, in [0, 1).
+/// Murmur3-style integer mix of the coordinates; canvas-absolute so the
+/// dither pattern is stable for a given position regardless of layer offset
+/// or projection window. Only the low 24 hash bits are used so the result is
+/// exact in f32 and strictly below 1 (a fully opaque pixel always shows).
+fn dissolve_threshold(x: i64, y: i64) -> f32 {
+    let mut h = (x as u32)
+        .wrapping_mul(0x9E37_79B9)
+        .wrapping_add((y as u32).wrapping_mul(0x85EB_CA6B));
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE35);
+    h ^= h >> 16;
+    ((h >> 8) as f32) * (1.0 / 16_777_216.0)
 }
 
 // ------------------------------------------------------------------ model --
@@ -258,7 +455,7 @@ fn composite_layer_into(
     if opacity <= 0.0 {
         return;
     }
-    let blend = blend_fn(layer.blend);
+    let kind = blend_kind(layer.blend);
     let (lw, lh) = layer.pixels.dimensions();
     let rel_x = i64::from(layer.offset.0) - i64::from(origin.0);
     let rel_y = i64::from(layer.offset.1) - i64::from(origin.1);
@@ -282,15 +479,28 @@ fn composite_layer_into(
                 f32::from(raw[li + 2]) / 255.0,
             ];
             let ai = (ay as u64 * u64::from(acc_w) + ax as u64) as usize;
+            if let BlendKind::Dissolve = kind {
+                // Dissolve skips the compositing formula: the source shows
+                // fully opaque with probability sa (its effective alpha),
+                // otherwise the backdrop pixel stays untouched.
+                let (cx, cy) = (ax + i64::from(origin.0), ay + i64::from(origin.1));
+                if dissolve_threshold(cx, cy) < sa {
+                    acc[ai] = [cs[0], cs[1], cs[2], 1.0];
+                }
+                continue;
+            }
             let bg = acc[ai];
             let ab = bg[3];
             let ao = sa + ab * (1.0 - sa);
+            let blended = match kind {
+                BlendKind::Separable(f) => [f(bg[0], cs[0]), f(bg[1], cs[1]), f(bg[2], cs[2])],
+                BlendKind::NonSeparable(f) => f([bg[0], bg[1], bg[2]], cs),
+                BlendKind::Dissolve => unreachable!("dissolve handled above"),
+            };
             let mut out = [0.0f32; 4];
             for c in 0..3 {
-                let cb = bg[c];
                 out[c] =
-                    (sa * (1.0 - ab) * cs[c] + sa * ab * blend(cb, cs[c]) + (1.0 - sa) * ab * cb)
-                        / ao;
+                    (sa * (1.0 - ab) * cs[c] + sa * ab * blended[c] + (1.0 - sa) * ab * bg[c]) / ao;
             }
             out[3] = ao;
             acc[ai] = out;
@@ -424,7 +634,8 @@ impl RzDocument {
     /// layer covers the union of both extents; BOTH layers' modes and
     /// opacities are baked into its pixels via the same kernel as
     /// [`RzDocument::flattened`] (the lower composites onto a transparent
-    /// backdrop, where every blend degenerates to Normal), so the result is
+    /// backdrop, where every blend function degenerates to Normal and
+    /// Dissolve keeps exactly its dithered pixels), so the result is
     /// Normal at opacity 1 and keeps only the lower layer's name and
     /// visibility. An invisible upper layer contributes nothing (it is simply
     /// removed); a hidden LOWER layer refuses the merge (`None`) so the upper
@@ -908,8 +1119,8 @@ fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
 
 // -------------------------------------------------------------- psd import --
 
-/// Best-effort PSD -> RzDocument blend-mode mapping; anything without a
-/// separable equivalent becomes Normal. The argument is the discriminant of
+/// PSD -> RzDocument blend-mode mapping; PassThrough (group-only semantics)
+/// and unknown values become Normal. The argument is the discriminant of
 /// psd 0.3.5's `BlendMode` (the enum itself lives in a private module and is
 /// not re-exported, so it cannot be named here — but its values are C-like
 /// and cast losslessly): 0 PassThrough, 1 Normal, 2 Dissolve, 3 Darken,
@@ -920,19 +1131,32 @@ fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
 /// 25 Saturation, 26 Color, 27 Luminosity.
 fn map_psd_blend(mode: i32) -> BlendMode {
     match mode {
+        2 => BlendMode::Dissolve,
         3 => BlendMode::Darken,
         4 => BlendMode::Multiply,
         5 => BlendMode::ColorBurn,
+        6 => BlendMode::LinearBurn,
+        7 => BlendMode::DarkerColor,
         8 => BlendMode::Lighten,
         9 => BlendMode::Screen,
         10 => BlendMode::ColorDodge,
         11 => BlendMode::Addition, // LinearDodge
+        12 => BlendMode::LighterColor,
         13 => BlendMode::Overlay,
         14 => BlendMode::SoftLight,
         15 => BlendMode::HardLight,
+        16 => BlendMode::VividLight,
+        17 => BlendMode::LinearLight,
+        18 => BlendMode::PinLight,
+        19 => BlendMode::HardMix,
         20 => BlendMode::Difference,
         21 => BlendMode::Exclusion,
         22 => BlendMode::Subtract,
+        23 => BlendMode::Divide,
+        24 => BlendMode::Hue,
+        25 => BlendMode::Saturation,
+        26 => BlendMode::Color,
+        27 => BlendMode::Luminosity,
         _ => BlendMode::Normal,
     }
 }

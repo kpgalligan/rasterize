@@ -181,23 +181,54 @@ final class RasterImage {
 }
 
 extension RzBlendMode {
-    /// Header-order display list for the layers panel's blend-mode popup.
-    static let allBlendModes: [(RzBlendMode, String)] = [
-        (RZ_BLEND_NORMAL, "Normal"),
-        (RZ_BLEND_MULTIPLY, "Multiply"),
-        (RZ_BLEND_SCREEN, "Screen"),
-        (RZ_BLEND_OVERLAY, "Overlay"),
-        (RZ_BLEND_SOFT_LIGHT, "Soft Light"),
-        (RZ_BLEND_HARD_LIGHT, "Hard Light"),
-        (RZ_BLEND_DARKEN, "Darken"),
-        (RZ_BLEND_LIGHTEN, "Lighten"),
-        (RZ_BLEND_DIFFERENCE, "Difference"),
-        (RZ_BLEND_EXCLUSION, "Exclusion"),
-        (RZ_BLEND_COLOR_DODGE, "Color Dodge"),
-        (RZ_BLEND_COLOR_BURN, "Color Burn"),
-        (RZ_BLEND_ADDITION, "Addition"),
-        (RZ_BLEND_SUBTRACT, "Subtract"),
+    /// The full blend-mode set in Photoshop menu order, grouped the way the
+    /// Photoshop menu draws its separators. The layers panel builds its popup
+    /// from these groups; display titles differ from the C constant names
+    /// only where Photoshop does (ADDITION shows as "Linear Dodge (Add)").
+    static let blendModeGroups: [[(RzBlendMode, String)]] = [
+        [
+            (RZ_BLEND_NORMAL, "Normal"),
+            (RZ_BLEND_DISSOLVE, "Dissolve"),
+        ],
+        [
+            (RZ_BLEND_DARKEN, "Darken"),
+            (RZ_BLEND_MULTIPLY, "Multiply"),
+            (RZ_BLEND_COLOR_BURN, "Color Burn"),
+            (RZ_BLEND_LINEAR_BURN, "Linear Burn"),
+            (RZ_BLEND_DARKER_COLOR, "Darker Color"),
+        ],
+        [
+            (RZ_BLEND_LIGHTEN, "Lighten"),
+            (RZ_BLEND_SCREEN, "Screen"),
+            (RZ_BLEND_COLOR_DODGE, "Color Dodge"),
+            (RZ_BLEND_ADDITION, "Linear Dodge (Add)"),
+            (RZ_BLEND_LIGHTER_COLOR, "Lighter Color"),
+        ],
+        [
+            (RZ_BLEND_OVERLAY, "Overlay"),
+            (RZ_BLEND_SOFT_LIGHT, "Soft Light"),
+            (RZ_BLEND_HARD_LIGHT, "Hard Light"),
+            (RZ_BLEND_VIVID_LIGHT, "Vivid Light"),
+            (RZ_BLEND_LINEAR_LIGHT, "Linear Light"),
+            (RZ_BLEND_PIN_LIGHT, "Pin Light"),
+            (RZ_BLEND_HARD_MIX, "Hard Mix"),
+        ],
+        [
+            (RZ_BLEND_DIFFERENCE, "Difference"),
+            (RZ_BLEND_EXCLUSION, "Exclusion"),
+            (RZ_BLEND_SUBTRACT, "Subtract"),
+            (RZ_BLEND_DIVIDE, "Divide"),
+        ],
+        [
+            (RZ_BLEND_HUE, "Hue"),
+            (RZ_BLEND_SATURATION, "Saturation"),
+            (RZ_BLEND_COLOR, "Color"),
+            (RZ_BLEND_LUMINOSITY, "Luminosity"),
+        ],
     ]
+
+    /// Flat menu-order list for callers that don't care about grouping.
+    static let allBlendModes: [(RzBlendMode, String)] = blendModeGroups.flatMap { $0 }
 }
 
 /// Owning Swift wrapper around an `RzDocument *` handle from the Rust core:

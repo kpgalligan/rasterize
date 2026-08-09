@@ -137,7 +137,21 @@ final class LayersPanelViewController: NSViewController {
         blendPopup.translatesAutoresizingMaskIntoConstraints = false
         blendPopup.controlSize = .small
         blendPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        blendPopup.addItems(withTitles: RzBlendMode.allBlendModes.map { $0.1 })
+        // Separators mean item position != mode index, so every item carries
+        // its RzBlendMode raw value in `tag`; selection goes through tags,
+        // never item positions.
+        let blendMenu = NSMenu()
+        for (groupIndex, group) in RzBlendMode.blendModeGroups.enumerated() {
+            if groupIndex > 0 {
+                blendMenu.addItem(NSMenuItem.separator())
+            }
+            for (mode, title) in group {
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.tag = Int(mode.rawValue)
+                blendMenu.addItem(item)
+            }
+        }
+        blendPopup.menu = blendMenu
         blendPopup.target = self
         blendPopup.action = #selector(blendChanged(_:))
 
@@ -323,11 +337,7 @@ final class LayersPanelViewController: NSViewController {
         }
         blendPopup.isEnabled = true
         opacitySlider.isEnabled = true
-        if let index = RzBlendMode.allBlendModes.firstIndex(where: {
-            $0.0.rawValue == info.blendMode.rawValue
-        }) {
-            blendPopup.selectItem(at: index)
-        }
+        blendPopup.selectItem(withTag: Int(info.blendMode.rawValue))
         // While the user is scrubbing, the slider and label already show the
         // in-flight value (opacityChanged set them); don't write the value
         // back into the slider mid-track.
@@ -356,9 +366,8 @@ final class LayersPanelViewController: NSViewController {
     @objc private func blendChanged(_ sender: Any?) {
         guard let document = document else { return }
         let idx = document.activeLayerIndex
-        let selected = blendPopup.indexOfSelectedItem
-        guard selected >= 0, selected < RzBlendMode.allBlendModes.count else { return }
-        let mode = RzBlendMode.allBlendModes[selected].0
+        guard let tag = blendPopup.selectedItem?.tag, tag >= 0 else { return }
+        let mode = RzBlendMode(rawValue: UInt32(tag))
         document.applyEdit("Layer Blend Mode") { $0.withLayerBlendMode(idx, mode) }
     }
 

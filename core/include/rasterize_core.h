@@ -128,7 +128,15 @@ bool rz_image_save(const RzImage *img, const char *path, RzFormat format,
  * thread-safe; callers must serialize access to it. */
 typedef struct RzDocument RzDocument;
 
-/* Separable blend modes, W3C compositing semantics, sRGB-encoded f32 math. */
+/* The Photoshop blend-mode set, sRGB-encoded f32 math. Modes 0-13 and 15-22
+ * are separable (per-channel, W3C compositing formulas); 23-26 are the W3C
+ * non-separable modes operating on the RGB triple via the spec's
+ * SetLum/SetSat helpers (Lum = 0.3R + 0.59G + 0.11B); DISSOLVE replaces
+ * alpha compositing with a deterministic per-canvas-position dither: each
+ * pixel shows the source fully opaque with probability equal to its
+ * effective alpha, otherwise the backdrop. Values are stable across
+ * releases; RZDC files store them as u32, and readers map unknown values to
+ * RZ_BLEND_NORMAL. */
 typedef enum {
   RZ_BLEND_NORMAL = 0,
   RZ_BLEND_MULTIPLY = 1,
@@ -142,8 +150,21 @@ typedef enum {
   RZ_BLEND_EXCLUSION = 9,
   RZ_BLEND_COLOR_DODGE = 10,
   RZ_BLEND_COLOR_BURN = 11,
-  RZ_BLEND_ADDITION = 12,
+  RZ_BLEND_ADDITION = 12, /* a.k.a. Linear Dodge */
   RZ_BLEND_SUBTRACT = 13,
+  RZ_BLEND_DISSOLVE = 14,
+  RZ_BLEND_LINEAR_BURN = 15,
+  RZ_BLEND_DARKER_COLOR = 16,  /* whole-pixel: keeps the lower-luma color */
+  RZ_BLEND_LIGHTER_COLOR = 17, /* whole-pixel: keeps the higher-luma color */
+  RZ_BLEND_VIVID_LIGHT = 18,
+  RZ_BLEND_LINEAR_LIGHT = 19,
+  RZ_BLEND_PIN_LIGHT = 20,
+  RZ_BLEND_HARD_MIX = 21,
+  RZ_BLEND_DIVIDE = 22,
+  RZ_BLEND_HUE = 23,
+  RZ_BLEND_SATURATION = 24,
+  RZ_BLEND_COLOR = 25,
+  RZ_BLEND_LUMINOSITY = 26,
 } RzBlendMode;
 
 /* Opens a document. Sniffing order: files starting "RZDC" are native
