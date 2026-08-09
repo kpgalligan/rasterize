@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Rasterize — overlap mark</title>
+  <defs>
+    <clipPath id="tile"><rect x="100" y="100" width="824" height="824" rx="214.24"></rect></clipPath>
+  </defs>
+  <g clip-path="url(#tile)" style="isolation:isolate">
+    <rect x="100" y="100" width="824" height="824" fill="#FBF8F1"></rect>
+    <circle cx="409" cy="430" r="212.87" fill="#1F8564" style="mix-blend-mode:multiply"></circle>
+    <circle cx="615" cy="430" r="212.87" fill="#F2C14E" style="mix-blend-mode:multiply"></circle>
+    <circle cx="512" cy="622" r="212.87" fill="#F4653F" style="mix-blend-mode:multiply"></circle>
+  </g>
+  <rect x="104.37" y="104.37" width="815.26" height="815.26" rx="209.87" fill="none" stroke="#101915" stroke-width="8.73"></rect>
+</svg>

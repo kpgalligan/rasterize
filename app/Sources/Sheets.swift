@@ -54,22 +54,51 @@ final class PreviewRenderer {
 
 // MARK: - Shared layout helpers
 
-private let sheetWidth: CGFloat = 380
-private let sheetInset: CGFloat = 20
+private let sheetWidth: CGFloat = 420
+private let sheetInset: CGFloat = 22
 
-private func makeSheetView(content: NSView, buttonRow: NSStackView) -> NSView {
+/// Assembles a design-system sheet: 420px card, 15px/700 title, optional
+/// 12px muted hint, content, then the button row.
+private func makeSheetView(
+    title: String? = nil, hint: String? = nil, content: NSView, buttonRow: NSStackView
+) -> NSView {
     let container = NSView(frame: NSRect(x: 0, y: 0, width: sheetWidth, height: 240))
-    content.translatesAutoresizingMaskIntoConstraints = false
+    container.wantsLayer = true
+    container.layer?.backgroundColor = DS.chromeBackground.cgColor
+
+    var stackedViews: [NSView] = []
+    if let title = title {
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = DS.sans(15, weight: .bold)
+        titleLabel.textColor = DS.textStrong
+        stackedViews.append(titleLabel)
+    }
+    if let hint = hint {
+        let hintLabel = NSTextField(wrappingLabelWithString: hint)
+        hintLabel.font = DS.sans(12)
+        hintLabel.textColor = DS.textMuted
+        hintLabel.isEditable = false
+        hintLabel.preferredMaxLayoutWidth = sheetWidth - sheetInset * 2
+        stackedViews.append(hintLabel)
+    }
+    stackedViews.append(content)
+    let stack = NSStackView(views: stackedViews)
+    stack.orientation = .vertical
+    stack.alignment = .leading
+    stack.spacing = 12
+    stack.setCustomSpacing(16, after: stackedViews[stackedViews.count - 2])
+
+    stack.translatesAutoresizingMaskIntoConstraints = false
     buttonRow.translatesAutoresizingMaskIntoConstraints = false
-    container.addSubview(content)
+    container.addSubview(stack)
     container.addSubview(buttonRow)
     NSLayoutConstraint.activate([
         container.widthAnchor.constraint(equalToConstant: sheetWidth),
-        content.topAnchor.constraint(equalTo: container.topAnchor, constant: sheetInset),
-        content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: sheetInset),
-        content.trailingAnchor.constraint(
+        stack.topAnchor.constraint(equalTo: container.topAnchor, constant: sheetInset),
+        stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: sheetInset),
+        stack.trailingAnchor.constraint(
             lessThanOrEqualTo: container.trailingAnchor, constant: -sheetInset),
-        buttonRow.topAnchor.constraint(equalTo: content.bottomAnchor, constant: sheetInset),
+        buttonRow.topAnchor.constraint(equalTo: stack.bottomAnchor, constant: sheetInset),
         buttonRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: sheetInset),
         buttonRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -sheetInset),
         buttonRow.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -sheetInset),
@@ -86,12 +115,33 @@ private func makeButtonRow(
     spacer.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
     let row = NSStackView(views: leading + [spacer, cancel, apply])
     row.orientation = .horizontal
+    row.alignment = .centerY
     row.spacing = 8
     return row
 }
 
+/// 13px row label for the sheet grids' 106px right-aligned label column.
 private func fieldLabel(_ text: String) -> NSTextField {
-    NSTextField(labelWithString: text)
+    let label = NSTextField(labelWithString: text)
+    label.font = DS.sans(13)
+    label.textColor = DS.textStrong
+    return label
+}
+
+/// Bottom-left 10px mono footnote carried in the button row's leading slot.
+private func sheetFootnote(_ text: String) -> NSTextField {
+    let label = NSTextField(labelWithString: text)
+    label.font = DS.mono(10)
+    label.textColor = DS.textFaint
+    return label
+}
+
+private func sheetCancelButton(target: AnyObject, action: Selector) -> NSButton {
+    StickerButton(title: "Cancel", style: .secondary, target: target, action: action)
+}
+
+private func sheetApplyButton(target: AnyObject, action: Selector) -> NSButton {
+    StickerButton(title: "Apply", style: .primary, target: target, action: action)
 }
 
 // MARK: - ResizeSheetController
@@ -136,6 +186,7 @@ final class ResizeSheetController: NSViewController, NSTextFieldDelegate {
             field.formatter = formatter
             field.delegate = self
             field.widthAnchor.constraint(equalToConstant: 90).isActive = true
+            DSField.style(field)
         }
         widthField.integerValue = originalWidth
         heightField.integerValue = originalHeight
@@ -143,9 +194,11 @@ final class ResizeSheetController: NSViewController, NSTextFieldDelegate {
 
         filterPopup.addItems(withTitles: Self.filters.map { $0.title })
         filterPopup.selectItem(at: Self.filters.count - 1) // Lanczos3
+        filterPopup.font = DS.sans(13)
 
         let currentLabel = fieldLabel("\(originalWidth) × \(originalHeight) px")
-        currentLabel.textColor = .secondaryLabelColor
+        currentLabel.font = DS.mono(13)
+        currentLabel.textColor = DS.textMuted
 
         let grid = NSGridView(views: [
             [fieldLabel("Current size:"), currentLabel],
@@ -157,13 +210,15 @@ final class ResizeSheetController: NSViewController, NSTextFieldDelegate {
         grid.rowSpacing = 10
         grid.columnSpacing = 12
         grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = 106
 
-        let cancelButton = NSButton(
-            title: "Cancel", target: self, action: #selector(cancelClicked(_:)))
-        let applyButton = NSButton(
-            title: "Apply", target: self, action: #selector(applyClicked(_:)))
+        let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
+        let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
         view = makeSheetView(
-            content: grid, buttonRow: makeButtonRow(cancel: cancelButton, apply: applyButton))
+            title: "Image size", content: grid,
+            buttonRow: makeButtonRow(
+                cancel: cancelButton, apply: applyButton,
+                leading: [sheetFootnote("max 100 MP")]))
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -237,11 +292,14 @@ private final class AnchorGridView: NSView {
             for col in 0..<3 {
                 let button = NSButton(title: "", target: self, action: #selector(cellClicked(_:)))
                 button.setButtonType(.momentaryPushIn)
-                button.bezelStyle = .smallSquare
+                button.isBordered = false
+                button.wantsLayer = true
+                button.layer?.cornerRadius = 4
+                button.layer?.borderWidth = 1
                 button.font = NSFont.systemFont(ofSize: 13)
                 button.tag = row * 3 + col
-                button.widthAnchor.constraint(equalToConstant: 30).isActive = true
-                button.heightAnchor.constraint(equalToConstant: 26).isActive = true
+                button.widthAnchor.constraint(equalToConstant: 32).isActive = true
+                button.heightAnchor.constraint(equalToConstant: 28).isActive = true
                 rowButtons.append(button)
             }
             buttons.append(rowButtons)
@@ -277,13 +335,24 @@ private final class AnchorGridView: NSView {
         for row in 0..<3 {
             for col in 0..<3 {
                 let button = buttons[row][col]
-                if row == anchor.row && col == anchor.col {
-                    button.title = "●"
+                let isAnchor = row == anchor.row && col == anchor.col
+                let glyph: String
+                if isAnchor {
+                    glyph = "●"
                 } else if abs(row - anchor.row) <= 1 && abs(col - anchor.col) <= 1 {
-                    button.title = arrows[row - anchor.row + 1][col - anchor.col + 1]
+                    glyph = arrows[row - anchor.row + 1][col - anchor.col + 1]
                 } else {
-                    button.title = ""
+                    glyph = ""
                 }
+                button.layer?.borderColor = DS.borderStrong.cgColor
+                button.layer?.backgroundColor =
+                    (isAnchor ? DS.accent : DS.chromeBackground).cgColor
+                button.attributedTitle = NSAttributedString(
+                    string: glyph,
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: isAnchor ? 10 : 13),
+                        .foregroundColor: isAnchor ? DS.onAccent : DS.textMuted,
+                    ])
             }
         }
     }
@@ -319,12 +388,14 @@ final class CanvasSizeSheetController: NSViewController {
             formatter.maximum = 20000
             field.formatter = formatter
             field.widthAnchor.constraint(equalToConstant: 90).isActive = true
+            DSField.style(field)
         }
         widthField.integerValue = originalWidth
         heightField.integerValue = originalHeight
 
         let currentLabel = fieldLabel("\(originalWidth) × \(originalHeight) px")
-        currentLabel.textColor = .secondaryLabelColor
+        currentLabel.font = DS.mono(13)
+        currentLabel.textColor = DS.textMuted
 
         let grid = NSGridView(views: [
             [fieldLabel("Current size:"), currentLabel],
@@ -335,14 +406,19 @@ final class CanvasSizeSheetController: NSViewController {
         grid.rowSpacing = 10
         grid.columnSpacing = 12
         grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = 106
         grid.cell(for: anchorGrid)?.yPlacement = .top
 
-        let cancelButton = NSButton(
-            title: "Cancel", target: self, action: #selector(cancelClicked(_:)))
-        let applyButton = NSButton(
-            title: "Apply", target: self, action: #selector(applyClicked(_:)))
+        let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
+        let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
         view = makeSheetView(
-            content: grid, buttonRow: makeButtonRow(cancel: cancelButton, apply: applyButton))
+            title: "Canvas size",
+            hint: "Grows or trims the canvas without scaling. Layers keep "
+                + "their pixels and can be revealed again later.",
+            content: grid,
+            buttonRow: makeButtonRow(
+                cancel: cancelButton, apply: applyButton,
+                leading: [sheetFootnote("⌥⌘C")]))
     }
 
     @objc private func applyClicked(_ sender: Any?) {
@@ -444,15 +520,16 @@ final class AdjustSheetController: NSViewController {
         grid.rowSpacing = 10
         grid.columnSpacing = 12
         grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = 106
 
-        let resetButton = NSButton(title: "Reset", target: self, action: #selector(resetClicked(_:)))
-        let cancelButton = NSButton(
-            title: "Cancel", target: self, action: #selector(cancelClicked(_:)))
-        let applyButton = NSButton(
-            title: "Apply", target: self, action: #selector(applyClicked(_:)))
+        let resetButton = StickerButton(
+            title: "Reset", style: .secondary, target: self, action: #selector(resetClicked(_:)))
+        let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
+        let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
         view = makeSheetView(
-            content: grid,
-            buttonRow: makeButtonRow(cancel: cancelButton, apply: applyButton, leading: [resetButton]))
+            title: "Adjust colors", content: grid,
+            buttonRow: makeButtonRow(
+                cancel: cancelButton, apply: applyButton, leading: [resetButton]))
     }
 
     private func updateValueLabels() {
@@ -560,13 +637,15 @@ final class BlurSheetController: NSViewController {
         grid.rowSpacing = 10
         grid.columnSpacing = 12
         grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = 106
 
-        let cancelButton = NSButton(
-            title: "Cancel", target: self, action: #selector(cancelClicked(_:)))
-        let applyButton = NSButton(
-            title: "Apply", target: self, action: #selector(applyClicked(_:)))
+        let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
+        let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
         view = makeSheetView(
-            content: grid, buttonRow: makeButtonRow(cancel: cancelButton, apply: applyButton))
+            title: "Gaussian blur", content: grid,
+            buttonRow: makeButtonRow(
+                cancel: cancelButton, apply: applyButton,
+                leading: [sheetFootnote("one undo step")]))
     }
 
     private func requestPreview() {
@@ -691,8 +770,8 @@ final class SliderSheetController: NSViewController {
 
             let label = NSTextField(
                 labelWithString: descriptor.format(descriptor.map(descriptor.sliderInitial)))
-            label.font = NSFont.monospacedDigitSystemFont(
-                ofSize: NSFont.smallSystemFontSize, weight: .regular)
+            label.font = DS.mono(12)
+            label.textColor = DS.textMuted
             label.alignment = .right
             label.widthAnchor.constraint(equalToConstant: 52).isActive = true
 
@@ -704,20 +783,15 @@ final class SliderSheetController: NSViewController {
         grid.rowSpacing = 10
         grid.columnSpacing = 12
         grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = 106
 
-        let titleLabel = NSTextField(labelWithString: sheetTitle)
-        titleLabel.font = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
-        let content = NSStackView(views: [titleLabel, grid])
-        content.orientation = .vertical
-        content.alignment = .leading
-        content.spacing = 12
-
-        let cancelButton = NSButton(
-            title: "Cancel", target: self, action: #selector(cancelClicked(_:)))
-        let applyButton = NSButton(
-            title: "Apply", target: self, action: #selector(applyClicked(_:)))
+        let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
+        let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
         view = makeSheetView(
-            content: content, buttonRow: makeButtonRow(cancel: cancelButton, apply: applyButton))
+            title: sheetTitle, content: grid,
+            buttonRow: makeButtonRow(
+                cancel: cancelButton, apply: applyButton,
+                leading: [sheetFootnote("one undo step")]))
     }
 
     override func viewDidAppear() {

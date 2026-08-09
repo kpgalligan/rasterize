@@ -32,6 +32,7 @@ final class ExportAccessoryController: NSViewController {
 
     override func loadView() {
         formatPopup.addItems(withTitles: ExportFormat.allCases.map { $0.displayName })
+        formatPopup.font = DS.sans(13)
         formatPopup.target = self
         formatPopup.action = #selector(formatChanged(_:))
 
@@ -40,13 +41,15 @@ final class ExportAccessoryController: NSViewController {
         qualitySlider.action = #selector(qualityChanged(_:))
         qualitySlider.widthAnchor.constraint(equalToConstant: 150).isActive = true
 
-        qualityValueLabel.font = NSFont.monospacedDigitSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        qualityLabel.font = DS.sans(13)
+        qualityValueLabel.font = DS.mono(12)
         qualityValueLabel.alignment = .right
         qualityValueLabel.widthAnchor.constraint(equalToConstant: 32).isActive = true
 
+        let formatLabel = NSTextField(labelWithString: "Format:")
+        formatLabel.font = DS.sans(13)
         let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "Format:"), formatPopup, NSGridCell.emptyContentView],
+            [formatLabel, formatPopup, NSGridCell.emptyContentView],
             [qualityLabel, qualitySlider, qualityValueLabel],
         ])
         grid.rowSpacing = 8

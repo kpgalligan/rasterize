@@ -41,6 +41,20 @@ files are rejected with a clear error); animated GIFs and multi-page TIFFs
 load their first frame/page only, so ⌘S on a GIF deliberately routes through
 Save As instead of overwriting the animation in place.
 
+## Design
+
+The UI takes its structure from the Balopy design handoff in
+`designs/design_handoff_rasterize_desktop` — sticker-shadow pill controls,
+an IBM Plex Mono voice for machine numbers, the welcome window and overlap
+motif — but the chrome uses the standard semantic system colors
+(`windowBackgroundColor`, `labelColor`, the user's accent color, …) so it
+stays neutral around the image and follows light/dark automatically. The
+brand palette survives only in the app icon, the welcome motif, and the
+coral selection marquee. Fonts (Source Sans 3, IBM Plex Mono, Darker
+Grotesque — all OFL) are vendored in `app/Resources/Fonts` and registered
+via `ATSApplicationFontsPath`. Launching with nothing open shows the
+welcome window instead of a bare open panel.
+
 ## Layout
 
 ```

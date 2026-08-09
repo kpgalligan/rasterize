@@ -15,10 +15,18 @@ final class EditorViewController: NSViewController {
 
     private let scrollView = NSScrollView()
     private let canvas = ImageCanvasView()
-    private let statusLabel = NSTextField(labelWithString: "")
-    private var zoomPopup: NSPopUpButton!
-    private var zoomTitleItem: NSMenuItem!
     private var didRunInitialZoom = false
+
+    // Design chrome: 58px toolbar, floating zoom pill, 30px status bar with
+    // border-separated mono segments.
+    private var toolPill: ToolPillControl!
+    private let toolbarBar = BarView(border: .bottom)
+    private let zoomPill = ZoomPillView(frame: .zero)
+    private let statusDims = StatusSegment(separator: false)
+    private let statusLayer = StatusSegment(separator: true)
+    private let statusBlend = StatusSegment(separator: true)
+    private let statusTool = StatusSegment(separator: false)
+    private let statusZoom = StatusSegment(separator: true)
 
     private(set) var currentTool: EditorTool = .select
 
@@ -91,9 +99,20 @@ final class EditorViewController: NSViewController {
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = true
-        scrollView.backgroundColor = .underPageBackgroundColor
+        scrollView.backgroundColor = DS.canvasVoid
         scrollView.usesPredominantAxisScrolling = false
+        scrollView.contentView = CenteringClipView()
         scrollView.documentView = canvas
+        // Soft ambient shadow beneath the image, over the canvas void.
+        canvas.wantsLayer = true
+        canvas.layer?.masksToBounds = false
+        canvas.shadow = {
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.5)
+            shadow.shadowBlurRadius = 24
+            shadow.shadowOffset = NSSize(width: 0, height: -9)
+            return shadow
+        }()
 
         if let document = document, let doc = document.doc {
             canvas.frame = NSRect(origin: .zero, size: doc.canvasSize)
@@ -202,40 +221,64 @@ final class EditorViewController: NSViewController {
         canvas.brushOpacity = brushOpacity
         canvas.textFont = currentFont()
 
-        let statusBar = NSView()
+        // Toolbar: pill tool group left, ghost zoom cluster, crop pinned
+        // right, on a card bar with a subtle bottom border.
+        toolbarBar.translatesAutoresizingMaskIntoConstraints = false
+        toolPill = ToolPillControl(segments: [
+            .init(symbol: "cursorarrow", fallback: "S", label: "Select",
+                  action: #selector(selectSelectTool(_:))),
+            .init(symbol: "arrow.up.and.down.and.arrow.left.and.right", fallback: "M",
+                  label: "Move", action: #selector(selectMoveTool(_:))),
+            .init(symbol: "paintbrush.pointed", fallback: "B", label: "Brush",
+                  action: #selector(selectBrushTool(_:))),
+            .init(symbol: "eraser", fallback: "E", label: "Eraser",
+                  action: #selector(selectEraserTool(_:))),
+            .init(symbol: "textformat", fallback: "T", label: "Text",
+                  action: #selector(selectTextTool(_:))),
+        ])
+        toolPill.translatesAutoresizingMaskIntoConstraints = false
+        let zoomOutButton = GhostButton(
+            symbol: "minus.magnifyingglass", fallback: "−", caption: "Zoom Out",
+            tooltip: "Zoom Out", action: #selector(zoomOutAction(_:)))
+        let zoomInButton = GhostButton(
+            symbol: "plus.magnifyingglass", fallback: "+", caption: "Zoom In",
+            tooltip: "Zoom In", action: #selector(zoomInAction(_:)))
+        let fitButton = GhostButton(
+            symbol: "arrow.up.left.and.down.right.magnifyingglass", fallback: "⤢",
+            caption: "Fit", tooltip: "Zoom to Fit", action: #selector(zoomFitAction(_:)))
+        let actualButton = GhostButton(
+            symbol: "1.magnifyingglass", fallback: "1", caption: "Actual",
+            tooltip: "Actual Size", action: #selector(zoomActualAction(_:)))
+        let cropButton = GhostButton(
+            symbol: "crop", fallback: "⌗", caption: "Crop",
+            tooltip: "Crop to Selection", action: #selector(cropToSelection(_:)))
+        let toolbarStack = NSStackView(views: [
+            toolPill, zoomOutButton, zoomInButton, fitButton, actualButton,
+            NSView(), cropButton,
+        ])
+        toolbarStack.translatesAutoresizingMaskIntoConstraints = false
+        toolbarStack.orientation = .horizontal
+        toolbarStack.alignment = .centerY
+        toolbarStack.spacing = 14
+        toolbarStack.setCustomSpacing(20, after: toolPill)
+        toolbarBar.addSubview(toolbarStack)
+
+        let statusBar = BarView(border: .top)
         statusBar.translatesAutoresizingMaskIntoConstraints = false
+        let statusLeft = NSStackView(views: [statusDims, statusLayer, statusBlend])
+        statusLeft.translatesAutoresizingMaskIntoConstraints = false
+        statusLeft.orientation = .horizontal
+        statusLeft.spacing = 14
+        let statusRight = NSStackView(views: [statusTool, statusZoom])
+        statusRight.translatesAutoresizingMaskIntoConstraints = false
+        statusRight.orientation = .horizontal
+        statusRight.spacing = 14
+        statusBar.addSubview(statusLeft)
+        statusBar.addSubview(statusRight)
 
-        let separator = NSBox()
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.font = NSFont.monospacedDigitSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        statusLabel.lineBreakMode = .byTruncatingTail
-
-        let popup = NSPopUpButton(frame: .zero, pullsDown: true)
-        popup.translatesAutoresizingMaskIntoConstraints = false
-        popup.controlSize = .small
-        popup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        let zoomMenu = NSMenu()
-        let titleItem = NSMenuItem(title: "100%", action: nil, keyEquivalent: "")
-        zoomMenu.addItem(titleItem)
-        for percent in [5, 10, 25, 50, 100, 200, 400, 800] {
-            let item = NSMenuItem(
-                title: "\(percent)%", action: #selector(zoomPresetSelected(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = percent
-            zoomMenu.addItem(item)
-        }
-        let fitItem = NSMenuItem(
-            title: "Fit", action: #selector(zoomPresetSelected(_:)), keyEquivalent: "")
-        fitItem.target = self
-        fitItem.tag = -1
-        zoomMenu.addItem(fitItem)
-        popup.menu = zoomMenu
-        zoomPopup = popup
-        zoomTitleItem = titleItem
+        zoomPill.translatesAutoresizingMaskIntoConstraints = false
+        zoomPill.onZoomIn = { [weak self] in self?.zoomIn() }
+        zoomPill.onZoomOut = { [weak self] in self?.zoomOut() }
 
         // Layers panel + its 1px separator line.
         layersPanel = LayersPanelViewController()
@@ -252,17 +295,30 @@ final class EditorViewController: NSViewController {
         panelSeparator.boxType = .separator
         panelSeparator.translatesAutoresizingMaskIntoConstraints = false
 
-        statusBar.addSubview(separator)
-        statusBar.addSubview(statusLabel)
-        statusBar.addSubview(popup)
+        root.addSubview(toolbarBar)
         root.addSubview(optionsBar)
         root.addSubview(scrollView)
+        root.addSubview(zoomPill)
         root.addSubview(panelSeparator)
         root.addSubview(panelView)
         root.addSubview(statusBar)
 
+        guard let toolbarStackView = toolbarBar.subviews.first else {
+            fatalError("toolbar stack missing")
+        }
         NSLayoutConstraint.activate([
-            optionsBar.topAnchor.constraint(equalTo: root.topAnchor),
+            toolbarBar.topAnchor.constraint(equalTo: root.topAnchor),
+            toolbarBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            toolbarBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            toolbarBar.heightAnchor.constraint(equalToConstant: DS.toolbarHeight),
+
+            toolbarStackView.leadingAnchor.constraint(
+                equalTo: toolbarBar.leadingAnchor, constant: 14),
+            toolbarStackView.trailingAnchor.constraint(
+                equalTo: toolbarBar.trailingAnchor, constant: -14),
+            toolbarStackView.centerYAnchor.constraint(equalTo: toolbarBar.centerYAnchor),
+
+            optionsBar.topAnchor.constraint(equalTo: toolbarBar.bottomAnchor),
             optionsBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             optionsBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             optionsBar.heightAnchor.constraint(equalToConstant: 30),
@@ -270,8 +326,13 @@ final class EditorViewController: NSViewController {
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
+            zoomPill.leadingAnchor.constraint(
+                equalTo: scrollView.leadingAnchor, constant: 16),
+            zoomPill.bottomAnchor.constraint(
+                equalTo: scrollView.bottomAnchor, constant: -16),
+
             panelView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            panelView.widthAnchor.constraint(equalToConstant: 236),
+            panelView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
             panelView.topAnchor.constraint(equalTo: scrollView.topAnchor),
             panelView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
@@ -283,24 +344,20 @@ final class EditorViewController: NSViewController {
             statusBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             statusBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             statusBar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            statusBar.heightAnchor.constraint(equalToConstant: 27),
+            statusBar.heightAnchor.constraint(equalToConstant: DS.statusBarHeight),
 
-            separator.topAnchor.constraint(equalTo: statusBar.topAnchor),
-            separator.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor),
+            statusLeft.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor, constant: 14),
+            statusLeft.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
+            statusLeft.trailingAnchor.constraint(
+                lessThanOrEqualTo: statusRight.leadingAnchor, constant: -14),
 
-            statusLabel.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor, constant: 12),
-            statusLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
-            statusLabel.trailingAnchor.constraint(
-                lessThanOrEqualTo: popup.leadingAnchor, constant: -12),
-
-            popup.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor, constant: -12),
-            popup.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
-            popup.widthAnchor.constraint(greaterThanOrEqualToConstant: 76),
+            statusRight.trailingAnchor.constraint(
+                equalTo: statusBar.trailingAnchor, constant: -14),
+            statusRight.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
         ])
-        // The scroll view's top swaps between the window content top (select
-        // tool, bar hidden) and the options bar's bottom (all other tools).
-        scrollTopToRoot = scrollView.topAnchor.constraint(equalTo: root.topAnchor)
+        // The scroll view's top swaps between the toolbar's bottom (select/
+        // move tools, options bar hidden) and the options bar's bottom.
+        scrollTopToRoot = scrollView.topAnchor.constraint(equalTo: toolbarBar.bottomAnchor)
         scrollTopToOptions = scrollView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor)
         // The scroll view's trailing swaps between the panel separator
         // (layers visible) and the window edge (layers hidden).
@@ -450,7 +507,13 @@ final class EditorViewController: NSViewController {
         case .text: canvas.tool = .text
         }
         updateOptionsBar()
-        (view.window?.windowController as? EditorWindowController)?.reflectSelectedTool(tool)
+        reflectSelectedTool(tool)
+        updateStatus()
+    }
+
+    /// Mirrors tool selection into the toolbar pill (display only).
+    func reflectSelectedTool(_ tool: EditorTool) {
+        toolPill?.setSelectedIndex(tool.rawValue)
     }
 
     @objc func selectSelectTool(_ sender: Any?) { selectTool(.select) }
@@ -602,17 +665,39 @@ final class EditorViewController: NSViewController {
 
     private func updateStatus() {
         guard let document = document, let doc = document.doc else {
-            statusLabel.stringValue = ""
+            statusDims.text = "No document open"
+            statusLayer.text = ""
+            statusBlend.text = ""
+            statusTool.text = "Drop a file, or ⌘O"
+            statusZoom.text = ""
             return
         }
-        var text = "\(doc.width) × \(doc.height) px"
+        var dims = "\(doc.width) × \(doc.height) px"
         if let selection = canvas.selectionRect {
-            text += " — sel \(Int(selection.width))×\(Int(selection.height))"
+            dims += " · sel \(Int(selection.width)) × \(Int(selection.height))"
         }
+        statusDims.text = dims
         if let info = doc.layerInfo(document.activeLayerIndex) {
-            text += " · \(info.name)"
+            statusLayer.text = info.name
+            let percent = Int((Double(info.opacity) * 100).rounded())
+            statusBlend.text =
+                "\(RzBlendMode.displayName(for: info.blendMode)) · \(percent)%"
+        } else {
+            statusLayer.text = ""
+            statusBlend.text = ""
         }
-        statusLabel.stringValue = text
+        statusTool.text = toolDisplayName(currentTool)
+        updateZoomLabel()
+    }
+
+    private func toolDisplayName(_ tool: EditorTool) -> String {
+        switch tool {
+        case .select: return "Select"
+        case .move: return "Move"
+        case .brush: return "Brush"
+        case .eraser: return "Eraser"
+        case .text: return "Text"
+        }
     }
 
     /// Pushes the active layer's extent (image-pixel coordinates) to the
@@ -632,19 +717,12 @@ final class EditorViewController: NSViewController {
 
     private func updateZoomLabel() {
         let percent = Int((scrollView.magnification * 100).rounded())
-        zoomTitleItem?.title = "\(percent)%"
+        zoomPill.setZoomText("\(percent)%")
+        statusZoom.text = "\(percent)%"
     }
 
     @objc private func magnificationDidChange(_ note: Notification) {
         updateZoomLabel()
-    }
-
-    @objc private func zoomPresetSelected(_ sender: NSMenuItem) {
-        if sender.tag == -1 {
-            zoomToFit()
-        } else if sender.tag > 0 {
-            applyZoom(CGFloat(sender.tag) / 100)
-        }
     }
 
     // MARK: - Edit actions (responder chain)

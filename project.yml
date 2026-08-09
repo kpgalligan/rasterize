@@ -11,6 +11,10 @@ targets:
     platform: macOS
     sources:
       - path: app/Sources
+      - path: app/Assets.xcassets
+      - path: app/Resources/Fonts
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: Rasterize
@@ -18,6 +22,7 @@ targets:
         # cargo-build both targets and lipo them, then widen this.
         ARCHS: arm64
         SWIFT_VERSION: "5.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: app/Bridging/Rasterize-Bridging-Header.h
         LIBRARY_SEARCH_PATHS:
           - $(PROJECT_DIR)/core/target/release
@@ -40,6 +45,7 @@ targets:
         LSApplicationCategoryType: public.app-category.graphics-design
         NSPrincipalClass: NSApplication
         NSHighResolutionCapable: true
+        ATSApplicationFontsPath: Fonts
         NSHumanReadableCopyright: ""
         UTExportedTypeDeclarations:
           - UTTypeIdentifier: com.kgalligan.rasterize-document

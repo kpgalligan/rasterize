@@ -155,9 +155,9 @@ final class ImageCanvasView: NSView {
 
     private static let checkerboardColor: NSColor = {
         let tile = NSImage(size: NSSize(width: 20, height: 20), flipped: false) { rect in
-            NSColor.white.setFill()
+            DS.checkerB.setFill()
             rect.fill()
-            NSColor(white: 0.84, alpha: 1).setFill()
+            DS.checkerA.setFill()
             NSRect(x: 0, y: 0, width: 10, height: 10).fill()
             NSRect(x: 10, y: 10, width: 10, height: 10).fill()
             return true
@@ -271,22 +271,15 @@ final class ImageCanvasView: NSView {
         NSColor.black.withAlphaComponent(0.35).setFill()
         dimPath.fill()
 
-        // Hairline double stroke: dashed white over black, offset dash phase.
+        // 2px dashed coral marquee — one of the design's two sanctioned
+        // coral elements. Scaled by 1/magnification to stay 2 screen px.
         let scale = magnification
-        let lineWidth = 1 / scale
-        let dashPattern: [CGFloat] = [4 / scale, 4 / scale]
-
-        let blackPath = NSBezierPath(rect: selection)
-        blackPath.lineWidth = lineWidth
-        blackPath.setLineDash(dashPattern, count: dashPattern.count, phase: 0)
-        NSColor.black.setStroke()
-        blackPath.stroke()
-
-        let whitePath = NSBezierPath(rect: selection)
-        whitePath.lineWidth = lineWidth
-        whitePath.setLineDash(dashPattern, count: dashPattern.count, phase: 4 / scale)
-        NSColor.white.setStroke()
-        whitePath.stroke()
+        let path = NSBezierPath(rect: selection)
+        path.lineWidth = 2 / scale
+        let dashPattern: [CGFloat] = [5 / scale, 4 / scale]
+        path.setLineDash(dashPattern, count: dashPattern.count, phase: 0)
+        DS.marquee.setStroke()
+        path.stroke()
     }
 
     /// Subtle dashed outline (selection stroke style, thinner) marking the

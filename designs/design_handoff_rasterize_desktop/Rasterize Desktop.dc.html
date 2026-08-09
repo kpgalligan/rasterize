@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/fonts.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/colors.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/typography.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/space.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/radius.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/elevation.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/motion.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/base.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/components/components.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/styles.css">
+<script src="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/_ds_bundle.js"></script>
+<style>
+  body { margin: 0; background: #EAE3D4; }
+  a { color: var(--forest-700); }
+  a:hover { color: var(--coral-600); }
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#EAE3D4;padding:32px 32px 64px;font-family:var(--font-sans);color:var(--ink-0);box-sizing:border-box">
+
+  <div style="max-width:1320px;margin:0 auto;display:flex;flex-direction:column;gap:20px">
+
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap">
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <div style="font-family:var(--font-mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)">Rasterize · macOS · design proposal</div>
+        <div style="font-family:var(--font-display);font-weight:900;font-size:52px;line-height:.92;letter-spacing:-.03em">Edit anything. Natively.</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-family:var(--font-mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)">Appearance</span>
+        <div style="display:flex;gap:0;border:1.5px solid var(--ink-0);border-radius:999px;overflow:hidden;background:var(--paper-0)">
+          <button onClick="{{ setPaper }}" style="{{ paperBtn }}">Paper</button>
+          <button onClick="{{ setInk }}" style="{{ inkBtn }}">Ink</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <sc-for list="{{ screens }}" as="s" hint-placeholder-count="5">
+        <button onClick="{{ s.pick }}" style="{{ s.style }}">{{ s.label }}</button>
+      </sc-for>
+    </div>
+
+    <div data-theme="{{ inkScope }}" style="{{ brandVars }}">
+
+      <sc-if value="{{ isPrefs }}" hint-placeholder-val="">
+        <div style="display:flex;justify-content:center;padding:24px 0 8px">
+          <div style="width:660px;background:var(--surface-card);border:1.5px solid var(--ink-0);border-radius:14px;box-shadow:6px 6px 0 var(--ink-0);overflow:hidden">
+            <div style="height:44px;display:flex;align-items:center;padding:0 14px;gap:10px;background:var(--surface-sunken);border-bottom:1px solid var(--border-subtle)">
+              <div style="display:flex;gap:8px">
+                <span style="width:12px;height:12px;border-radius:999px;background:#FF5F57;border:1px solid rgba(0,0,0,.22);display:block"></span>
+                <span style="width:12px;height:12px;border-radius:999px;background:#FEBC2E;border:1px solid rgba(0,0,0,.22);display:block"></span>
+                <span style="width:12px;height:12px;border-radius:999px;background:#28C840;border:1px solid rgba(0,0,0,.22);display:block"></span>
+              </div>
+              <div style="flex:1;text-align:center;font-size:13px;font-weight:600;color:var(--text-body)">Settings</div>
+              <div style="width:56px"></div>
+            </div>
+            <div style="display:flex;gap:4px;padding:10px 14px;border-bottom:1px solid var(--border-subtle);background:var(--surface-card)">
+              <sc-for list="{{ prefTabs }}" as="t" hint-placeholder-count="3">
+                <button onClick="{{ t.pick }}" style="{{ t.style }}">{{ t.label }}</button>
+              </sc-for>
+            </div>
+            <div style="padding:22px 26px 26px;display:flex;flex-direction:column;gap:2px">
+              <sc-for list="{{ prefRows }}" as="r" hint-placeholder-count="5">
+                <div style="display:grid;grid-template-columns:190px 1fr;gap:20px;align-items:center;padding:12px 0;border-bottom:1px solid var(--border-subtle)">
+                  <div style="text-align:right;font-size:13px;color:var(--text-muted)">{{ r.label }}</div>
+                  <div style="display:flex;flex-direction:column;gap:4px">
+                    <div style="font-size:14px;color:var(--text-strong);font-weight:500">{{ r.value }}</div>
+                    <div style="font-size:12px;color:var(--text-faint);line-height:1.45">{{ r.hint }}</div>
+                  </div>
+                </div>
+              </sc-for>
+              <div style="padding-top:14px;font-family:var(--font-mono);font-size:11px;color:var(--text-faint)">Proposal — the app ships no Settings window today.</div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isWindow }}" hint-placeholder-val="{{ true }}">
+        <div style="position:relative">
+
+          <sc-if value="{{ isMenus }}" hint-placeholder-val="">
+            <div style="height:28px;display:flex;align-items:center;gap:2px;padding:0 12px;background:var(--surface-card);border:1.5px solid var(--ink-0);border-bottom:none;border-radius:12px 12px 0 0;position:relative;z-index:30">
+              <span style="font-family:var(--font-display);font-weight:900;font-size:17px;letter-spacing:-.02em;padding:0 10px 0 2px">balopy</span>
+              <sc-for list="{{ menus }}" as="m" hint-placeholder-count="8">
+                <button onClick="{{ m.pick }}" data-menu="{{ m.title }}" style="{{ m.style }}">{{ m.title }}</button>
+              </sc-for>
+            </div>
+          </sc-if>
+
+          <div style="position:relative;background:var(--surface-page);border:1.5px solid var(--ink-0);border-radius:{{ windowRadius }};box-shadow:6px 6px 0 var(--ink-0);overflow:hidden;display:grid;grid-template-rows:38px 58px 1fr 30px;height:780px">
+
+            <div style="display:flex;align-items:center;padding:0 14px;gap:12px;background:var(--surface-card);border-bottom:1px solid var(--border-subtle)">
+              <div style="display:flex;gap:8px">
+                <span style="width:12px;height:12px;border-radius:999px;background:#FF5F57;border:1px solid rgba(0,0,0,.22);display:block"></span>
+                <span style="width:12px;height:12px;border-radius:999px;background:#FEBC2E;border:1px solid rgba(0,0,0,.22);display:block"></span>
+                <span style="width:12px;height:12px;border-radius:999px;background:#28C840;border:1px solid rgba(0,0,0,.22);display:block"></span>
+              </div>
+              <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.15">
+                <div style="font-size:13px;font-weight:600;color:var(--text-strong)">{{ docTitle }}</div>
+                <div style="font-family:var(--font-mono);font-size:10px;color:var(--text-faint)">{{ docSubtitle }}</div>
+              </div>
+              <div style="width:64px"></div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:14px;padding:0 14px;background:var(--surface-card);border-bottom:1px solid var(--border-subtle)">
+              <div style="display:flex;align-items:stretch;border:var(--rz-bw,1.5px) solid var(--ink-0);border-radius:var(--rz-rad,999px);overflow:hidden;box-shadow:var(--rz-shadow,2px 2px 0 var(--ink-0));background:var(--surface-card)">
+                <sc-for list="{{ tools }}" as="t" hint-placeholder-count="5">
+                  <button onClick="{{ t.pick }}" title="{{ t.tip }}" style="{{ t.style }}">
+                    <x-import component-from-global-scope="BalopyDesignSystem_70aa0e.Icon" name="{{ t.icon }}" size="17" hint-size="17px,17px"></x-import>
+                    <span style="font-size:10px;letter-spacing:.02em">{{ t.label }}</span>
+                  </button>
+                </sc-for>
+              </div>
+
+              <sc-if value="{{ hasDoc }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;align-items:center;gap:4px">
+                <sc-for list="{{ zoomTools }}" as="z" hint-placeholder-count="4">
+                  <button onClick="{{ z.act }}" title="{{ z.tip }}" style="display:flex;flex-direction:column;align-items:center;gap:3px;width:52px;padding:5px 0;background:transparent;border:none;border-radius:8px;color:var(--text-body);cursor:pointer;font-family:inherit" style-hover="background:var(--surface-sunken)">
+                    <x-import component-from-global-scope="BalopyDesignSystem_70aa0e.Icon" name="{{ z.icon }}" size="17" hint-size="17px,17px"></x-import>
+                    <span style="font-size:10px;white-space:nowrap">{{ z.label }}</span>
+                  </button>
+                </sc-for>
+              </div>
+              </sc-if>
+
+              <div style="flex:1"></div>
+
+              <sc-if value="{{ hasDoc }}" hint-placeholder-val="{{ true }}">
+              <button onClick="{{ openImageSize }}" title="Crop to Selection · ⌘K" style="display:flex;flex-direction:column;align-items:center;gap:3px;width:52px;padding:5px 0;background:transparent;border:none;border-radius:8px;color:var(--text-body);cursor:pointer;font-family:inherit" style-hover="background:var(--surface-sunken)">
+                <x-import component-from-global-scope="BalopyDesignSystem_70aa0e.Icon" name="crop" size="17" hint-size="17px,17px"></x-import>
+                <span style="font-size:10px">Crop</span>
+              </button>
+              </sc-if>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr auto;min-height:0">
+
+              <sc-if value="{{ hasDoc }}" hint-placeholder-val="{{ true }}">
+                <div style="position:relative;background:var(--canvas-void);display:grid;place-items:center;padding:36px;min-height:0;overflow:hidden">
+                  <div style="position:relative;background-color:var(--canvas-checker-b);background-image:linear-gradient(45deg,var(--canvas-checker-a) 25%,transparent 25%,transparent 75%,var(--canvas-checker-a) 75%),linear-gradient(45deg,var(--canvas-checker-a) 25%,transparent 25%,transparent 75%,var(--canvas-checker-a) 75%);background-size:20px 20px;background-position:0 0,10px 10px;box-shadow:0 18px 48px rgba(0,0,0,.5);width:min(100%,760px);aspect-ratio:3 / 2">
+                    <div style="position:absolute;inset:0;background:linear-gradient(150deg,#2B3A5C 0%,#4E6B86 34%,#C9A06A 62%,#F0C98C 82%,#F7E4C3 100%)"></div>
+                    <div style="position:absolute;left:0;right:0;bottom:0;top:58%;background:linear-gradient(180deg,rgba(28,44,66,0) 0%,rgba(28,44,66,.42) 100%)"></div>
+                    <div style="position:absolute;inset:0;border:2px dashed rgba(244,101,63,.9);margin:14% 22% 18% 12%;pointer-events:none"></div>
+                    <div style="position:absolute;left:10px;top:10px;font-family:var(--font-mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:rgba(251,248,241,.82);background:rgba(11,18,15,.55);backdrop-filter:blur(8px);padding:4px 8px;border-radius:999px">placeholder image</div>
+                    <div style="position:absolute;right:10px;bottom:10px;font-family:var(--font-mono);font-size:11px;color:rgba(251,248,241,.9);background:rgba(11,18,15,.72);backdrop-filter:blur(8px);padding:5px 10px;border-radius:999px">1180 × 780 selection</div>
+                  </div>
+                  <div style="position:absolute;left:16px;bottom:16px;display:flex;align-items:center;gap:8px;background:rgba(11,18,15,.72);backdrop-filter:blur(8px);border-radius:999px;padding:6px 6px 6px 12px">
+                    <span style="font-family:var(--font-mono);font-size:12px;color:#FBF8F1">{{ zoomLabel }}</span>
+                    <button onClick="{{ zoomOut }}" style="width:24px;height:24px;border-radius:999px;border:none;background:rgba(251,248,241,.14);color:#FBF8F1;cursor:pointer;font-size:14px;line-height:1;display:grid;place-items:center" style-hover="background:rgba(251,248,241,.28)">−</button>
+                    <button onClick="{{ zoomIn }}" style="width:24px;height:24px;border-radius:999px;border:none;background:rgba(251,248,241,.14);color:#FBF8F1;cursor:pointer;font-size:14px;line-height:1;display:grid;place-items:center" style-hover="background:rgba(251,248,241,.28)">+</button>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ isEmpty }}" hint-placeholder-val="">
+                <div style="position:relative;background:var(--surface-sunken);display:grid;place-items:center;padding:40px;min-height:0">
+                  <div style="display:flex;flex-direction:column;align-items:center;gap:24px;max-width:520px;text-align:center">
+                    <div style="position:relative;width:132px;height:96px">
+                      <span style="position:absolute;left:0;top:14px;width:68px;height:68px;border-radius:999px;background:var(--overlap-1);mix-blend-mode:multiply;display:block"></span>
+                      <span style="position:absolute;left:32px;top:0;width:68px;height:68px;border-radius:999px;background:var(--overlap-2);mix-blend-mode:multiply;display:block"></span>
+                      <span style="position:absolute;left:64px;top:14px;width:68px;height:68px;border-radius:999px;background:var(--overlap-3);mix-blend-mode:multiply;display:block"></span>
+                    </div>
+                    <div style="font-family:var(--font-display);font-weight:900;font-size:42px;line-height:.92;letter-spacing:-.03em;color:var(--text-strong)">No document open</div>
+                    <div style="font-size:15px;line-height:1.5;color:var(--text-muted);max-width:44ch">Drop a file anywhere in this window, or open one. Rasterize does not create blank canvases — every document starts from pixels you already have.</div>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center">
+                      <x-import component-from-global-scope="BalopyDesignSystem_70aa0e.Button" variant="primary" iconLeft="folder-open" hint-size="auto,40px">Open…</x-import>
+                      <x-import component-from-global-scope="BalopyDesignSystem_70aa0e.Button" variant="secondary" iconLeft="copy" hint-size="auto,40px">New from Clipboard</x-import>
+                    </div>
+                    <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-faint);line-height:1.6">PNG · JPEG · PSD (layered) · TIFF · BMP · GIF · WebP · RZ</div>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ hasDoc }}" hint-placeholder-val="{{ true }}">
+              <div style="width:304px;background:var(--surface-card);border-left:1px solid var(--border-subtle);display:grid;grid-template-rows:auto auto 1fr auto;min-height:0">
+
+                <div style="display:flex;gap:2px;padding:8px 8px 0">
+                  <sc-for list="{{ panelTabs }}" as="p" hint-placeholder-count="3">
+                    <button onClick="{{ p.pick }}" style="{{ p.style }}">{{ p.label }}</button>
+                  </sc-for>
+                </div>
+
+                <sc-if value="{{ showLayers }}" hint-placeholder-val="{{ true }}">
+                  <div style="padding:12px 12px 10px;display:flex;flex-direction:column;gap:10px;border-bottom:1px solid var(--border-subtle)">
+                    <button onClick="{{ toggleBlend }}" style="display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:7px 10px;background:var(--surface-card);border:var(--rz-bw,1.5px) solid var(--ink-0);border-radius:7px;font-family:inherit;font-size:13px;color:var(--text-strong);cursor:pointer;text-align:left" style-hover="background:var(--surface-sunken)">
+                      <span>{{ blendMode }}</span>
+                      <x-import component-from-global-scope="BalopyDesignSystem_70aa0e.Icon" name="chevron-down" size="14" hint-size="14px,14px"></x-import>
+                    </button>
+                    <div style="display:flex;align-items:center;gap:10px">
+                      <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-faint);white-space:nowrap">Opacity</span>
+                      <input type="range" min="0" max="100" value="{{ opacity }}" onInput="{{ setOpacity }}" style="flex:1;accent-color:var(--coral-500);height:18px">
+                      <span style="font-family:var(--font-mono);font-size:12px;color:var(--text-body);width:40px;text-align:right">{{ opacityLabel }}</span>
+                    </div>
+                  </div>
+
+                  <div style="overflow:auto;min-height:0;padding:6px">
+                    <sc-for list="{{ layers }}" as="l" hint-placeholder-count="4">
+                      <div onClick="{{ l.pick }}" style="{{ l.style }}">
+                        <button onClick="{{ l.toggle }}" style="width:22px;height:22px;display:grid;place-items:center;border:none;background:transparent;color:{{ l.eyeColor }};cursor:pointer;flex:none;border-radius:5px" style-hover="background:var(--surface-sunken)">
+                          <x-import component-from-global-scope="BalopyDesignSystem_70aa0e.Icon" name="{{ l.eye }}" size="15" hint-size="15px,15px"></x-import>
+                        </button>
+                        <span style="{{ l.thumbStyle }}"></span>
+                        <span style="display:flex;flex-direction:column;gap:1px;min-width:0;flex:1">
+                          <span style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:{{ l.nameColor }}">{{ l.name }}</span>
+                          <span style="font-family:var(--font-mono);font-size:10px;color:var(--text-faint);white-space:nowrap">{{ l.meta }}</span>
+                        </span>
+                      </div>
+                    </sc-for>
+                  </div>
+
+                  <div style="display:flex;align-items:center;gap:2px;padding:6px 8px;border-top:1px solid var(--border-subtle)">
+                    <sc-for list="{{ layerActions }}" as="a" hint-placeholder-count="4">
+                      <button onClick="{{ a.act }}" title="{{ a.tip }}" style="width:30px;height:26px;display:grid;place-items:center;border:none;background:transparent;border-radius:6px;color:var(--text-body);cursor:pointer" style-hover="background:var(--surface-sunken)">
+                        <x-import component-from-global-scope="BalopyDesignSystem_70aa0e.Icon" name="{{ a.icon }}" size="15" hint-size="15px,15px"></x-import>
+                      </button>
+                    </sc-for>
+                    <span style="flex:1"></span>
+                    <span style="font-family:var(--font-mono);font-size:10px;color:var(--text-faint)">{{ layerCountLabel }}</span>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ showAdjust }}" hint-placeholder-val="">
+                  <div style="grid-row:span 3;overflow:auto;min-height:0;padding:14px 14px 18px;display:flex;flex-direction:column;gap:18px">
+                    <div style="display:flex;flex-direction:column;gap:6px">
+                      <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-faint)">Adjust colors</span>
+                      <span style="font-size:12px;color:var(--text-muted);line-height:1.45">Live preview on <b style="color:var(--text-strong)">{{ activeLayerName }}</b>. Apply commits one undo step.</span>
+                    </div>
+                    <sc-for list="{{ adjustSliders }}" as="s" hint-placeholder-count="3">
+                      <div style="display:flex;flex-direction:column;gap:5px">
+                        <div style="display:flex;justify-content:space-between;align-items:baseline">
+                          <span style="font-size:13px;color:var(--text-body)">{{ s.label }}</span>
+                          <span style="font-family:var(--font-mono);font-size:12px;color:var(--text-muted)">{{ s.display }}</span>
+                        </div>
+                        <input type="range" min="-100" max="100" value="{{ s.value }}" onInput="{{ s.set }}" style="width:100%;accent-color:var(--coral-500)">
+                      </div>
+                    </sc-for>
+
+                    <div style="height:1px;background:var(--border-subtle)"></div>
+
+                    <div style="display:flex;flex-direction:column;gap:8px">
+                      <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-faint)">Levels</span>
+                      <div style="position:relative;height:78px;border:1px solid var(--border-subtle);border-radius:7px;background:var(--surface-sunken);display:flex;align-items:flex-end;gap:1px;padding:6px 8px;overflow:hidden">
+                        <sc-for list="{{ histogram }}" as="h" hint-placeholder-count="40">
+                          <span style="{{ h.style }}"></span>
+                        </sc-for>
+                      </div>
+                      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+                        <sc-for list="{{ levelFields }}" as="f" hint-placeholder-count="3">
+                          <div style="display:flex;flex-direction:column;gap:4px">
+                            <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-faint)">{{ f.label }}</span>
+                            <span style="font-family:var(--font-mono);font-size:13px;color:var(--text-strong);background:var(--surface-card);border:1px solid var(--border-medium);border-radius:7px;padding:5px 8px">{{ f.value }}</span>
+                          </div>
+                        </sc-for>
+                      </div>
+                    </div>
+
+                    <div style="display:flex;gap:8px;align-items:center">
+                      <x-import component-from-global-scope="BalopyDesignSystem_70aa0e.Button" variant="ghost" size="sm" hint-size="auto,32px">Reset</x-import>
+                      <span style="flex:1"></span>
+                      <x-import component-from-global-scope="BalopyDesignSystem_70aa0e.Button" variant="primary" size="sm" hint-size="auto,32px">Apply</x-import>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ showAgent }}" hint-placeholder-val="">
+                  <div style="grid-row:span 3;overflow:auto;min-height:0;padding:20px 16px;display:flex;flex-direction:column;gap:16px;align-items:flex-start">
+                    <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--coral-600);border:1px solid var(--coral-300);background:var(--surface-accent-soft);border-radius:999px;padding:3px 9px">Reserved</span>
+                    <div style="font-family:var(--font-display);font-weight:800;font-size:30px;line-height:.95;letter-spacing:-.02em;color:var(--text-strong)">Room for the agent</div>
+                    <div style="font-size:13px;line-height:1.55;color:var(--text-muted)">This column is sized and styled for the assistant, but nothing ships in it yet. When it does, it works first and reports after — every step it takes is its own undo, and the meter shows what the run cost.</div>
+                    <div style="width:100%;border:1px dashed var(--border-medium);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:8px;background:var(--surface-sunken)">
+                      <span style="font-family:var(--font-mono);font-size:11px;color:var(--text-faint)">rz.agent · not implemented</span>
+                      <span style="font-size:12px;color:var(--text-faint);line-height:1.5">Panel width 304px · same tab strip · coral is reserved for this surface, which is why the rest of the app uses it sparingly.</span>
+                    </div>
+                  </div>
+                </sc-if>
+
+              </div>
+              </sc-if>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:14px;padding:0 14px;background:var(--surface-card);border-top:1px solid var(--border-subtle);font-family:var(--font-mono);font-size:11px;color:var(--text-faint)">
+              <sc-if value="{{ hasDoc }}" hint-placeholder-val="{{ true }}">
+                <span>{{ statusSize }}</span>
+                <span style="border-left:1px solid var(--border-subtle);padding-left:14px">{{ statusLayer }}</span>
+                <span style="border-left:1px solid var(--border-subtle);padding-left:14px">{{ statusBlend }}</span>
+                <span style="flex:1"></span>
+                <span>{{ statusTool }}</span>
+                <span style="border-left:1px solid var(--border-subtle);padding-left:14px">{{ zoomLabel }}</span>
+              </sc-if>
+              <sc-if value="{{ isEmpty }}" hint-placeholder-val="">
+                <span>No document open</span>
+                <span style="flex:1"></span>
+                <span>Drop a file, or ⌘O</span>
+              </sc-if>
+            </div>
+
+            <sc-if value="{{ sheet }}" hint-placeholder-val="">
+              <div style="position:absolute;inset:0;background:var(--overlay-scrim);display:flex;justify-content:center;align-items:flex-start;z-index:20">
+                <div style="margin-top:38px;width:420px;background:var(--surface-card);border:1.5px solid var(--ink-0);border-radius:0 0 14px 14px;box-shadow:0 24px 60px rgba(16,25,21,.45);overflow:hidden">
+                  <div style="padding:20px 22px 6px;display:flex;flex-direction:column;gap:3px">
+                    <div style="font-size:15px;font-weight:700;color:var(--text-strong)">{{ sheetTitle }}</div>
+                    <div style="font-size:12px;color:var(--text-muted);line-height:1.45">{{ sheetHint }}</div>
+                  </div>
+
+                  <div style="padding:14px 22px 4px;display:flex;flex-direction:column;gap:12px">
+                    <sc-for list="{{ sheetRows }}" as="r" hint-placeholder-count="3">
+                      <div style="display:grid;grid-template-columns:106px 1fr;gap:12px;align-items:center">
+                        <span style="text-align:right;font-size:13px;color:var(--text-body)">{{ r.label }}</span>
+                        <span style="{{ r.valueStyle }}">{{ r.value }}</span>
+                      </div>
+                    </sc-for>
+
+                    <sc-if value="{{ sheetAnchor }}" hint-placeholder-val="">
+                      <div style="display:grid;grid-template-columns:106px 1fr;gap:12px;align-items:start">
+                        <span style="text-align:right;font-size:13px;color:var(--text-body);padding-top:4px">Anchor:</span>
+                        <div style="display:grid;grid-template-columns:repeat(3,32px);grid-template-rows:repeat(3,28px);gap:2px">
+                          <sc-for list="{{ anchorCells }}" as="c" hint-placeholder-count="9">
+                            <button onClick="{{ c.pick }}" style="{{ c.style }}">{{ c.glyph }}</button>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-if>
+
+                    <sc-if value="{{ sheetSlider }}" hint-placeholder-val="">
+                      <div style="display:grid;grid-template-columns:106px 1fr 46px;gap:12px;align-items:center">
+                        <span style="text-align:right;font-size:13px;color:var(--text-body)">Quality:</span>
+                        <input type="range" min="10" max="100" value="{{ quality }}" onInput="{{ setQuality }}" style="width:100%;accent-color:var(--coral-500)">
+                        <span style="font-family:var(--font-mono);font-size:13px;color:var(--text-strong);text-align:right">{{ quality }}</span>
+                      </div>
+                    </sc-if>
+                  </div>
+
+                  <div style="display:flex;align-items:center;gap:8px;padding:20px 22px 22px">
+                    <span style="flex:1;font-family:var(--font-mono);font-size:10px;color:var(--text-faint)">{{ sheetFoot }}</span>
+                    <button onClick="{{ closeSheet }}" style="padding:7px 16px;border-radius:var(--rz-rad,999px);border:var(--rz-bw,1.5px) solid var(--ink-0);background:var(--surface-card);color:var(--text-strong);font-family:inherit;font-size:13px;cursor:pointer;box-shadow:var(--rz-shadow,2px 2px 0 var(--ink-0))">Cancel</button>
+                    <button onClick="{{ closeSheet }}" style="padding:7px 16px;border-radius:var(--rz-rad,999px);border:var(--rz-bw,1.5px) solid var(--ink-0);background:var(--forest-700);color:var(--paper-0);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;box-shadow:var(--rz-shadow,2px 2px 0 var(--ink-0))">{{ sheetPrimary }}</button>
+                  </div>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ blendOpen }}" hint-placeholder-val="">
+              <div onClick="{{ toggleBlend }}" style="position:absolute;inset:0;z-index:25"></div>
+              <div style="position:absolute;right:316px;top:150px;width:230px;max-height:440px;overflow:auto;background:var(--surface-card);border:1.5px solid var(--ink-0);border-radius:10px;box-shadow:0 18px 44px rgba(16,25,21,.4);padding:5px;z-index:26">
+                <sc-for list="{{ blendItems }}" as="b" hint-placeholder-count="12">
+                  <div>
+                    <sc-if value="{{ b.sep }}" hint-placeholder-val="">
+                      <div style="height:1px;background:var(--border-subtle);margin:5px 8px"></div>
+                    </sc-if>
+                    <sc-if value="{{ b.name }}" hint-placeholder-val="{{ true }}">
+                      <button onClick="{{ b.pick }}" style="{{ b.style }}">{{ b.name }}</button>
+                    </sc-if>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+
+          </div>
+
+          <sc-if value="{{ openMenu }}" hint-placeholder-val="">
+            <div style="{{ menuPos }}">
+              <sc-for list="{{ menuItems }}" as="i" hint-placeholder-count="8">
+                <div>
+                  <sc-if value="{{ i.sep }}" hint-placeholder-val="">
+                    <div style="height:1px;background:var(--border-subtle);margin:5px 10px"></div>
+                  </sc-if>
+                  <sc-if value="{{ i.label }}" hint-placeholder-val="{{ true }}">
+                    <div style="display:flex;align-items:center;gap:24px;padding:5px 12px;border-radius:6px;font-size:13px;color:var(--text-body);cursor:default" style-hover="background:var(--forest-700);color:var(--paper-0)">
+                      <span style="flex:1;white-space:nowrap">{{ i.label }}</span>
+                      <span style="font-family:var(--font-mono);font-size:12px;color:var(--text-faint);white-space:nowrap">{{ i.key }}</span>
+                    </div>
+                  </sc-if>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+
+        </div>
+      </sc-if>
+
+      <div style="margin-top:18px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-family:var(--font-mono);font-size:11px;color:var(--ink-3)">
+        <span>{{ note }}</span>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1400,&quot;height&quot;:1080}}">
+const BLEND_GROUPS = [
+  ["Normal", "Dissolve"],
+  ["Darken", "Multiply", "Color Burn", "Linear Burn", "Darker Color"],
+  ["Lighten", "Screen", "Color Dodge", "Linear Dodge (Add)", "Lighter Color"],
+  ["Overlay", "Soft Light", "Hard Light", "Vivid Light", "Linear Light", "Pin Light", "Hard Mix"],
+  ["Difference", "Exclusion", "Subtract", "Divide"],
+  ["Hue", "Saturation", "Color", "Luminosity"]
+];
+
+const MENUS = {
+  File: [
+    ["New from Clipboard", "⌘N"], ["Open…", "⌘O"], ["Open Recent", "▸"], null,
+    ["Close", "⌘W"], ["Save", "⌘S"], ["Save As…", "⇧⌘S"], ["Revert to Saved", ""], null,
+    ["Export…", "⌘E"]
+  ],
+  Edit: [["Undo", "⌘Z"], ["Redo", "⇧⌘Z"], null, ["Copy", "⌘C"], ["Paste", "⌘V"], null, ["Select All", "⌘A"], ["Deselect", "⌘D"]],
+  Image: [
+    ["Rotate 90° Clockwise", "⌘R"], ["Rotate 90° Counterclockwise", "⇧⌘R"], ["Rotate 180°", ""],
+    ["Flip Horizontal", ""], ["Flip Vertical", ""], null,
+    ["Crop to Selection", "⌘K"], ["Image Size…", "⌥⌘I"], ["Canvas Size…", "⌥⌘C"]
+  ],
+  Layer: [["New Layer", "⇧⌘N"], ["Duplicate Layer", "⌘J"], ["Delete Layer", ""], null, ["Merge Down", "⇧⌘E"], ["Flatten Image", ""]],
+  Filters: [
+    ["Adjust Colors…", "⌥⌘A"], ["Levels…", ""], ["Hue Rotate…", ""], ["Threshold…", ""], ["Posterize…", ""], null,
+    ["Grayscale", ""], ["Invert", "⌘I"], ["Sepia", ""], null,
+    ["Gaussian Blur…", ""], ["Sharpen", ""], ["Pixelate…", ""], ["Add Noise…", ""], ["Edge Detect", ""], ["Emboss", ""]
+  ],
+  Tools: [["Select Tool", ""], ["Move Tool", ""], ["Brush Tool", ""], ["Eraser Tool", ""], ["Text Tool", ""]],
+  View: [["Zoom In", "⌘+"], ["Zoom Out", "⌘−"], ["Actual Size", "⌘0"], ["Zoom to Fit", "⌘9"], null, ["Hide Layers", "⌥⌘L"]],
+  Window: [["Minimize", "⌘M"], ["Zoom", ""], null, ["Bring All to Front", ""]],
+  Help: [["Rasterize Help", ""]]
+};
+
+const TOOLS = [
+  { id: "select", label: "Select", icon: "lasso", tip: "Select" },
+  { id: "move", label: "Move", icon: "mouse-pointer-2", tip: "Move · V" },
+  { id: "brush", label: "Brush", icon: "paintbrush", tip: "Brush · B" },
+  { id: "eraser", label: "Eraser", icon: "eraser", tip: "Eraser · E" },
+  { id: "text", label: "Text", icon: "type", tip: "Text · T" }
+];
+
+const SHEETS = {
+  imageSize: {
+    title: "Image Size",
+    hint: "Scales the whole document. Every layer is resampled with the chosen filter.",
+    rows: [["Current size:", "2048 × 1365 px", "muted"], ["Width:", "1600", "field"], ["Height:", "1067", "field"], ["", "Lock aspect ratio ✓", "check"], ["Filter:", "Lanczos3 ⌄", "select"]],
+    foot: "max 100 MP", primary: "Apply"
+  },
+  canvasSize: {
+    title: "Canvas Size",
+    hint: "Grows or trims the canvas without scaling. Layers keep their pixels and can be revealed again later.",
+    rows: [["Current size:", "2048 × 1365 px", "muted"], ["Width:", "2400", "field"], ["Height:", "1600", "field"]],
+    anchor: true, foot: "⌥⌘C", primary: "Apply"
+  },
+  export: {
+    title: "Export a copy",
+    hint: "The original file is untouched. A failed save never truncates the destination.",
+    rows: [["Save as:", "beach-export.jpg", "field"], ["Where:", "Downloads ⌄", "select"], ["Format:", "JPEG ⌄", "select"]],
+    slider: true, foot: "⌘E", primary: "Export"
+  },
+  levels: {
+    title: "Levels",
+    hint: "Previews in context on the active layer — blend modes and the other layers stay visible while you scrub.",
+    rows: [["Black:", "0.06", "field"], ["White:", "0.94", "field"], ["Gamma:", "1.12", "field"]],
+    foot: "one undo step", primary: "Apply"
+  }
+};
+
+const SCREENS = [
+  ["editor", "Editing window"],
+  ["menus", "Menus + toolbar"],
+  ["dialogs", "Dialogs"],
+  ["empty", "No document"],
+  ["prefs", "Settings"]
+];
+
+const HIST = [4,6,9,13,18,26,35,44,52,58,61,59,54,48,44,42,45,52,62,72,80,86,88,84,76,66,57,50,46,44,46,51,58,66,73,77,76,70,60,48,36,26,18,12,8,5];
+
+class Component extends DCLogic {
+  state = {
+    screen: "editor",
+    theme: "paper",
+    tool: "brush",
+    panel: "layers",
+    activeLayer: 2,
+    hidden: {},
+    opacity: 62,
+    blend: "Soft Light",
+    blendOpen: false,
+    zoom: 100,
+    sheet: null,
+    openMenu: null,
+    anchor: 4,
+    quality: 90,
+    prefTab: "General",
+    menuLeft: 78,
+    adjust: { brightness: 8, contrast: 14, saturation: -6 }
+  };
+
+  set(patch) { this.setState(patch); }
+
+  componentDidMount() { this.syncMenuLeft(); }
+  componentDidUpdate() { this.syncMenuLeft(); }
+
+  /** Anchors the dropdown under the clicked menu title (titles are variable width). */
+  syncMenuLeft() {
+    const name = this.state.openMenu;
+    if (!name) return;
+    const el = document.querySelector('[data-menu="' + name + '"]');
+    if (!el) return;
+    const left = el.offsetLeft;
+    if (left !== this.state.menuLeft) this.setState({ menuLeft: left });
+  }
+
+  layerData() {
+    return [
+      { name: "Sky replace", meta: "Normal · 100%", grad: "linear-gradient(135deg,#2B3A5C,#7FA6C9)" },
+      { name: "Warmth", meta: this.state.blend + " · " + this.state.opacity + "%", grad: "linear-gradient(135deg,#F2C14E,#F4653F)" },
+      { name: "Retouch", meta: "Normal · 100%", grad: "linear-gradient(135deg,#EAE3D4,#C4B9A2)" },
+      { name: "Background", meta: "Normal · 100% · locked", grad: "linear-gradient(135deg,#4E6B86,#F0C98C)" }
+    ];
+  }
+
+  tabStyle(active, big) {
+    const pad = big ? "8px 14px" : "6px 11px";
+    return "padding:" + pad + ";border-radius:999px;font-family:inherit;font-size:13px;cursor:pointer;white-space:nowrap;border:1.5px solid " +
+      (active ? "var(--ink-0)" : "transparent") + ";background:" + (active ? "var(--paper-0)" : "transparent") +
+      ";color:var(--ink-0);font-weight:" + (active ? "600" : "400") + ";box-shadow:" + (active ? "2px 2px 0 var(--ink-0)" : "none");
+  }
+
+  renderVals() {
+    const s = this.state;
+    const isWindow = s.screen !== "prefs";
+    const hasDoc = s.screen === "editor" || s.screen === "menus" || s.screen === "dialogs";
+    const layers = this.layerData();
+    const active = layers[s.activeLayer];
+
+    const notes = {
+      editor: "Grounded in EditorViewController · LayersPanelViewController · EditorWindowController.",
+      menus: "Menu titles, item order and key equivalents are exactly those built in AppDelegate.buildMainMenu().",
+      dialogs: "Sheets mirror Sheets.swift and ExportAccessoryController.swift — Export is drawn as a sheet rather than the NSSavePanel accessory.",
+      empty: "The app has no untitled document: applicationShouldOpenUntitledFile opens the panel instead. This is a proposed window for that moment.",
+      prefs: "Proposal. No Settings window exists in the repo today."
+    };
+
+    return {
+      inkScope: s.theme === "ink" ? "ink" : "",
+      brandVars: "--rz-shadow:2px 2px 0 var(--ink-0);--rz-bw:1.5px;--rz-rad:999px",
+      windowRadius: s.screen === "menus" ? "0 0 12px 12px" : "12px",
+      isWindow, hasDoc,
+      isPrefs: s.screen === "prefs",
+      isEmpty: s.screen === "empty",
+      isMenus: s.screen === "menus",
+      note: notes[s.screen],
+
+      setPaper: () => this.set({ theme: "paper" }),
+      setInk: () => this.set({ theme: "ink" }),
+      paperBtn: "padding:6px 14px;border:none;font-family:inherit;font-size:12px;cursor:pointer;background:" + (s.theme === "paper" ? "var(--ink-0)" : "transparent") + ";color:" + (s.theme === "paper" ? "#FBF8F1" : "var(--ink-0)"),
+      inkBtn: "padding:6px 14px;border:none;font-family:inherit;font-size:12px;cursor:pointer;background:" + (s.theme === "ink" ? "var(--ink-0)" : "transparent") + ";color:" + (s.theme === "ink" ? "#FBF8F1" : "var(--ink-0)"),
+
+      screens: SCREENS.map(([id, label]) => ({
+        label, style: this.tabStyle(s.screen === id, true),
+        pick: () => this.set({ screen: id, sheet: id === "dialogs" ? "imageSize" : null, openMenu: id === "menus" ? "Filters" : null, blendOpen: false })
+      })),
+
+      docTitle: s.screen === "empty" ? "Rasterize" : "beach-2048.png — Edited",
+      docSubtitle: s.screen === "empty" ? "no document" : "2048 × 1365 px",
+
+      tools: TOOLS.map(t => ({
+        label: t.label, icon: t.icon, tip: t.tip,
+        pick: () => this.set({ tool: t.id }),
+        style: "display:flex;flex-direction:column;align-items:center;gap:3px;width:56px;padding:6px 0;border:none;border-right:1px solid var(--border-subtle);cursor:pointer;font-family:inherit;opacity:" +
+          (hasDoc ? "1" : ".42") + ";pointer-events:" + (hasDoc ? "auto" : "none") + ";background:" +
+          (s.tool === t.id && hasDoc ? "var(--surface-brand-soft)" : "var(--surface-card)") + ";color:" + (s.tool === t.id && hasDoc ? "var(--text-brand)" : "var(--text-body)") +
+          ";font-weight:" + (s.tool === t.id ? "600" : "400")
+      })),
+
+      zoomTools: [
+        { label: "Zoom Out", icon: "zoom-out", tip: "⌘−", act: () => this.set({ zoom: Math.max(12, s.zoom - 25) }) },
+        { label: "Zoom In", icon: "zoom-in", tip: "⌘+", act: () => this.set({ zoom: Math.min(800, s.zoom + 25) }) },
+        { label: "Fit", icon: "maximize", tip: "⌘9", act: () => this.set({ zoom: 46 }) },
+        { label: "Actual", icon: "square", tip: "⌘0", act: () => this.set({ zoom: 100 }) }
+      ],
+      zoomIn: () => this.set({ zoom: Math.min(800, s.zoom + 25) }),
+      zoomOut: () => this.set({ zoom: Math.max(12, s.zoom - 25) }),
+      zoomLabel: s.zoom + "%",
+
+      panelTabs: [
+        { id: "layers", label: "Layers" },
+        { id: "adjust", label: "Adjust" },
+        { id: "agent", label: "Ask" }
+      ].map(p => ({
+        label: p.label, style: this.tabStyle(s.panel === p.id, false),
+        pick: () => this.set({ panel: p.id, blendOpen: false })
+      })),
+      showLayers: s.panel === "layers" ? true : "",
+      showAdjust: s.panel === "adjust" ? true : "",
+      showAgent: s.panel === "agent" ? true : "",
+
+      blendMode: s.blend,
+      toggleBlend: () => this.set({ blendOpen: !s.blendOpen }),
+      blendOpen: s.blendOpen ? true : "",
+      blendItems: BLEND_GROUPS.flatMap((group, gi) => {
+        const rows = group.map(name => ({
+          name, sep: "", pick: () => this.set({ blend: name, blendOpen: false }),
+          style: "display:block;width:100%;text-align:left;padding:5px 10px;border:none;border-radius:6px;font-family:inherit;font-size:13px;cursor:pointer;background:" +
+            (s.blend === name ? "var(--forest-700)" : "transparent") + ";color:" + (s.blend === name ? "var(--paper-0)" : "var(--text-body)")
+        }));
+        return gi === 0 ? rows : [{ name: "", sep: true, style: "", pick: () => {} }].concat(rows);
+      }),
+
+      opacity: s.opacity,
+      opacityLabel: s.opacity + "%",
+      setOpacity: e => this.set({ opacity: Number(e.target.value) }),
+
+      layers: layers.map((l, i) => {
+        const idx = i;
+        const visible = !s.hidden[idx];
+        const sel = s.activeLayer === idx;
+        return {
+          name: l.name,
+          meta: idx === 1 ? s.blend + " · " + s.opacity + "%" : l.meta,
+          eye: visible ? "eye" : "eye-off",
+          eyeColor: visible ? "var(--text-body)" : "var(--text-faint)",
+          nameColor: visible ? (sel ? "var(--text-brand)" : "var(--text-body)") : "var(--text-faint)",
+          pick: () => this.set({ activeLayer: idx }),
+          toggle: () => this.setState(st => ({ hidden: Object.assign({}, st.hidden, { [idx]: !st.hidden[idx] }) })),
+          thumbStyle: "width:34px;height:34px;flex:none;border-radius:5px;border:1px solid var(--border-subtle);display:block;background:" + l.grad + ";opacity:" + (visible ? "1" : ".35"),
+          style: "display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:8px;cursor:pointer;font-weight:" + (sel ? "600" : "400") +
+            ";background:" + (sel ? "var(--surface-brand-soft)" : "transparent")
+        };
+      }),
+      layerActions: [
+        { icon: "plus", tip: "New Layer · ⇧⌘N", act: () => {} },
+        { icon: "minus", tip: "Delete Layer", act: () => {} },
+        { icon: "copy", tip: "Duplicate Layer · ⌘J", act: () => {} },
+        { icon: "chevrons-down", tip: "Merge Down · ⇧⌘E", act: () => {} }
+      ],
+      layerCountLabel: "4 layers",
+      activeLayerName: active.name,
+
+      adjustSliders: [
+        { key: "brightness", label: "Brightness" },
+        { key: "contrast", label: "Contrast" },
+        { key: "saturation", label: "Saturation" }
+      ].map(a => ({
+        label: a.label,
+        value: s.adjust[a.key],
+        display: (s.adjust[a.key] / 100).toFixed(2),
+        set: e => {
+          const v = Number(e.target.value);
+          this.setState(st => ({ adjust: Object.assign({}, st.adjust, { [a.key]: v }) }));
+        }
+      })),
+      histogram: HIST.map(h => ({
+        style: "flex:1;display:block;border-radius:1px 1px 0 0;background:var(--forest-500);opacity:.75;height:" + h + "%"
+      })),
+      levelFields: [
+        { label: "Black", value: "0.06" },
+        { label: "White", value: "0.94" },
+        { label: "Gamma", value: "1.12" }
+      ],
+
+      statusSize: "2048 × 1365",
+      statusLayer: "Layer " + (4 - s.activeLayer) + " of 4 · " + active.name,
+      statusBlend: s.activeLayer === 1 ? s.blend + " " + s.opacity + "%" : "Normal 100%",
+      statusTool: TOOLS.filter(t => t.id === s.tool)[0].label,
+
+      openImageSize: () => this.set({ screen: "dialogs", sheet: "imageSize" }),
+      sheet: s.sheet ? true : "",
+      sheetTitle: s.sheet ? SHEETS[s.sheet].title : "",
+      sheetHint: s.sheet ? SHEETS[s.sheet].hint : "",
+      sheetFoot: s.sheet ? SHEETS[s.sheet].foot : "",
+      sheetPrimary: s.sheet ? SHEETS[s.sheet].primary : "",
+      sheetAnchor: s.sheet && SHEETS[s.sheet].anchor ? true : "",
+      sheetSlider: s.sheet && SHEETS[s.sheet].slider ? true : "",
+      sheetRows: (s.sheet ? SHEETS[s.sheet].rows : []).map(([label, value, kind]) => ({
+        label, value,
+        valueStyle: kind === "muted"
+          ? "font-family:var(--font-mono);font-size:13px;color:var(--text-muted)"
+          : kind === "check"
+            ? "font-size:13px;color:var(--text-body)"
+            : "display:inline-block;max-width:" + (kind === "select" ? "200px" : "120px") +
+              ";font-family:var(--font-mono);font-size:13px;color:var(--text-strong);background:var(--surface-card);border:1px solid var(--border-medium);border-radius:7px;padding:6px 10px"
+      })),
+      anchorCells: [0,1,2,3,4,5,6,7,8].map(i => {
+        const ar = Math.floor(s.anchor / 3), ac = s.anchor % 3;
+        const r = Math.floor(i / 3), c = i % 3;
+        const arrows = ["↖","↑","↗","←","·","→","↙","↓","↘"];
+        let glyph = "";
+        if (i === s.anchor) glyph = "●";
+        else if (Math.abs(r - ar) <= 1 && Math.abs(c - ac) <= 1) glyph = arrows[(r - ar + 1) * 3 + (c - ac + 1)];
+        return {
+          glyph,
+          pick: () => this.set({ anchor: i }),
+          style: "border:1px solid var(--border-medium);border-radius:4px;cursor:pointer;font-family:inherit;font-size:13px;background:" +
+            (i === s.anchor ? "var(--forest-700)" : "var(--surface-card)") + ";color:" + (i === s.anchor ? "var(--paper-0)" : "var(--text-body)")
+        };
+      }),
+      quality: s.quality,
+      setQuality: e => this.set({ quality: Number(e.target.value) }),
+      closeSheet: () => this.set({ sheet: null }),
+
+      menus: Object.keys(MENUS).map(title => ({
+        title,
+        pick: e => this.set({ openMenu: s.openMenu === title ? null : title, menuLeft: e.currentTarget.offsetLeft }),
+        style: "padding:3px 9px;border:none;border-radius:5px;font-family:inherit;font-size:12.5px;cursor:pointer;background:" +
+          (s.openMenu === title ? "var(--forest-700)" : "transparent") + ";color:" + (s.openMenu === title ? "var(--paper-0)" : "var(--text-body)")
+      })),
+      openMenu: s.openMenu ? true : "",
+      menuPos: "position:absolute;top:26px;left:" + Math.max(0, Math.min(s.menuLeft, 1240 - 274)) +
+        "px;width:266px;background:var(--surface-card);border:1.5px solid var(--ink-0);border-radius:10px;box-shadow:0 18px 44px rgba(16,25,21,.4);padding:6px;z-index:40",
+      menuItems: (MENUS[s.openMenu] || []).map(item =>
+        item ? { label: item[0], key: item[1], sep: "" } : { label: "", key: "", sep: true }
+      ),
+
+      prefTabs: ["General", "Editing", "Export"].map(t => ({
+        label: t, style: this.tabStyle(s.prefTab === t, false),
+        pick: () => this.set({ prefTab: t })
+      })),
+      prefRows: {
+        General: [
+          { label: "On launch", value: "Show the open panel", hint: "Matches today's behaviour — there is no blank canvas to create." },
+          { label: "Appearance", value: "Follow system", hint: "Paper chrome in light, ink chrome in dark. The canvas well stays near-black in both." },
+          { label: "Recent files", value: "Remember 10", hint: "Feeds File ▸ Open Recent." },
+          { label: "Undo levels", value: "64 steps", hint: "Bounded by NSUndoManager.levelsOfUndo; each step holds a whole document handle." }
+        ],
+        Editing: [
+          { label: "Default tool", value: "Select", hint: "V, B, E and T switch tools on the canvas." },
+          { label: "Brush", value: "24 px · 100% · pixel-snapped off", hint: "[ and ] resize. Strokes confine to an active selection." },
+          { label: "Resample filter", value: "Lanczos3", hint: "Used by Image Size unless changed in the sheet." },
+          { label: "Live preview", value: "On", hint: "Filter sheets render in context on a background queue, debounced 60 ms." }
+        ],
+        Export: [
+          { label: "Default format", value: "PNG", hint: "PNG · JPEG · TIFF · BMP · GIF · WebP (lossless)." },
+          { label: "JPEG quality", value: "90", hint: "Only enabled when the format is JPEG." },
+          { label: "Export name", value: "«document»-export", hint: "The original file is never overwritten by Export." },
+          { label: "GIF handling", value: "Route ⌘S through Save As", hint: "Animated GIFs load their first frame only, so saving in place would drop the animation." }
+        ]
+      }[s.prefTab]
+    };
+  }
+}
+
+</script>
+</body>
+</html>

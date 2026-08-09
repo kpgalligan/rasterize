@@ -1,11 +1,25 @@
 import AppKit
 
-/// One row of the layers table: visibility eye, 40px thumbnail, editable
-/// name. Callbacks route the edits back to the panel controller.
+/// Rounded accent-tinted selection behind the active layer's row.
+final class LayerRowView: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        let rect = bounds.insetBy(dx: 6, dy: 2)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
+        DS.selectionFill.setFill()
+        path.fill()
+    }
+}
+
+/// One row of the layers table: 22px visibility eye, 34px framed thumbnail,
+/// then a two-line stack — editable name over a mono meta line reading
+/// "Soft Light · 62%". Callbacks route edits back to the panel controller.
 final class LayerCellView: NSView, NSTextFieldDelegate {
     private let eyeButton = NSButton(title: "", target: nil, action: nil)
     private let thumbView = NSImageView()
+    private let thumbFrame = NSView()
     private let nameField = NSTextField(string: "")
+    private let metaLabel = NSTextField(labelWithString: "")
     private var committedName = ""
 
     var onToggleVisible: (() -> Void)?
@@ -20,9 +34,16 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
         eyeButton.target = self
         eyeButton.action = #selector(eyeClicked(_:))
 
+        thumbFrame.translatesAutoresizingMaskIntoConstraints = false
+        thumbFrame.wantsLayer = true
+        thumbFrame.layer?.cornerRadius = 5
+        thumbFrame.layer?.borderWidth = 1
+        thumbFrame.layer?.masksToBounds = true
+
         thumbView.translatesAutoresizingMaskIntoConstraints = false
         thumbView.imageScaling = .scaleProportionallyDown
         thumbView.imageFrameStyle = .none
+        thumbFrame.addSubview(thumbView)
 
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.isBordered = false
@@ -30,25 +51,40 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
         nameField.isEditable = true
         nameField.usesSingleLineMode = true
         nameField.lineBreakMode = .byTruncatingTail
-        nameField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        nameField.font = DS.sans(13)
         nameField.delegate = self
 
+        metaLabel.translatesAutoresizingMaskIntoConstraints = false
+        metaLabel.font = DS.mono(10)
+        metaLabel.textColor = DS.textFaint
+        metaLabel.lineBreakMode = .byTruncatingTail
+
         addSubview(eyeButton)
-        addSubview(thumbView)
+        addSubview(thumbFrame)
         addSubview(nameField)
+        addSubview(metaLabel)
         NSLayoutConstraint.activate([
-            eyeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            eyeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             eyeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            eyeButton.widthAnchor.constraint(equalToConstant: 24),
+            eyeButton.widthAnchor.constraint(equalToConstant: 22),
 
-            thumbView.leadingAnchor.constraint(equalTo: eyeButton.trailingAnchor, constant: 4),
-            thumbView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            thumbView.widthAnchor.constraint(equalToConstant: 40),
-            thumbView.heightAnchor.constraint(equalToConstant: 40),
+            thumbFrame.leadingAnchor.constraint(equalTo: eyeButton.trailingAnchor, constant: 9),
+            thumbFrame.centerYAnchor.constraint(equalTo: centerYAnchor),
+            thumbFrame.widthAnchor.constraint(equalToConstant: 34),
+            thumbFrame.heightAnchor.constraint(equalToConstant: 34),
 
-            nameField.leadingAnchor.constraint(equalTo: thumbView.trailingAnchor, constant: 6),
-            nameField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            nameField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            thumbView.topAnchor.constraint(equalTo: thumbFrame.topAnchor),
+            thumbView.bottomAnchor.constraint(equalTo: thumbFrame.bottomAnchor),
+            thumbView.leadingAnchor.constraint(equalTo: thumbFrame.leadingAnchor),
+            thumbView.trailingAnchor.constraint(equalTo: thumbFrame.trailingAnchor),
+
+            nameField.leadingAnchor.constraint(equalTo: thumbFrame.trailingAnchor, constant: 9),
+            nameField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            nameField.bottomAnchor.constraint(equalTo: centerYAnchor, constant: 1),
+
+            metaLabel.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
+            metaLabel.trailingAnchor.constraint(equalTo: nameField.trailingAnchor),
+            metaLabel.topAnchor.constraint(equalTo: centerYAnchor, constant: 2),
         ])
     }
 
@@ -57,15 +93,24 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
         fatalError("LayerCellView does not support NSCoder")
     }
 
-    func configure(info: RasterDocument.LayerInfo, thumbnail: NSImage?) {
+    func configure(info: RasterDocument.LayerInfo, thumbnail: NSImage?, selected: Bool) {
         committedName = info.name
         nameField.stringValue = info.name
-        nameField.textColor = info.visible ? .labelColor : .secondaryLabelColor
+        nameField.font = DS.sans(13, weight: selected ? .semibold : .regular)
+        if !info.visible {
+            nameField.textColor = DS.textFaint
+        } else {
+            nameField.textColor = selected ? DS.accent : DS.textStrong
+        }
+        let percent = Int((Double(info.opacity) * 100).rounded())
+        metaLabel.stringValue = "\(RzBlendMode.displayName(for: info.blendMode)) · \(percent)%"
+        thumbFrame.layer?.borderColor = DS.border.cgColor
         thumbView.image = thumbnail
+        thumbView.alphaValue = info.visible ? 1.0 : 0.35
         let symbol = info.visible ? "eye" : "eye.slash"
         let label = info.visible ? "Visible" : "Hidden"
         if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
-            eyeButton.image = image
+            eyeButton.image = image.tinted(with: info.visible ? DS.textMuted : DS.textFaint)
             eyeButton.title = ""
         } else {
             eyeButton.image = nil
@@ -102,8 +147,10 @@ final class LayersPanelViewController: NSViewController {
     var onActiveLayerChange: (() -> Void)?
 
     private let blendPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let blendContainer = NSView()
     private let opacitySlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let opacityValueLabel = NSTextField(labelWithString: "100%")
+    private let layerCountLabel = NSTextField(labelWithString: "")
     private let tableView = NSTableView()
     private let tableScroll = NSScrollView()
     private var addButton: NSButton!
@@ -132,11 +179,24 @@ final class LayersPanelViewController: NSViewController {
     // MARK: - View construction
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 236, height: 400))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: DS.panelWidth, height: 400))
+        root.wantsLayer = true
+
+        // "Layers" pill tab — the active-tab treatment from the design's
+        // tab row. (The Adjust and Ask tabs are dropped: Adjust's sheets
+        // stay as sheets, and the agent does not exist yet.)
+        let tab = StickerButton(title: "Layers", style: .secondary, target: nil, action: nil)
+        tab.translatesAutoresizingMaskIntoConstraints = false
+        tab.isEnabled = true
+
+        blendContainer.translatesAutoresizingMaskIntoConstraints = false
+        blendContainer.wantsLayer = true
+        blendContainer.layer?.cornerRadius = 7
+        blendContainer.layer?.borderWidth = 1.5
 
         blendPopup.translatesAutoresizingMaskIntoConstraints = false
-        blendPopup.controlSize = .small
-        blendPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        blendPopup.isBordered = false
+        blendPopup.font = DS.sans(13)
         // Separators mean item position != mode index, so every item carries
         // its RzBlendMode raw value in `tag`; selection goes through tags,
         // never item positions.
@@ -155,6 +215,12 @@ final class LayersPanelViewController: NSViewController {
         blendPopup.target = self
         blendPopup.action = #selector(blendChanged(_:))
 
+        blendContainer.addSubview(blendPopup)
+
+        let opacityTitle = NSTextField(labelWithString: "")
+        opacityTitle.translatesAutoresizingMaskIntoConstraints = false
+        opacityTitle.attributedStringValue = DS.microLabel("Opacity")
+
         opacitySlider.translatesAutoresizingMaskIntoConstraints = false
         opacitySlider.isContinuous = true
         opacitySlider.controlSize = .small
@@ -162,12 +228,12 @@ final class LayersPanelViewController: NSViewController {
         opacitySlider.action = #selector(opacityChanged(_:))
 
         opacityValueLabel.translatesAutoresizingMaskIntoConstraints = false
-        opacityValueLabel.font = NSFont.monospacedDigitSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        opacityValueLabel.font = DS.mono(11)
+        opacityValueLabel.textColor = DS.textMuted
         opacityValueLabel.alignment = .right
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("layer"))
-        column.width = 216
+        column.width = DS.panelWidth - 20
         column.resizingMask = .autoresizingMask
         tableView.addTableColumn(column)
         tableView.headerView = nil
@@ -183,36 +249,56 @@ final class LayersPanelViewController: NSViewController {
         tableView.registerForDraggedTypes([Self.layerRowType])
         tableView.setDraggingSourceOperationMask(.move, forLocal: true)
 
+        tableView.backgroundColor = .clear
+        tableView.selectionHighlightStyle = .regular
+        tableView.style = .plain
+
         tableScroll.translatesAutoresizingMaskIntoConstraints = false
         tableScroll.documentView = tableView
         tableScroll.hasVerticalScroller = true
         tableScroll.autohidesScrollers = true
-        tableScroll.drawsBackground = true
+        tableScroll.drawsBackground = false
 
-        addButton = makeFooterButton(
-            symbol: "plus", fallback: "+", tooltip: "New Layer",
+        // Footer: four 30x26 ghost icon buttons, mono layer count right.
+        // nil targets: actions resolve through the responder chain to the
+        // EditorViewController, the same handlers the Layer menu items use.
+        addButton = GhostButton(
+            symbol: "plus", fallback: "+", caption: nil, tooltip: "New Layer",
             action: #selector(EditorViewController.newLayer(_:)))
-        removeButton = makeFooterButton(
-            symbol: "minus", fallback: "−", tooltip: "Delete Layer",
+        removeButton = GhostButton(
+            symbol: "minus", fallback: "−", caption: nil, tooltip: "Delete Layer",
             action: #selector(EditorViewController.deleteLayer(_:)))
-        duplicateButton = makeFooterButton(
-            symbol: "plus.square.on.square", fallback: "⧉", tooltip: "Duplicate Layer",
+        duplicateButton = GhostButton(
+            symbol: "plus.square.on.square", fallback: "⧉", caption: nil,
+            tooltip: "Duplicate Layer",
             action: #selector(EditorViewController.duplicateLayer(_:)))
-        mergeButton = makeFooterButton(
-            symbol: "arrow.triangle.merge", fallback: "⤵", tooltip: "Merge Down",
+        mergeButton = GhostButton(
+            symbol: "arrow.triangle.merge", fallback: "⤵", caption: nil,
+            tooltip: "Merge Down",
             action: #selector(EditorViewController.mergeDown(_:)))
 
-        let footerSeparator = NSBox()
-        footerSeparator.boxType = .separator
-        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
+        layerCountLabel.translatesAutoresizingMaskIntoConstraints = false
+        layerCountLabel.font = DS.mono(10)
+        layerCountLabel.textColor = DS.textFaint
+        layerCountLabel.alignment = .right
 
-        let footer = NSStackView(views: [addButton, removeButton, duplicateButton, mergeButton])
+        let footerSeparator = NSView()
+        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
+        footerSeparator.wantsLayer = true
+
+        let footerSpacer = NSView()
+        let footer = NSStackView(views: [
+            addButton, removeButton, duplicateButton, mergeButton,
+            footerSpacer, layerCountLabel,
+        ])
         footer.translatesAutoresizingMaskIntoConstraints = false
         footer.orientation = .horizontal
         footer.spacing = 2
-        footer.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 6)
+        footer.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 12)
 
-        root.addSubview(blendPopup)
+        root.addSubview(tab)
+        root.addSubview(blendContainer)
+        root.addSubview(opacityTitle)
         root.addSubview(opacitySlider)
         root.addSubview(opacityValueLabel)
         root.addSubview(tableScroll)
@@ -220,55 +306,60 @@ final class LayersPanelViewController: NSViewController {
         root.addSubview(footer)
 
         NSLayoutConstraint.activate([
-            blendPopup.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
-            blendPopup.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            blendPopup.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            tab.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
+            tab.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
 
-            opacitySlider.topAnchor.constraint(equalTo: blendPopup.bottomAnchor, constant: 8),
-            opacitySlider.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            blendContainer.topAnchor.constraint(equalTo: tab.bottomAnchor, constant: 12),
+            blendContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            blendContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            blendContainer.heightAnchor.constraint(equalToConstant: 30),
+
+            blendPopup.leadingAnchor.constraint(equalTo: blendContainer.leadingAnchor, constant: 8),
+            blendPopup.trailingAnchor.constraint(
+                equalTo: blendContainer.trailingAnchor, constant: -6),
+            blendPopup.centerYAnchor.constraint(equalTo: blendContainer.centerYAnchor),
+
+            opacityTitle.centerYAnchor.constraint(equalTo: opacitySlider.centerYAnchor),
+            opacityTitle.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+
+            opacitySlider.topAnchor.constraint(equalTo: blendContainer.bottomAnchor, constant: 10),
+            opacitySlider.leadingAnchor.constraint(
+                equalTo: opacityTitle.trailingAnchor, constant: 8),
             opacitySlider.trailingAnchor.constraint(
                 equalTo: opacityValueLabel.leadingAnchor, constant: -6),
 
             opacityValueLabel.centerYAnchor.constraint(equalTo: opacitySlider.centerYAnchor),
-            opacityValueLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
-            opacityValueLabel.widthAnchor.constraint(equalToConstant: 38),
+            opacityValueLabel.trailingAnchor.constraint(
+                equalTo: root.trailingAnchor, constant: -12),
+            opacityValueLabel.widthAnchor.constraint(equalToConstant: 40),
 
-            tableScroll.topAnchor.constraint(equalTo: opacitySlider.bottomAnchor, constant: 8),
+            tableScroll.topAnchor.constraint(equalTo: opacitySlider.bottomAnchor, constant: 10),
             tableScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             tableScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
 
             footerSeparator.topAnchor.constraint(equalTo: tableScroll.bottomAnchor),
             footerSeparator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             footerSeparator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            footerSeparator.heightAnchor.constraint(equalToConstant: 1),
 
             footer.topAnchor.constraint(equalTo: footerSeparator.bottomAnchor),
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            footer.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor),
+            footer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            footer.heightAnchor.constraint(equalToConstant: 26),
+            footer.heightAnchor.constraint(equalToConstant: 30),
         ])
 
         view = root
+        applyPanelAppearance(separator: footerSeparator)
     }
 
-    private func makeFooterButton(
-        symbol: String, fallback: String, tooltip: String, action: Selector
-    ) -> NSButton {
-        // nil target: the action resolves through the responder chain to the
-        // EditorViewController, the same handler the Layer menu items use.
-        let button = NSButton(title: "", target: nil, action: action)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.isBordered = false
-        button.setButtonType(.momentaryChange)
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip) {
-            button.image = image
-        } else {
-            button.title = fallback
-        }
-        button.toolTip = tooltip
-        button.widthAnchor.constraint(equalToConstant: 28).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        return button
+    /// Colors that need explicit refresh on appearance changes (layer-backed
+    /// borders resolve cgColor once).
+    private func applyPanelAppearance(separator: NSView) {
+        view.layer?.backgroundColor = DS.chromeBackground.cgColor
+        blendContainer.layer?.borderColor = DS.borderStrong.cgColor
+        blendContainer.layer?.backgroundColor = DS.chromeBackground.cgColor
+        separator.layer?.backgroundColor = DS.border.cgColor
     }
 
     override func viewDidLoad() {
@@ -347,7 +438,13 @@ final class LayersPanelViewController: NSViewController {
         }
     }
 
+    private func updateLayerCount() {
+        let count = document?.doc?.layerCount ?? 0
+        layerCountLabel.stringValue = count == 1 ? "1 layer" : "\(count) layers"
+    }
+
     private func updateButtonStates() {
+        updateLayerCount()
         let doc = document?.doc
         let count = doc?.layerCount ?? 0
         let active = document?.activeLayerIndex ?? 0
@@ -418,11 +515,12 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
 
         let cell = LayerCellView(frame: .zero)
         var thumbnail: NSImage? = nil
-        if let thumb = doc.layerThumbnail(idx, maxSide: 40), let cgImage = thumb.makeCGImage() {
+        if let thumb = doc.layerThumbnail(idx, maxSide: 34), let cgImage = thumb.makeCGImage() {
             thumbnail = NSImage(
                 cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         }
-        cell.configure(info: info, thumbnail: thumbnail)
+        cell.configure(
+            info: info, thumbnail: thumbnail, selected: idx == document.activeLayerIndex)
         cell.onToggleVisible = { [weak self] in
             guard let document = self?.document else { return }
             document.applyEdit(info.visible ? "Hide Layer" : "Show Layer") {
@@ -434,6 +532,10 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
             document.applyEdit("Rename Layer") { $0.withLayerName(idx, newName) }
         }
         return cell
+    }
+
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        LayerRowView(frame: .zero)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {

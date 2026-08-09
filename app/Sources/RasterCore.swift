@@ -229,6 +229,11 @@ extension RzBlendMode {
 
     /// Flat menu-order list for callers that don't care about grouping.
     static let allBlendModes: [(RzBlendMode, String)] = blendModeGroups.flatMap { $0 }
+
+    /// Display name for a mode (status bar, layer-row meta lines).
+    static func displayName(for mode: RzBlendMode) -> String {
+        allBlendModes.first { $0.0 == mode }?.1 ?? "Normal"
+    }
 }
 
 /// Owning Swift wrapper around an `RzDocument *` handle from the Rust core:

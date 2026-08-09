@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/fonts.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/colors.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/typography.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/space.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/radius.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/elevation.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/motion.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/tokens/base.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/components/components.css">
+<link rel="stylesheet" href="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/styles.css">
+<script src="_ds/balopy-design-system-70aa0e4a-f872-425d-aa58-70c7282184ba/_ds_bundle.js"></script>
+<style>
+  body { margin: 0; background: #EAE3D4; }
+  a { color: var(--forest-700); }
+  a:hover { color: var(--coral-600); }
+</style>
+</helmet>
+
+<section style="padding:48px 40px 72px;font-family:var(--font-sans);color:var(--ink-0);background:#EAE3D4">
+  <div style="max-width:1240px;margin:0 auto;display:flex;flex-direction:column;gap:36px">
+
+    <div style="display:flex;flex-direction:column;gap:8px;max-width:60ch">
+      <div style="font-family:var(--font-mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)">Turn 1 · app icon</div>
+      <div style="font-family:var(--font-display);font-weight:900;font-size:56px;line-height:.92;letter-spacing:-.03em">Three marks for Rasterize</div>
+      <div style="font-size:16px;line-height:1.5;color:var(--ink-2)">All three are built from the Balopy overlap motif — three brand circles that multiply where they cross. They differ in how much of the pixel editor they say out loud. Pick one by id and I'll cut the real icon set.</div>
+    </div>
+
+    <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start">
+
+      <div id="1a" style="flex:1 1 340px;min-width:320px;background:var(--paper-0);border:1.5px solid var(--ink-0);border-radius:18px;box-shadow:6px 6px 0 var(--ink-0);padding:26px;display:flex;flex-direction:column;gap:22px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-family:var(--font-mono);font-size:11px;font-weight:600;letter-spacing:.09em;background:var(--ink-0);color:var(--paper-0);border-radius:999px;padding:3px 9px">1a</span>
+          <span style="font-size:15px;font-weight:600">Overlap</span>
+        </div>
+        <div style="display:grid;place-items:center;padding:8px 0">
+          <div style="position:relative;width:188px;height:188px;border-radius:26%;isolation:isolate;background:var(--paper-0);border:2px solid var(--ink-0);box-shadow:0 12px 28px rgba(16,25,21,.22);overflow:hidden">
+            <span style="position:absolute;left:11.67%;top:14.17%;width:51.67%;height:51.67%;border-radius:999px;background:var(--forest-500);mix-blend-mode:multiply;display:block"></span>
+            <span style="position:absolute;left:36.67%;top:14.17%;width:51.67%;height:51.67%;border-radius:999px;background:var(--butter-500);mix-blend-mode:multiply;display:block"></span>
+            <span style="position:absolute;left:24.17%;top:37.5%;width:51.67%;height:51.67%;border-radius:999px;background:var(--coral-500);mix-blend-mode:multiply;display:block"></span>
+          </div>
+        </div>
+        <div style="font-size:14px;line-height:1.5;color:var(--ink-2)">The house mark, unchanged, in the macOS squircle. Reads instantly as Balopy and survives to 16px. It says colour, not pixels — nothing here is specific to a raster editor.</div>
+        <div style="display:flex;align-items:flex-end;gap:16px;padding-top:4px;border-top:1px solid var(--border-subtle)">
+          <sc-for list="{{ smoothSizes }}" as="s" hint-placeholder-count="4">
+            <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+              <div style="{{ s.box }}">
+                <span style="{{ s.c1 }}"></span>
+                <span style="{{ s.c2 }}"></span>
+                <span style="{{ s.c3 }}"></span>
+              </div>
+              <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-4)">{{ s.label }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <div id="1b" style="flex:1 1 340px;min-width:320px;background:var(--paper-0);border:1.5px solid var(--ink-0);border-radius:18px;box-shadow:6px 6px 0 var(--ink-0);padding:26px;display:flex;flex-direction:column;gap:22px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-family:var(--font-mono);font-size:11px;font-weight:600;letter-spacing:.09em;background:var(--coral-500);color:var(--ink-0);border-radius:999px;padding:3px 9px">1b</span>
+          <span style="font-size:15px;font-weight:600">Rasterized overlap</span>
+        </div>
+        <div style="display:grid;place-items:center;padding:8px 0">
+          <div style="position:relative;width:188px;height:188px;border-radius:26%;background:var(--paper-0);border:2px solid var(--ink-0);box-shadow:0 12px 28px rgba(16,25,21,.22);overflow:hidden;display:grid;grid-template-columns:repeat(18,1fr);grid-template-rows:repeat(18,1fr)">
+            <sc-for list="{{ pixelsLarge }}" as="p" hint-placeholder-count="324">
+              <span style="{{ p.style }}"></span>
+            </sc-for>
+          </div>
+        </div>
+        <div style="font-size:14px;line-height:1.5;color:var(--ink-2)">The same three circles, quantised to an 18 × 18 grid. The mark is literally rasterised, which is the app's name and its whole job — and the stepped edges echo Posterize and the pixel-snapped brush.</div>
+        <div style="display:flex;align-items:flex-end;gap:16px;padding-top:4px;border-top:1px solid var(--border-subtle)">
+          <sc-for list="{{ pixelSizes }}" as="s" hint-placeholder-count="4">
+            <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+              <div style="{{ s.box }}">
+                <sc-for list="{{ s.cells }}" as="p" hint-placeholder-count="64">
+                  <span style="{{ p.style }}"></span>
+                </sc-for>
+              </div>
+              <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-4)">{{ s.label }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <div id="1c" style="flex:1 1 340px;min-width:320px;background:var(--paper-0);border:1.5px solid var(--ink-0);border-radius:18px;box-shadow:6px 6px 0 var(--ink-0);padding:26px;display:flex;flex-direction:column;gap:22px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-family:var(--font-mono);font-size:11px;font-weight:600;letter-spacing:.09em;background:var(--ink-0);color:var(--paper-0);border-radius:999px;padding:3px 9px">1c</span>
+          <span style="font-size:15px;font-weight:600">Ink monogram</span>
+        </div>
+        <div style="display:grid;place-items:center;padding:8px 0">
+          <div style="position:relative;width:188px;height:188px;border-radius:26%;background:var(--ink-0);border:2px solid var(--ink-0);box-shadow:0 12px 28px rgba(16,25,21,.28);overflow:hidden;display:grid;place-items:center">
+            <span style="font-family:var(--font-display);font-weight:900;font-size:150px;line-height:.8;letter-spacing:-.04em;color:var(--paper-0);margin-top:-14px">R</span>
+            <div style="position:absolute;left:0;right:0;bottom:20px;display:flex;justify-content:center">
+              <div style="position:relative;width:76px;height:22px">
+                <span style="position:absolute;left:0;top:0;width:22px;height:22px;border-radius:999px;background:var(--forest-500);display:block"></span>
+                <span style="position:absolute;left:27px;top:0;width:22px;height:22px;border-radius:999px;background:var(--butter-500);display:block"></span>
+                <span style="position:absolute;left:54px;top:0;width:22px;height:22px;border-radius:999px;background:var(--coral-500);display:block"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:14px;line-height:1.5;color:var(--ink-2)">Darker Grotesque 900 on the ink field, with the three inks reduced to a status row. The most app-like of the three and the easiest to tell apart in a crowded Dock — but it spends the brand's one dark band on the icon.</div>
+        <div style="display:flex;align-items:flex-end;gap:16px;padding-top:4px;border-top:1px solid var(--border-subtle)">
+          <sc-for list="{{ monoSizes }}" as="s" hint-placeholder-count="4">
+            <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+              <div style="{{ s.box }}"><span style="{{ s.glyph }}">R</span></div>
+              <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-4)">{{ s.label }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+    </div>
+
+    <div style="background:var(--paper-0);border:1.5px solid var(--ink-0);border-radius:18px;box-shadow:6px 6px 0 var(--ink-0);padding:30px 32px;display:flex;flex-direction:column;gap:24px">
+      <div style="font-family:var(--font-mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)">Lockup · using 1b</div>
+      <div style="display:flex;align-items:center;gap:44px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:28px">
+          <div style="position:relative;width:56px;height:56px;border-radius:26%;background:var(--paper-0);border:1.5px solid var(--ink-0);overflow:hidden;display:grid;grid-template-columns:repeat(18,1fr);grid-template-rows:repeat(18,1fr)">
+            <sc-for list="{{ pixelsLarge }}" as="p" hint-placeholder-count="324">
+              <span style="{{ p.style }}"></span>
+            </sc-for>
+          </div>
+          <span style="font-family:var(--font-display);font-weight:900;font-size:66px;line-height:.9;letter-spacing:-.035em;padding-bottom:.06em">Rasterize</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:3px;font-size:13px;color:var(--ink-2);line-height:1.5">
+          <span>Same lockup metrics as the balopy <code style="font-family:var(--font-mono);font-size:12px">Logo</code>: wordmark set at 1.18× the mark's side, gap at 0.5em, Darker Grotesque 900 at −0.035em.</span>
+          <span>The balopy wordmark stays lowercase; Rasterize is capitalised because it is a proper app name.</span>
+          <span>Mark corner radius is 26% of the side, matching <code style="font-family:var(--font-mono);font-size:12px">.blp-logo__mark</code>.</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="font-family:var(--font-mono);font-size:11px;color:var(--ink-3);line-height:1.7">
+      Every mark is geometry — circles, a grid, one glyph — so it exports cleanly to SVG and to the full .icns ladder. Reply with <a href="#1a">1a</a>, <a href="#1b">1b</a> or <a href="#1c">1c</a>.
+    </div>
+
+  </div>
+</section>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1320,&quot;height&quot;:1100}}">
+const PAPER = [251, 248, 241];
+// Geometry lifted from the design system's Logo.jsx / assets/logo.svg:
+// 120x120 box, r=31, forest (45,48) upper-left, butter (75,48) upper-right,
+// coral (60,76) bottom centre.
+const CIRCLES = [
+  { x: 45 / 120, y: 48 / 120, r: 31 / 120, c: [31, 133, 100] },
+  { x: 75 / 120, y: 48 / 120, r: 31 / 120, c: [242, 193, 78] },
+  { x: 60 / 120, y: 76 / 120, r: 31 / 120, c: [244, 101, 63] }
+];
+
+function multiplyAt(u, v) {
+  let rgb = PAPER.slice();
+  for (const c of CIRCLES) {
+    const dx = u - c.x, dy = v - c.y;
+    if (dx * dx + dy * dy <= c.r * c.r) {
+      rgb = [
+        Math.round(rgb[0] * c.c[0] / 255),
+        Math.round(rgb[1] * c.c[1] / 255),
+        Math.round(rgb[2] * c.c[2] / 255)
+      ];
+    }
+  }
+  return "rgb(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + ")";
+}
+
+function grid(n) {
+  const cells = [];
+  for (let row = 0; row < n; row++) {
+    for (let col = 0; col < n; col++) {
+      cells.push({ style: "display:block;background:" + multiplyAt((col + 0.5) / n, (row + 0.5) / n) });
+    }
+  }
+  return cells;
+}
+
+const SIZES = [
+  { px: 64, label: "64" },
+  { px: 48, label: "48" },
+  { px: 32, label: "32" },
+  { px: 16, label: "16" }
+];
+
+class Component extends DCLogic {
+  renderVals() {
+    const shell = px =>
+      "position:relative;width:" + px + "px;height:" + px + "px;border-radius:26%;overflow:hidden;isolation:isolate;background:var(--paper-0);border:" +
+      (px >= 32 ? "1.5px" : "1px") + " solid var(--ink-0)";
+    const disc = (left, top, color) =>
+      "position:absolute;left:" + left + "%;top:" + top + "%;width:51.67%;height:51.67%;border-radius:999px;background:var(--" +
+      color + ");mix-blend-mode:multiply;display:block";
+
+    return {
+      smoothSizes: SIZES.map(s => ({
+        label: s.label,
+        box: shell(s.px),
+        c1: disc(11.67, 14.17, "forest-500"),
+        c2: disc(36.67, 14.17, "butter-500"),
+        c3: disc(24.17, 37.5, "coral-500")
+      })),
+
+      pixelsLarge: grid(18),
+
+      pixelSizes: SIZES.map(s => {
+        const n = s.px >= 48 ? 18 : s.px >= 32 ? 12 : 8;
+        return {
+          label: s.label,
+          box: shell(s.px) + ";display:grid;grid-template-columns:repeat(" + n + ",1fr);grid-template-rows:repeat(" + n + ",1fr)",
+          cells: grid(n)
+        };
+      }),
+
+      monoSizes: SIZES.map(s => ({
+        label: s.label,
+        box: "position:relative;width:" + s.px + "px;height:" + s.px + "px;border-radius:26%;overflow:hidden;background:var(--ink-0);display:grid;place-items:center",
+        glyph: "font-family:var(--font-display);font-weight:900;font-size:" + Math.round(s.px * 0.82) +
+          "px;line-height:.8;letter-spacing:-.04em;color:var(--paper-0)"
+      }))
+    };
+  }
+}
+
+</script>
+</body>
+</html>
