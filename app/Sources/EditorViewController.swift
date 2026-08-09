@@ -706,6 +706,14 @@ final class EditorViewController: NSViewController {
         presentAsSheet(ResizeSheetController(document: document))
     }
 
+    @objc func showCanvasSize(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(CanvasSizeSheetController(document: document))
+    }
+
     // MARK: - Layer actions (Layer menu + panel footer buttons)
 
     @objc func newLayer(_ sender: Any?) {

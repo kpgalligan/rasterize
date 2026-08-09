@@ -20,7 +20,10 @@ decoding, encoding, and manipulation.
   failed saves never truncate or delete an existing destination file
 - Smooth zoom (pinch, ⌘+/⌘-, fit, actual size) and pan
 - Rotate 90°/180°, flip horizontal/vertical
-- Selection-based crop, image resize with filter choice (up to 100 MP)
+- Selection-based crop, Image Size (scale with filter choice, up to 100 MP),
+  and Canvas Size with the Photoshop-style 3×3 anchor selector — grow or
+  trim the canvas without scaling; layers keep their pixels and can be
+  revealed again later
 - Brightness / contrast / saturation, Levels, Hue Rotate, Threshold, and
   Posterize adjustments with live in-context preview on the active layer
 - Grayscale, invert, sepia, Gaussian blur, sharpen, Pixelate, Add Noise,

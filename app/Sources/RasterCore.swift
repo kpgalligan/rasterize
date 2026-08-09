@@ -427,6 +427,13 @@ final class RasterDocument {
         return wrap(rz_doc_resize(ptr, UInt32(w), UInt32(h), filter))
     }
 
+    /// Changes the canvas size without scaling; (originX, originY) is where
+    /// the old canvas's top-left lands in the new canvas.
+    func canvasResized(w: Int, h: Int, originX: Int, originY: Int) -> RasterDocument? {
+        guard w > 0, h > 0, w * h <= RasterImage.maxResizePixels else { return nil }
+        return wrap(rz_doc_canvas_resize(ptr, UInt32(w), UInt32(h), Int32(originX), Int32(originY)))
+    }
+
     /// Writes the native RZDC format (all layers preserved).
     func saveNative(to url: URL) throws {
         var err: UnsafeMutablePointer<CChar>? = nil

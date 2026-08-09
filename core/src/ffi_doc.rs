@@ -686,6 +686,23 @@ pub unsafe extern "C" fn rz_doc_crop(
     unsafe { doc_op(doc, |d| d.crop(x, y, w, h)) }
 }
 
+/// Changes the canvas size without scaling: every layer's offset shifts by
+/// (`origin_x`, `origin_y`), layer pixels untouched. NULL on NULL doc, zero
+/// dimension, or a canvas over the total-pixel limit.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_canvas_resize(
+    doc: *const RzDocument,
+    w: u32,
+    h: u32,
+    origin_x: i32,
+    origin_y: i32,
+) -> *mut RzDocument {
+    unsafe { doc_op(doc, |d| d.canvas_resize(w, h, (origin_x, origin_y))) }
+}
+
 /// Scales the canvas and every layer proportionally; limits and filter
 /// mapping as `rz_image_resize`. NULL on NULL doc, invalid target, or an
 /// unknown filter value.

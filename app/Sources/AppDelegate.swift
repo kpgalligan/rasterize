@@ -155,7 +155,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(
             item("Crop to Selection", #selector(EditorViewController.cropToSelection(_:)), "k"))
         menu.addItem(
-            item("Resize…", #selector(EditorViewController.resizeImage(_:)), "i", [.command, .option]))
+            item("Image Size…", #selector(EditorViewController.resizeImage(_:)), "i", [.command, .option]))
+        menu.addItem(
+            item("Canvas Size…", #selector(EditorViewController.showCanvasSize(_:)), "c", [.command, .option]))
         return menu
     }
 

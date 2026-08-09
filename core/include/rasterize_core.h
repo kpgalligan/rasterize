@@ -294,6 +294,16 @@ RzDocument *rz_doc_crop(const RzDocument *doc, uint32_t x, uint32_t y,
 RzDocument *rz_doc_resize(const RzDocument *doc, uint32_t w, uint32_t h,
                           RzResizeFilter filter);
 
+/* Changes the canvas size WITHOUT scaling anything: the canvas becomes w*h
+ * and every layer's offset shifts by (origin_x, origin_y) — where the old
+ * canvas's top-left corner lands in the new canvas. Layer pixels are
+ * untouched; content outside the new canvas is retained (as with
+ * rz_doc_crop) and can be revealed later. NULL if w == 0, h == 0, or
+ * w*h > 100000000. */
+RzDocument *rz_doc_canvas_resize(const RzDocument *doc, uint32_t w,
+                                 uint32_t h, int32_t origin_x,
+                                 int32_t origin_y);
+
 /* ------------------------------------------------------------------------ */
 /* Additional filters (pure RzImage operations, NULL on invalid args)       */
 /* ------------------------------------------------------------------------ */

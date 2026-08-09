@@ -851,6 +851,32 @@ impl RzDocument {
         })
     }
 
+    /// Changes the canvas size without scaling anything: the canvas becomes
+    /// `w` x `h` and every layer's offset shifts by `origin` — where the old
+    /// canvas's top-left corner lands in the new canvas. Layer pixels are
+    /// untouched; content outside the new canvas is retained, as with crop.
+    pub fn canvas_resize(&self, w: u32, h: u32, origin: (i32, i32)) -> Option<Self> {
+        if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
+            return None;
+        }
+        let layers = self
+            .layers
+            .iter()
+            .map(|l| Layer {
+                offset: (
+                    saturating_i32(i64::from(l.offset.0) + i64::from(origin.0)),
+                    saturating_i32(i64::from(l.offset.1) + i64::from(origin.1)),
+                ),
+                ..l.clone()
+            })
+            .collect();
+        Some(RzDocument {
+            width: w,
+            height: h,
+            layers,
+        })
+    }
+
     /// Scales the canvas and every layer (sizes and offsets) proportionally.
     /// The total-pixel guard applies to the canvas, as in `rz_image_resize`.
     pub fn resize(&self, w: u32, h: u32, filter: FilterType) -> Option<Self> {

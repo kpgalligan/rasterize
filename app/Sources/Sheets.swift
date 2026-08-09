@@ -207,7 +207,174 @@ final class ResizeSheetController: NSViewController, NSTextFieldDelegate {
             return
         }
         dismiss(self)
-        document.applyEdit("Resize") { $0.resized(w: w, h: h, filter: filter) }
+        document.applyEdit("Image Size") { $0.resized(w: w, h: h, filter: filter) }
+    }
+
+    @objc private func cancelClicked(_ sender: Any?) {
+        dismiss(self)
+    }
+}
+
+// MARK: - CanvasSizeSheetController
+
+/// The 3x3 anchor grid from Photoshop's Canvas Size dialog: the selected
+/// cell marks where the existing content is pinned in the new canvas, and
+/// neighboring cells show arrows pointing away from it.
+private final class AnchorGridView: NSView {
+    /// (column, row), 0-based, top-left origin. Center by default.
+    private(set) var anchor = (col: 1, row: 1)
+
+    private var buttons: [[NSButton]] = []
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        let grid = NSGridView()
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        grid.rowSpacing = 2
+        grid.columnSpacing = 2
+        for row in 0..<3 {
+            var rowButtons: [NSButton] = []
+            for col in 0..<3 {
+                let button = NSButton(title: "", target: self, action: #selector(cellClicked(_:)))
+                button.setButtonType(.momentaryPushIn)
+                button.bezelStyle = .smallSquare
+                button.font = NSFont.systemFont(ofSize: 13)
+                button.tag = row * 3 + col
+                button.widthAnchor.constraint(equalToConstant: 30).isActive = true
+                button.heightAnchor.constraint(equalToConstant: 26).isActive = true
+                rowButtons.append(button)
+            }
+            buttons.append(rowButtons)
+            grid.addRow(with: rowButtons)
+        }
+        addSubview(grid)
+        NSLayoutConstraint.activate([
+            grid.topAnchor.constraint(equalTo: topAnchor),
+            grid.bottomAnchor.constraint(equalTo: bottomAnchor),
+            grid.leadingAnchor.constraint(equalTo: leadingAnchor),
+            grid.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+        refreshCells()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("AnchorGridView does not support NSCoder")
+    }
+
+    @objc private func cellClicked(_ sender: NSButton) {
+        anchor = (col: sender.tag % 3, row: sender.tag / 3)
+        refreshCells()
+    }
+
+    private func refreshCells() {
+        // Arrows radiate outward from the anchor; distant cells stay blank.
+        let arrows: [[String]] = [
+            ["↖", "↑", "↗"],
+            ["←", "·", "→"],
+            ["↙", "↓", "↘"],
+        ]
+        for row in 0..<3 {
+            for col in 0..<3 {
+                let button = buttons[row][col]
+                if row == anchor.row && col == anchor.col {
+                    button.title = "●"
+                } else if abs(row - anchor.row) <= 1 && abs(col - anchor.col) <= 1 {
+                    button.title = arrows[row - anchor.row + 1][col - anchor.col + 1]
+                } else {
+                    button.title = ""
+                }
+            }
+        }
+    }
+}
+
+final class CanvasSizeSheetController: NSViewController {
+    private let document: ImageDocument
+    private let originalWidth: Int
+    private let originalHeight: Int
+
+    private let widthField = NSTextField(string: "")
+    private let heightField = NSTextField(string: "")
+    private let anchorGrid = AnchorGridView(frame: .zero)
+
+    init(document: ImageDocument) {
+        self.document = document
+        self.originalWidth = document.doc?.width ?? 1
+        self.originalHeight = document.doc?.height ?? 1
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("CanvasSizeSheetController does not support NSCoder")
+    }
+
+    override func loadView() {
+        for field in [widthField, heightField] {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .none
+            formatter.allowsFloats = false
+            formatter.minimum = 1
+            formatter.maximum = 20000
+            field.formatter = formatter
+            field.widthAnchor.constraint(equalToConstant: 90).isActive = true
+        }
+        widthField.integerValue = originalWidth
+        heightField.integerValue = originalHeight
+
+        let currentLabel = fieldLabel("\(originalWidth) × \(originalHeight) px")
+        currentLabel.textColor = .secondaryLabelColor
+
+        let grid = NSGridView(views: [
+            [fieldLabel("Current size:"), currentLabel],
+            [fieldLabel("Width:"), widthField],
+            [fieldLabel("Height:"), heightField],
+            [fieldLabel("Anchor:"), anchorGrid],
+        ])
+        grid.rowSpacing = 10
+        grid.columnSpacing = 12
+        grid.column(at: 0).xPlacement = .trailing
+        grid.cell(for: anchorGrid)?.yPlacement = .top
+
+        let cancelButton = NSButton(
+            title: "Cancel", target: self, action: #selector(cancelClicked(_:)))
+        let applyButton = NSButton(
+            title: "Apply", target: self, action: #selector(applyClicked(_:)))
+        view = makeSheetView(
+            content: grid, buttonRow: makeButtonRow(cancel: cancelButton, apply: applyButton))
+    }
+
+    @objc private func applyClicked(_ sender: Any?) {
+        let w = widthField.integerValue
+        let h = heightField.integerValue
+        guard w >= 1, h >= 1 else {
+            NSSound.beep()
+            return
+        }
+        guard w * h <= RasterImage.maxResizePixels else {
+            let alert = NSAlert()
+            alert.messageText = "Size Too Large"
+            alert.informativeText =
+                "The canvas cannot exceed 100 megapixels (width × height ≤ 100,000,000)."
+            if let window = view.window {
+                alert.beginSheetModal(for: window)
+            } else {
+                alert.runModal()
+            }
+            return
+        }
+        // The anchor pins the existing content: its column/row chooses how
+        // much of the size delta lands left/above the old canvas origin.
+        let fx = Double(anchorGrid.anchor.col) / 2.0
+        let fy = Double(anchorGrid.anchor.row) / 2.0
+        let originX = Int((Double(w - originalWidth) * fx).rounded())
+        let originY = Int((Double(h - originalHeight) * fy).rounded())
+        dismiss(self)
+        guard w != originalWidth || h != originalHeight else { return }
+        document.applyEdit("Canvas Size") {
+            $0.canvasResized(w: w, h: h, originX: originX, originY: originY)
+        }
     }
 
     @objc private func cancelClicked(_ sender: Any?) {

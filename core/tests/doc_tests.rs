@@ -1957,3 +1957,57 @@ fn null_safety_sweep() {
     }
     unsafe { rz_doc_free(doc) };
 }
+
+#[test]
+fn canvas_resize_shifts_offsets_without_scaling() {
+    let dir = TempDir::new().unwrap();
+    let doc = geometry_fixture(&dir, "canvas", (1, 1));
+    let layer_before = layer_pixels(doc, 1);
+    let flat = unsafe { rz_doc_flattened(doc) };
+
+    // Grow from 7x5 to 11x9 anchored at the center: old origin lands at
+    // (2, 2); layer dims and pixels unchanged.
+    let grown = unsafe { rz_doc_canvas_resize(doc, 11, 9, 2, 2) };
+    assert!(!grown.is_null());
+    assert_eq!(
+        unsafe { (rz_doc_width(grown), rz_doc_height(grown)) },
+        (11, 9)
+    );
+    assert_eq!(layer_offset(grown, 0), (2, 2));
+    assert_eq!(layer_offset(grown, 1), (3, 3));
+    assert_eq!(layer_dims(grown, 1), (3, 2));
+    assert_eq!(
+        layer_pixels(grown, 1),
+        layer_before,
+        "canvas resize must not touch pixels"
+    );
+    // The old projection appears verbatim inside the grown projection.
+    let grown_flat = unsafe { rz_doc_flattened(grown) };
+    let window = unsafe { rz_image_crop(grown_flat, 2, 2, 7, 5) };
+    assert!(!window.is_null());
+    assert_eq!(img_pixels(window), img_pixels(flat));
+    unsafe { rz_image_free(window) };
+    unsafe { rz_image_free(grown_flat) };
+    unsafe { rz_doc_free(grown) };
+
+    // Shrinking with a negative origin is exactly a crop of the same window.
+    let shrunk = unsafe { rz_doc_canvas_resize(doc, 4, 3, -2, -1) };
+    let cropped = unsafe { rz_doc_crop(doc, 2, 1, 4, 3) };
+    assert!(!shrunk.is_null() && !cropped.is_null());
+    assert_eq!(layer_offset(shrunk, 0), layer_offset(cropped, 0));
+    assert_eq!(layer_offset(shrunk, 1), layer_offset(cropped, 1));
+    assert_eq!(flat_pixels(shrunk), flat_pixels(cropped));
+    unsafe { rz_doc_free(cropped) };
+    unsafe { rz_doc_free(shrunk) };
+
+    // Guards: zero dims, over-limit canvas, NULL doc.
+    unsafe {
+        assert!(rz_doc_canvas_resize(doc, 0, 5, 0, 0).is_null());
+        assert!(rz_doc_canvas_resize(doc, 5, 0, 0, 0).is_null());
+        assert!(rz_doc_canvas_resize(doc, 10_001, 10_000, 0, 0).is_null());
+        assert!(rz_doc_canvas_resize(std::ptr::null(), 5, 5, 0, 0).is_null());
+    }
+
+    unsafe { rz_image_free(flat) };
+    unsafe { rz_doc_free(doc) };
+}
