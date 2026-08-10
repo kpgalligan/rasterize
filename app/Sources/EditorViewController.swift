@@ -15,6 +15,15 @@ enum EditorTool: Int {
     case text
 }
 
+/// What brush and eraser edit on the active layer: its pixels, or its layer
+/// mask. Pure UI state owned by EditorViewController — not undoable, not
+/// persisted, and reset to `.layer` whenever the active layer changes, its
+/// mask goes away, or the document is replaced.
+enum PaintTarget {
+    case layer
+    case mask
+}
+
 final class EditorViewController: NSViewController {
     private weak var document: ImageDocument?
 
@@ -78,8 +87,15 @@ final class EditorViewController: NSViewController {
 
     // Brush/eraser drag state: the document handle when the stroke began.
     // Every stroke tick repaints the whole overlay onto this base, so the
-    // live projection always shows the committed result.
+    // live projection always shows the committed result. Mask strokes leave
+    // it nil — they never live-edit, they commit once on mouse-up.
     private var strokeBase: RasterDocument?
+    private var strokeTargetsMask = false
+
+    // What brush/eraser edit (see PaintTarget), plus the layer it was chosen
+    // for: selecting a different layer drops the choice back to .layer.
+    private(set) var paintTarget: PaintTarget = .layer
+    private var paintTargetLayer = 0
 
     // Last-used paint options (session-only; no persistence).
     private var brushSize: CGFloat = 24
@@ -143,6 +159,17 @@ final class EditorViewController: NSViewController {
             guard let self = self, let document = self.document, let doc = document.doc,
                   doc.layerInfo(document.activeLayerIndex)?.visible == true
             else { return false } // hidden layer: refuse instead of painting invisibly
+            // Decided once per stroke so a target change mid-drag can never
+            // split it across the layer and its mask.
+            let targetsMask = self.paintsActiveMask
+            self.strokeTargetsMask = targetsMask
+            self.canvas.paintsMask = targetsMask
+            guard !targetsMask else {
+                // Mask strokes ghost on the canvas and commit in one step
+                // from onCommitMaskOverlay: no live-edit session.
+                self.strokeBase = nil
+                return true
+            }
             self.strokeBase = doc
             document.beginLiveEdit()
             return true
@@ -158,17 +185,35 @@ final class EditorViewController: NSViewController {
                 document.updateLiveEdit(updated)
             }
         }
+        canvas.onCommitMaskOverlay = { [weak self] data, actionName in
+            guard let self = self, let document = self.document else { return }
+            let idx = document.activeLayerIndex
+            guard document.doc?.layerHasMask(idx) == true else {
+                NSSound.beep()
+                return
+            }
+            document.applyEdit(actionName) { doc in
+                doc.paintingLayerMask(idx, overlay: data, w: doc.width, h: doc.height)
+            }
+        }
         canvas.onStrokeEnd = { [weak self] actionName in
             guard let self = self, let document = self.document else { return }
+            let wasMask = self.strokeTargetsMask
+            self.strokeTargetsMask = false
             self.strokeBase = nil
+            // A mask stroke already committed itself (onCommitMaskOverlay)
+            // and never opened a live-edit session.
+            guard !wasMask else { return }
             // endLiveEdit no-ops when the handle never changed, so a stroke
             // that entirely missed the layer registers no undo step.
             document.endLiveEdit(actionName)
         }
         canvas.onStrokeCancel = { [weak self] in
-            guard let self = self, let document = self.document,
-                  let base = self.strokeBase
-            else { return }
+            guard let self = self, let document = self.document else { return }
+            self.strokeTargetsMask = false
+            // An abandoned mask stroke never touched the document (strokeBase
+            // is nil): dropping the overlay is the whole rollback.
+            guard let base = self.strokeBase else { return }
             self.strokeBase = nil
             // Restoring the snapshot makes endLiveEdit a same-handle no-op:
             // the abandoned stroke leaves no undo step and no image change.
@@ -322,8 +367,12 @@ final class EditorViewController: NSViewController {
         layersPanel = LayersPanelViewController()
         layersPanel.document = document
         layersPanel.onActiveLayerChange = { [weak self] in
+            self?.syncPaintTarget()
             self?.updateStatus()
             self?.updateActiveLayerRect()
+        }
+        layersPanel.onPaintTargetChange = { [weak self] target in
+            self?.setPaintTarget(target)
         }
         layersPanel.onShowAssistant = { [weak self] in
             self?.panelTab = 1
@@ -597,9 +646,56 @@ final class EditorViewController: NSViewController {
         case .gradient: canvas.tool = .gradient
         case .text: canvas.tool = .text
         }
+        // Only brush and eraser edit masks; picking one of the other paint
+        // tools silently points the target back at the layer rather than
+        // blocking the tool or painting the wrong thing.
+        if tool == .fill || tool == .gradient || tool == .text {
+            setPaintTarget(.layer)
+        }
         updateOptionsBar()
         reflectSelectedTool(tool)
         updateStatus()
+    }
+
+    // MARK: - Paint target (layer vs. its mask)
+
+    /// True when brush/eraser strokes should land on the active layer's
+    /// mask: the chosen target, confirmed against the live document.
+    private var paintsActiveMask: Bool {
+        guard paintTarget == .mask, let document = document, let doc = document.doc else {
+            return false
+        }
+        return doc.layerHasMask(document.activeLayerIndex)
+    }
+
+    /// Points brush/eraser at the layer or at its mask (a mask target falls
+    /// back to the layer when there is no mask), and mirrors the choice into
+    /// the canvas and the layers panel's focus ring.
+    func setPaintTarget(_ target: PaintTarget) {
+        let idx = document?.activeLayerIndex ?? 0
+        var target = target
+        if target == .mask, document?.doc?.layerHasMask(idx) != true {
+            target = .layer
+        }
+        let changed = target != paintTarget
+        paintTarget = target
+        paintTargetLayer = idx
+        canvas.paintsMask = target == .mask
+        layersPanel?.setPaintTarget(target)
+        if changed { updateStatus() }
+    }
+
+    /// Drops a mask target that no longer applies — the active layer changed
+    /// underneath it, or its mask was deleted, applied, or undone away.
+    private func syncPaintTarget() {
+        let idx = document?.activeLayerIndex ?? 0
+        guard paintTarget == .mask else {
+            paintTargetLayer = idx
+            return
+        }
+        if idx != paintTargetLayer || document?.doc?.layerHasMask(idx) != true {
+            setPaintTarget(.layer)
+        }
     }
 
     /// Mirrors tool selection into the toolbar pill (display only).
@@ -834,6 +930,7 @@ final class EditorViewController: NSViewController {
             zoomToFit()
         }
         canvas.needsDisplay = true
+        syncPaintTarget()
         updateStatus()
         updateActiveLayerRect()
         view.window?.subtitle = "\(doc.width) × \(doc.height) px"
@@ -856,7 +953,9 @@ final class EditorViewController: NSViewController {
         }
         statusDims.text = dims
         if let info = doc.layerInfo(document.activeLayerIndex) {
-            statusLayer.text = info.name
+            // Brush and eraser hit the mask when it is the paint target; say
+            // so, alongside the panel's focus ring.
+            statusLayer.text = paintTarget == .mask ? "\(info.name) · Mask" : info.name
             let percent = Int((Double(info.opacity) * 100).rounded())
             statusBlend.text =
                 "\(RzBlendMode.displayName(for: info.blendMode)) · \(percent)%"
@@ -988,6 +1087,8 @@ final class EditorViewController: NSViewController {
         document.applyEdit("New Layer") { $0.addingLayer(above: idx, name: name) }
         guard document.doc !== before else { return }
         document.activeLayerIndex = min(idx + 1, document.doc.layerCount - 1)
+        // The active layer moved: any mask paint target goes with it.
+        syncPaintTarget()
         layersPanel.reload()
         updateStatus()
         updateActiveLayerRect()
@@ -1003,6 +1104,8 @@ final class EditorViewController: NSViewController {
         document.applyEdit("Duplicate Layer") { $0.duplicatingLayer(idx) }
         guard document.doc !== before else { return }
         document.activeLayerIndex = min(idx + 1, document.doc.layerCount - 1)
+        // The active layer moved: any mask paint target goes with it.
+        syncPaintTarget()
         layersPanel.reload()
         updateStatus()
         updateActiveLayerRect()
@@ -1017,6 +1120,8 @@ final class EditorViewController: NSViewController {
         document.applyEdit("Delete Layer") { $0.removingLayer(idx) }
         // applyEdit re-clamps activeLayerIndex; the layer below (same index,
         // or the new top) ends up selected.
+        // The active layer moved: any mask paint target goes with it.
+        syncPaintTarget()
         layersPanel.reload()
         updateStatus()
         updateActiveLayerRect()
@@ -1032,6 +1137,8 @@ final class EditorViewController: NSViewController {
         document.applyEdit("Merge Down") { $0.mergingDown(idx) }
         guard document.doc !== before else { return }
         document.activeLayerIndex = idx - 1
+        // The active layer moved: any mask paint target goes with it.
+        syncPaintTarget()
         layersPanel.reload()
         updateStatus()
         updateActiveLayerRect()
@@ -1043,6 +1150,8 @@ final class EditorViewController: NSViewController {
             return
         }
         document.applyEdit("Flatten Image") { $0.flattening() }
+        // The active layer moved: any mask paint target goes with it.
+        syncPaintTarget()
         layersPanel.reload()
         updateStatus()
         updateActiveLayerRect()
@@ -1054,6 +1163,8 @@ final class EditorViewController: NSViewController {
             return
         }
         document.pasteAsNewLayer()
+        // The active layer moved: any mask paint target goes with it.
+        syncPaintTarget()
         layersPanel.reload()
         updateStatus()
         updateActiveLayerRect()
@@ -1064,6 +1175,84 @@ final class EditorViewController: NSViewController {
     // and pastes text normally; canvas focus pastes as a new layer.
     @objc func paste(_ sender: Any?) {
         pasteAsNewLayer(sender)
+    }
+
+    // MARK: - Layer mask actions (Layer > Mask)
+
+    /// Whether the active layer carries a mask, and whether that mask is
+    /// enabled (menu validation, paint-target rules).
+    private var activeLayerHasMask: Bool {
+        guard let document = document, let doc = document.doc else { return false }
+        return doc.layerHasMask(document.activeLayerIndex)
+    }
+
+    private var activeLayerMaskEnabled: Bool {
+        guard let document = document, let doc = document.doc else { return false }
+        return doc.layerMaskEnabled(document.activeLayerIndex)
+    }
+
+    @objc func addLayerMaskRevealAll(_ sender: Any?) {
+        addLayerMask(kind: RZ_MASK_REVEAL_ALL, selection: nil)
+    }
+
+    @objc func addLayerMaskHideAll(_ sender: Any?) {
+        addLayerMask(kind: RZ_MASK_HIDE_ALL, selection: nil)
+    }
+
+    @objc func addLayerMaskFromSelection(_ sender: Any?) {
+        guard let selection = canvas.selection else {
+            NSSound.beep()
+            return
+        }
+        // The core crops the canvas-sized coverage to the layer's rect.
+        addLayerMask(kind: RZ_MASK_FROM_SELECTION, selection: selection.maskBytes())
+    }
+
+    private func addLayerMask(kind: RzMaskKind, selection: [UInt8]?) {
+        guard let document = document, document.doc != nil else {
+            NSSound.beep()
+            return
+        }
+        let idx = document.activeLayerIndex
+        document.applyEdit("Add Layer Mask") {
+            $0.addingLayerMask(idx, kind: kind, selection: selection)
+        }
+        updateStatus()
+    }
+
+    @objc func deleteLayerMask(_ sender: Any?) {
+        guard let document = document, document.doc != nil else {
+            NSSound.beep()
+            return
+        }
+        let idx = document.activeLayerIndex
+        document.applyEdit("Delete Layer Mask") { $0.removingLayerMask(idx, apply: false) }
+        updateStatus()
+    }
+
+    @objc func applyLayerMask(_ sender: Any?) {
+        guard let document = document, document.doc != nil else {
+            NSSound.beep()
+            return
+        }
+        let idx = document.activeLayerIndex
+        document.applyEdit("Apply Layer Mask") { $0.removingLayerMask(idx, apply: true) }
+        updateStatus()
+    }
+
+    @objc func toggleLayerMaskEnabled(_ sender: Any?) {
+        guard let document = document, let doc = document.doc,
+              doc.layerHasMask(document.activeLayerIndex)
+        else {
+            NSSound.beep()
+            return
+        }
+        let idx = document.activeLayerIndex
+        let enabled = !doc.layerMaskEnabled(idx)
+        document.applyEdit(enabled ? "Enable Layer Mask" : "Disable Layer Mask") {
+            $0.withLayerMaskEnabled(idx, enabled)
+        }
+        updateStatus()
     }
 
     @objc func toggleLayersPanel(_ sender: Any?) {
@@ -1331,6 +1520,18 @@ extension EditorViewController: NSUserInterfaceValidations {
             return active >= 1 && document?.doc?.layerInfo(active - 1)?.visible == true
         case #selector(flattenImage(_:)):
             return (document?.doc?.layerCount ?? 1) > 1
+        case #selector(addLayerMaskRevealAll(_:)), #selector(addLayerMaskHideAll(_:)):
+            return !activeLayerHasMask
+        case #selector(addLayerMaskFromSelection(_:)):
+            return !activeLayerHasMask && canvas.selection != nil
+        case #selector(deleteLayerMask(_:)), #selector(applyLayerMask(_:)):
+            return activeLayerHasMask
+        case #selector(toggleLayerMaskEnabled(_:)):
+            // Checkmark state, fixed title: a mask is enabled or it isn't.
+            if let menuItem = item as? NSMenuItem {
+                menuItem.state = activeLayerMaskEnabled ? .on : .off
+            }
+            return activeLayerHasMask
         case #selector(pasteAsNewLayer(_:)), #selector(paste(_:)):
             return NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
         case #selector(toggleLayersPanel(_:)):

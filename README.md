@@ -13,7 +13,17 @@ decoding, encoding, and manipulation.
   layers panel with thumbnails, inline rename, drag-reorder, and
   new/delete/duplicate/merge-down/flatten; Move tool (V) with arrow-key
   nudges; Paste as New Layer; PSD files import with their real layers; the
-  native `.rz` format saves the full layer stack losslessly
+  native `.rz` format saves the full layer stack — masks included —
+  losslessly
+- **Layer masks**: a grayscale coverage mask per layer that hides pixels
+  without erasing them — Layer > Mask adds one revealing all, hiding all, or
+  built from the current selection, then enables/disables it (a disabled mask
+  is kept but ignored, to compare with and without), applies it (bakes the
+  coverage into the layer's alpha) or deletes it (the layer comes back
+  whole); a masked layer grows a second thumbnail beside its own in the
+  layers panel — click either to aim the brush and eraser, which paint the
+  mask white to reveal and black to hide. A mask is the layer's size and
+  moves, rotates, crops and scales with it
 - Open PNG, JPEG, Photoshop (PSD, layered), TIFF, BMP, GIF, WebP
   — EXIF orientation is applied on open, so camera photos display upright
 - Export a copy to PNG, JPEG (with quality control), TIFF, BMP, GIF, WebP;
@@ -75,10 +85,12 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 32 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 35 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
-image as PNG), layer operations, blend modes, filters, geometry, brush and
-eraser strokes (polyline points with size/color/opacity), rasterized text,
+image as PNG), layer operations, blend modes, layer masks (add revealing,
+hiding or from the selection; enable, apply, or delete), filters, geometry,
+brush and eraser strokes (polyline points with size/color/opacity, and a
+`target` choosing the layer's pixels or its mask), rasterized text,
 selections (rect/ellipse/polygon/magic wand with add/subtract/intersect
 modes, plus invert and feather — shared with the UI and
 honored by every paint tool), bucket fill, gradients,

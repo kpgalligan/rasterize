@@ -94,6 +94,18 @@ final class ImageCanvasView: NSView {
     var brushOpacity: CGFloat = 1.0
     var textFont: NSFont = .systemFont(ofSize: 48)
 
+    /// True while brush and eraser edit the active layer's MASK instead of
+    /// its pixels (the layers panel's paint target). A mask is coverage, not
+    /// color: the stroke paints white (brush, reveals) or black (eraser,
+    /// hides), it previews as a translucent ghost rather than through the
+    /// projection, and the whole overlay commits on mouse-up via
+    /// onCommitMaskOverlay. Kept current by EditorViewController.
+    var paintsMask = false {
+        didSet {
+            if paintsMask != oldValue { needsDisplay = true }
+        }
+    }
+
     // Brush/eraser stroke pipeline. The overlay accumulates the stroke's
     // geometry; every tick hands the WHOLE overlay to the receiver, which
     // routes it through the document's live-edit machinery so the canvas
@@ -110,6 +122,13 @@ final class ImageCanvasView: NSView {
     /// Fired when an in-progress stroke is abandoned (tool switch, Escape,
     /// window close); the receiver rolls the live edit back.
     var onStrokeCancel: (() -> Void)?
+
+    /// Fired once at the END of a mask stroke with the overlay's canvas-sized
+    /// premultiplied RGBA8 bytes; the receiver routes them through
+    /// ImageDocument.applyEdit as a single undo step. Mask strokes take this
+    /// path instead of onStrokeUpdate's live-edit round trip (see
+    /// drawMaskStrokeGhost).
+    var onCommitMaskOverlay: ((_ data: UnsafePointer<UInt8>, _ actionName: String) -> Void)?
 
     /// Called once per text-session commit with the overlay's premultiplied
     /// RGBA8 bytes; the receiver routes them through ImageDocument.applyEdit
@@ -165,8 +184,11 @@ final class ImageCanvasView: NSView {
     // Move-drag state: the unclamped image-space point the drag started at.
     private var moveDragOrigin: CGPoint?
 
-    // Stroke state (brush/eraser).
+    // Stroke state (brush/eraser). `strokeOnMask` latches paintsMask at
+    // mouse-down so nothing (an agent edit landing on the main thread, a
+    // panel click) can switch a stroke's target halfway through it.
     private var strokeActive = false
+    private var strokeOnMask = false
     private var strokeLastPoint: CGPoint?
 
     // Full-image premultiplied overlay accumulating stroke geometry and
@@ -276,6 +298,10 @@ final class ImageCanvasView: NSView {
             drawFlipped(cgImage, in: context)
         }
 
+        // A mask stroke in progress: the projection has not moved, so the
+        // overlay itself is ghosted on top until the stroke commits.
+        drawMaskStrokeGhost(in: context)
+
         // Paint can only land inside the active layer's extent; when that is
         // smaller than the canvas, show the boundary so strokes and text
         // outside it don't silently vanish.
@@ -310,6 +336,30 @@ final class ImageCanvasView: NSView {
         context.translateBy(x: 0, y: bounds.height)
         context.scaleBy(x: 1, y: -1)
         context.draw(cgImage, in: CGRect(origin: .zero, size: bounds.size))
+        context.restoreGState()
+    }
+
+    /// Quick-mask-style ghost of an in-progress MASK stroke: a translucent
+    /// red wash wherever the overlay has coverage. Painting a mask changes
+    /// coverage, not color, so previewing the overlay's own white/black
+    /// pixels would read as paint; and re-compositing the masked projection
+    /// on every tick is deliberately not attempted. The true result appears
+    /// when the stroke commits on mouse-up.
+    private func drawMaskStrokeGhost(in context: CGContext) {
+        guard strokeActive, strokeOnMask, let overlay = overlayContext?.makeImage() else { return }
+        context.saveGState()
+        context.translateBy(x: 0, y: bounds.height)
+        context.scaleBy(x: 1, y: -1)
+        let rect = CGRect(origin: .zero, size: bounds.size)
+        context.setAlpha(0.5)
+        // Draw the stroke, then flood its alpha with red: sourceIn keeps the
+        // fill only where the overlay covered something.
+        context.beginTransparencyLayer(auxiliaryInfo: nil)
+        context.draw(overlay, in: rect)
+        context.setBlendMode(.sourceIn)
+        context.setFillColor(NSColor.systemRed.cgColor)
+        context.fill(rect)
+        context.endTransparencyLayer()
         context.restoreGState()
     }
 
@@ -656,8 +706,14 @@ final class ImageCanvasView: NSView {
             selection.clip(context)
         }
         // For the eraser only alpha matters, so an opaque paint color works
-        // for both tools.
-        let color = (paintColor.usingColorSpace(.sRGB) ?? paintColor).withAlphaComponent(1)
+        // for both tools. Painting a MASK ignores the color well entirely —
+        // coverage, not color: white reveals, black hides — and carries the
+        // opacity in the stroke's own alpha, since the mask-painting FFI
+        // takes no separate alpha the way rz_doc_painting_layer does.
+        strokeOnMask = paintsMask
+        let base: NSColor = strokeOnMask ? (tool == .eraser ? .black : .white) : paintColor
+        let color = (base.usingColorSpace(.sRGB) ?? base)
+            .withAlphaComponent(strokeOnMask ? brushOpacity : 1)
         context.setStrokeColor(color.cgColor)
         context.setFillColor(color.cgColor)
         context.setLineWidth(brushSize)
@@ -703,6 +759,12 @@ final class ImageCanvasView: NSView {
     /// the pre-stroke document and swaps in the resulting projection (which
     /// is what redraws the canvas — the overlay itself is never drawn).
     private func emitStrokeUpdate() {
+        // A mask stroke never round-trips through the document mid-drag: it
+        // ghosts on top of the unchanged projection and commits once.
+        guard !strokeOnMask else {
+            needsDisplay = true
+            return
+        }
         guard let data = overlayData else { return }
         let erasing = tool == .eraser
         onStrokeUpdate?(
@@ -716,10 +778,25 @@ final class ImageCanvasView: NSView {
         overlayContext?.restoreGState()
         strokeActive = false
         strokeLastPoint = nil
+        let actionName = strokeActionName()
+        if strokeOnMask, let data = overlayData {
+            // The receiver's applyEdit consumes the bytes synchronously.
+            onCommitMaskOverlay?(
+                UnsafePointer(data.assumingMemoryBound(to: UInt8.self)), actionName)
+        }
         clearOverlay()
+        strokeOnMask = false
+        needsDisplay = true
         // Always fires once a stroke began: the live-edit session must
         // close even if the whole stroke missed the layer.
-        onStrokeEnd?(tool == .eraser ? "Erase" : "Brush Stroke")
+        onStrokeEnd?(actionName)
+    }
+
+    private func strokeActionName() -> String {
+        if strokeOnMask {
+            return tool == .eraser ? "Erase Mask" : "Paint Mask"
+        }
+        return tool == .eraser ? "Erase" : "Brush Stroke"
     }
 
     /// Abandons any in-progress stroke without committing (tool switches,
@@ -729,6 +806,7 @@ final class ImageCanvasView: NSView {
         guard strokeActive else { return }
         overlayContext?.restoreGState()
         strokeActive = false
+        strokeOnMask = false
         clearOverlay()
         onStrokeCancel?()
         needsDisplay = true

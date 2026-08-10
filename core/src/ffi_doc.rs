@@ -8,7 +8,7 @@ use std::ptr;
 
 use image::imageops::FilterType;
 
-use crate::doc::{BlendMode, RzDocument};
+use crate::doc::{BlendMode, MaskKind, RzDocument};
 use crate::ops::CompositeMode;
 use crate::RzImage;
 
@@ -755,7 +755,9 @@ pub unsafe extern "C" fn rz_doc_magic_wand(
     }
 }
 
-/// Reads an optional canvas-sized mask pointer into a slice.
+/// Reads an optional caller buffer pointer (a canvas-sized selection mask, a
+/// canvas-sized paint overlay) into a slice of exactly `len` bytes. `len` is
+/// always derived from the document, never from the caller.
 ///
 /// # Safety
 /// `mask` must be NULL or valid for `len` bytes for the duration of the
@@ -878,4 +880,166 @@ pub unsafe extern "C" fn rz_selection_feather(
         crate::doc_select::feather_mask(slice, width, height, radius);
     }))
     .is_ok()
+}
+
+// ------------------------------------------------------------ layer masks --
+
+/// Maps a raw `RzMaskKind` value onto a `MaskKind`. `selection` is read only
+/// for `RZ_MASK_FROM_SELECTION`, and only after `w`/`h` have been checked
+/// against the canvas — as in `rz_doc_painting_layer`, the slice length comes
+/// from the document, so a caller's dimensions can only reject the buffer,
+/// never widen the read. `None` on an unknown kind, a NULL selection, or a
+/// selection that is not canvas-sized.
+///
+/// # Safety
+/// `selection` must be NULL or valid for `w * h` readable bytes.
+unsafe fn mask_kind_from_c<'a>(
+    doc: &RzDocument,
+    kind: c_int,
+    selection: *const u8,
+    w: u32,
+    h: u32,
+) -> Option<MaskKind<'a>> {
+    match kind {
+        0 => Some(MaskKind::RevealAll),
+        1 => Some(MaskKind::HideAll),
+        2 => {
+            if w != doc.width || h != doc.height {
+                return None;
+            }
+            let len = (w as usize).checked_mul(h as usize)?;
+            let selection = unsafe { mask_slice(selection, len)? };
+            Some(MaskKind::FromSelection(selection))
+        }
+        _ => None,
+    }
+}
+
+/// Gives layer `idx` a mask (replacing any existing one) and enables it. The
+/// mask is created at exactly the layer's pixel size; a `RZ_MASK_FROM_SELECTION`
+/// buffer is canvas-sized (`w`/`h` must equal the canvas) and is cropped to
+/// the layer's rect. NULL on NULL doc, out-of-range idx, an unknown kind, or a
+/// NULL / wrongly sized selection buffer.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `selection`
+/// must be NULL or a valid pointer to at least `w * h` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_adding_layer_mask(
+    doc: *const RzDocument,
+    idx: usize,
+    kind: c_int,
+    selection: *const u8,
+    w: u32,
+    h: u32,
+) -> *mut RzDocument {
+    unsafe {
+        doc_op(doc, |d| {
+            d.add_mask(idx, mask_kind_from_c(d, kind, selection, w, h)?)
+        })
+    }
+}
+
+/// Drops layer `idx`'s mask; with `apply` the coverage is first baked into the
+/// layer's alpha REGARDLESS of the enabled flag. NULL on NULL doc,
+/// out-of-range idx, or a layer with no mask.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_removing_layer_mask(
+    doc: *const RzDocument,
+    idx: usize,
+    apply: bool,
+) -> *mut RzDocument {
+    unsafe { doc_op(doc, |d| d.remove_mask(idx, apply)) }
+}
+
+/// Pure setter: returns a new document with layer `idx`'s mask enabled or
+/// disabled (a disabled mask is retained but ignored while compositing). NULL
+/// on NULL doc, out-of-range idx, or a layer with no mask.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_with_layer_mask_enabled(
+    doc: *const RzDocument,
+    idx: usize,
+    enabled: bool,
+) -> *mut RzDocument {
+    unsafe { doc_op(doc, |d| d.set_mask_enabled(idx, enabled)) }
+}
+
+/// Paints a canvas-frame PREMULTIPLIED RGBA8 overlay (`src`, `w`/`h` must
+/// equal the canvas size — the same buffer `rz_doc_painting_layer` takes) onto
+/// layer `idx`'s MASK, mapped through the layer's offset: white reveals, black
+/// hides, the overlay's alpha carries the stroke's coverage. NULL on NULL
+/// args, dimension mismatch, out-of-range idx, a layer with no mask, or when
+/// the layer's extent does not intersect the canvas (no mask pixel could
+/// change).
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `src` must be
+/// NULL or a valid pointer to at least `w * h * 4` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_painting_layer_mask(
+    doc: *const RzDocument,
+    idx: usize,
+    src: *const u8,
+    w: u32,
+    h: u32,
+) -> *mut RzDocument {
+    unsafe {
+        doc_op(doc, |d| {
+            // Validate against the canvas dimensions before touching `src`, so
+            // the raw read below is bounded by the canvas buffer size.
+            if w != d.width || h != d.height {
+                return None;
+            }
+            let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+            d.paint_mask(idx, mask_slice(src, len)?)
+        })
+    }
+}
+
+/// Layer `idx`'s mask as an opaque grayscale image at the LAYER's size; NULL
+/// on NULL doc, out-of-range idx, or a layer with no mask.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_layer_mask_image(
+    doc: *const RzDocument,
+    idx: usize,
+) -> *mut RzImage {
+    unsafe {
+        doc_get(doc, ptr::null_mut(), |d| {
+            let pixels = d.mask_image(idx)?;
+            Some(Box::into_raw(Box::new(RzImage { pixels })))
+        })
+    }
+}
+
+/// Whether layer `idx` has a mask; false on NULL doc or out-of-range idx.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_layer_has_mask(doc: *const RzDocument, idx: usize) -> bool {
+    unsafe { doc_get(doc, false, |d| Some(d.layers.get(idx)?.mask.is_some())) }
+}
+
+/// Whether layer `idx` has a mask AND it is enabled; false on NULL doc,
+/// out-of-range idx, or a layer with no mask (there is nothing to enable).
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_layer_mask_enabled(doc: *const RzDocument, idx: usize) -> bool {
+    unsafe {
+        doc_get(doc, false, |d| {
+            let layer = d.layers.get(idx)?;
+            Some(layer.mask.is_some() && layer.mask_enabled)
+        })
+    }
 }

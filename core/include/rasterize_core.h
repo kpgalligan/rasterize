@@ -120,8 +120,9 @@ bool rz_image_save(const RzImage *img, const char *path, RzFormat format,
 
 /* Opaque layered document: a canvas size plus an ordered stack of layers
  * (index 0 = BOTTOM). Every layer has straight-alpha RGBA8 pixels of its own
- * size, an integer canvas offset, a name, opacity, a blend mode, and a
- * visibility flag. Layer pixel buffers are immutable and shared between
+ * size, an integer canvas offset, a name, opacity, a blend mode, a
+ * visibility flag, and an optional layer mask (see "Layer masks" below).
+ * Layer pixel buffers are immutable and shared between
  * document handles (copy-on-write), so rz_doc_clone and the pure "with_"/
  * stack operations are cheap: they copy only what they change. Documents
  * always contain at least one layer. Like RzImage, a given handle is not
@@ -186,11 +187,17 @@ void rz_doc_free(RzDocument *doc);
  * rz_image_save. The writer enforces the reader's limits so every file it
  * produces can be read back: more than 1024 layers or a layer PNG over
  * 512 MiB is an error; layer names longer than 64 KiB are truncated on a
- * UTF-8 character boundary. Layout (little-endian): "RZDC", u32 version=1,
+ * UTF-8 character boundary. Layout (little-endian): "RZDC", u32 version=2,
  * u32 canvas width, u32 canvas height, u32 layer count; then per layer
  * bottom-to-top: u32 name byte length + UTF-8 name, i32 offset x, i32
  * offset y, f32 opacity, u32 blend mode, u8 visible, u32 PNG byte length +
- * PNG-encoded RGBA8 layer pixels. */
+ * PNG-encoded RGBA8 layer pixels; then the version-2 fields, which a
+ * version-1 record simply lacks: u8 mask present, u8 mask enabled, u32 mask
+ * byte length + that many RAW coverage bytes when present (a mask is always
+ * the layer's pixel count, so its dimensions are not stored twice), then u8
+ * layer-metadata present and, when present, u32 byte length + UTF-8 bytes (a
+ * reserved slot this API does not surface yet). Version-1 files still load,
+ * with no mask on any layer. */
 bool rz_doc_save_native(const RzDocument *doc, const char *path,
                         char **err_out);
 
@@ -381,6 +388,83 @@ RzDocument *rz_doc_gradient(const RzDocument *doc, size_t idx, float x0,
  * returns true and leaves the mask untouched. */
 bool rz_selection_feather(uint8_t *mask, uint32_t width, uint32_t height,
                           float radius);
+
+/* ---- Layer masks --------------------------------------------------------
+ *
+ * A layer mask is a per-layer grayscale coverage channel gating the layer's
+ * alpha while compositing: 0 hides, 255 shows, intermediate values are
+ * partial coverage, multiplied on top of the layer's opacity. A mask is
+ * always exactly the LAYER's pixel size (never the canvas size) and it moves,
+ * rotates, crops and scales WITH the layer (GIMP-style), so it keeps hiding
+ * the same layer content wherever the layer sits on the canvas; replacing a
+ * layer's pixels with a differently sized image drops it. Masks ride along
+ * through the stack operations and are written by rz_doc_save_native (they
+ * are what bumped the RZDC format to version 2).
+ *
+ * The layer getters above stay deliberately mask-free: rz_doc_layer_image and
+ * rz_doc_layer_thumbnail return the layer's UNMASKED pixels, and the mask has
+ * an image of its own (rz_doc_layer_mask_image) for a second thumbnail beside
+ * them. Only the projection (rz_doc_flattened) applies masks. */
+
+typedef enum {
+  RZ_MASK_REVEAL_ALL = 0,     /* filled 255: the layer shows in full */
+  RZ_MASK_HIDE_ALL = 1,       /* filled 0: the layer is hidden entirely */
+  RZ_MASK_FROM_SELECTION = 2, /* the selection buffer, cropped to the layer */
+} RzMaskKind;
+
+/* Gives layer idx a mask (replacing any existing one) and enables it, at
+ * exactly the layer's pixel size. For RZ_MASK_FROM_SELECTION, `selection` is
+ * a CANVAS-sized coverage buffer as described under "Selection regions"
+ * above — w and h must equal the canvas size — and is CROPPED to the layer's
+ * rect: each mask pixel takes the selection value at its own canvas position,
+ * and layer pixels lying outside the canvas get 0 (a selection never reaches
+ * past the canvas). For the other kinds `selection` is unused: pass NULL,
+ * 0, 0. NULL on out-of-range idx, an unknown kind, or a NULL / not
+ * canvas-sized selection buffer. */
+RzDocument *rz_doc_adding_layer_mask(const RzDocument *doc, size_t idx,
+                                     RzMaskKind kind, const uint8_t *selection,
+                                     uint32_t w, uint32_t h);
+
+/* Drops layer idx's mask. With apply, the coverage is first baked into the
+ * layer's alpha (alpha' = alpha * mask / 255, straight alpha) REGARDLESS of
+ * the enabled flag — "apply" always means what it says — so applying an
+ * ENABLED mask leaves the projection unchanged. Without apply the pixels are
+ * untouched and the layer is revealed in full again. NULL on out-of-range idx
+ * or a layer with no mask. */
+RzDocument *rz_doc_removing_layer_mask(const RzDocument *doc, size_t idx,
+                                       bool apply);
+
+/* Enables or disables layer idx's mask: a disabled mask is RETAINED (and
+ * saved) but ignored while compositing, so the layer composites exactly as if
+ * it had none. NULL on out-of-range idx or a layer with no mask. */
+RzDocument *rz_doc_with_layer_mask_enabled(const RzDocument *doc, size_t idx,
+                                           bool enabled);
+
+/* Paints layer idx's MASK with a CANVAS-frame PREMULTIPLIED RGBA8 overlay —
+ * the very buffer rz_doc_painting_layer takes, w/h equal to the canvas size —
+ * mapped through the layer's offset. Each mask pixel samples the overlay at
+ * its canvas position and becomes
+ *   mask' = round(lerp(mask, luma(straight color), overlay alpha))
+ * so painting white reveals and black hides, with the stroke's own
+ * anti-aliasing (and any selection the caller already clipped the overlay
+ * with) carried by the alpha. Overlay pixels outside the layer are ignored
+ * (the layer does NOT grow). NULL on a layer with no mask, on dimension
+ * mismatch, or when the layer's extent does not intersect the canvas at all
+ * (no mask pixel could change), matching rz_doc_painting_layer. */
+RzDocument *rz_doc_painting_layer_mask(const RzDocument *doc, size_t idx,
+                                       const uint8_t *src, uint32_t w,
+                                       uint32_t h);
+
+/* Layer idx's mask as an opaque grayscale image at the LAYER's size (for the
+ * mask thumbnail beside the layer's own). NULL on out-of-range idx or a layer
+ * with no mask. */
+RzImage *rz_doc_layer_mask_image(const RzDocument *doc, size_t idx);
+
+/* Mask queries. Both are false on NULL doc or out-of-range idx;
+ * rz_doc_layer_mask_enabled is also false for a layer with no mask (there is
+ * nothing to enable), so it can drive a checkbox or menu item directly. */
+bool rz_doc_layer_has_mask(const RzDocument *doc, size_t idx);
+bool rz_doc_layer_mask_enabled(const RzDocument *doc, size_t idx);
 
 /* ---- Embedded agent (MCP) server ----------------------------------------
  *

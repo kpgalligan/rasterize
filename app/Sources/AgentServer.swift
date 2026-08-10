@@ -102,6 +102,9 @@ final class AgentServer {
         case "flatten_image": return try docEdit(a, "Flatten Image") { $0.flattening() }
         case "reorder_layer": return try reorderLayer(a)
         case "set_layer_properties": return try setLayerProperties(a)
+        case "add_layer_mask": return try addLayerMask(a)
+        case "remove_layer_mask": return try removeLayerMask(a)
+        case "set_layer_mask_enabled": return try setLayerMaskEnabled(a)
         case "apply_filter": return try applyFilter(a)
         case "brush_stroke": return try paintStroke(a, erase: false)
         case "eraser_stroke": return try paintStroke(a, erase: true)
@@ -221,6 +224,8 @@ final class AgentServer {
                 "opacity": (info.opacity * 100).rounded() / 100,
                 "blend_mode": RzBlendMode.displayName(for: info.blendMode),
                 "visible": info.visible,
+                "has_mask": doc.layerHasMask(index),
+                "mask_enabled": doc.layerMaskEnabled(index),
             ]
         }
         var result = summary(document)
@@ -432,6 +437,73 @@ final class AgentServer {
         return try jsonResult(["ok": true, "document": summary(document)])
     }
 
+    // MARK: - Layer masks
+
+    /// The mask-owning layer a call targets, verified to actually have a
+    /// mask so the failure names the fix instead of a generic edit error.
+    private func maskedLayerIndex(
+        _ a: [String: Any], _ document: ImageDocument, _ what: String
+    ) throws -> Int {
+        let index = try paintLayerIndex(a, document)
+        guard document.doc?.layerHasMask(index) == true else {
+            throw ToolError(
+                message: "Layer \(index) has no mask to \(what). Add one with add_layer_mask.")
+        }
+        return index
+    }
+
+    private func addLayerMask(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        let index = try paintLayerIndex(a, document)
+        let kindName = stringArg(a, "kind") ?? "reveal_all"
+        let kind: RzMaskKind
+        var selection: [UInt8]? = nil
+        switch kindName {
+        case "reveal_all": kind = RZ_MASK_REVEAL_ALL
+        case "hide_all": kind = RZ_MASK_HIDE_ALL
+        case "from_selection":
+            // The window's live selection — the same one the marquee shows;
+            // the core crops the canvas-sized coverage to the layer's rect.
+            guard let mask = selectionMask(document) else {
+                throw ToolError(
+                    message: "kind \"from_selection\" needs an active selection, and there is "
+                        + "none. Make one with a select_* tool first, or use kind "
+                        + "\"reveal_all\" / \"hide_all\".")
+            }
+            kind = RZ_MASK_FROM_SELECTION
+            selection = mask
+        case let other:
+            throw ToolError(
+                message: "kind must be reveal_all, hide_all, or from_selection (got \"\(other)\")")
+        }
+        try performEdit(document, "Add Layer Mask") {
+            $0.addingLayerMask(index, kind: kind, selection: selection)
+        }
+        return try jsonResult(["ok": true, "layer": index, "kind": kindName, "mask_enabled": true])
+    }
+
+    private func removeLayerMask(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        let apply = boolArg(a, "apply") ?? false
+        let index = try maskedLayerIndex(a, document, apply ? "apply" : "remove")
+        try performEdit(document, apply ? "Apply Layer Mask" : "Delete Layer Mask") {
+            $0.removingLayerMask(index, apply: apply)
+        }
+        return try jsonResult(["ok": true, "layer": index, "applied": apply])
+    }
+
+    private func setLayerMaskEnabled(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        guard let enabled = boolArg(a, "enabled") else {
+            throw ToolError(message: "set_layer_mask_enabled requires enabled (true or false)")
+        }
+        let index = try maskedLayerIndex(a, document, enabled ? "enable" : "disable")
+        try performEdit(document, enabled ? "Enable Layer Mask" : "Disable Layer Mask") {
+            $0.withLayerMaskEnabled(index, enabled)
+        }
+        return try jsonResult(["ok": true, "layer": index, "mask_enabled": enabled])
+    }
+
     // MARK: - Filters and geometry
 
     private func applyFilter(_ a: [String: Any]) throws -> String {
@@ -500,10 +572,14 @@ final class AgentServer {
     /// Builds a canvas-sized premultiplied RGBA8 overlay (row 0 = top,
     /// drawing coordinates top-left-origin — the same format the canvas
     /// view's stroke pipeline uses), lets `draw` fill it, and composites
-    /// it onto `layer` through the regular performEdit path.
+    /// it onto `layer` through the regular performEdit path. With
+    /// `toMask` the very same overlay is painted into the layer's MASK
+    /// instead (white reveals, black hides, the overlay's own alpha is
+    /// the blend — `mode` and `alpha` do not apply there).
     private func paintOverlay(
         _ document: ImageDocument, layer: Int, actionName: String,
-        mode: RzCompositeMode, alpha: Double, draw: (CGContext) -> Void
+        mode: RzCompositeMode, alpha: Double, toMask: Bool = false,
+        draw: (CGContext) -> Void
     ) throws {
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
         let width = doc.width
@@ -526,6 +602,10 @@ final class AgentServer {
                     selection.clip(context)
                 }
                 draw(context)
+                if toMask {
+                    return current.paintingLayerMask(
+                        layer, overlay: base, w: width, h: height)
+                }
                 return current.paintingLayer(
                     layer, overlay: base, w: width, h: height, mode: mode, alpha: alpha)
             }
@@ -580,18 +660,51 @@ final class AgentServer {
             alpha: alpha)
     }
 
+    /// The brush/eraser "target" argument: the layer's pixels (default) or
+    /// the layer's mask.
+    private func paintTargetsMask(_ a: [String: Any]) throws -> Bool {
+        switch stringArg(a, "target") ?? "layer" {
+        case "layer": return false
+        case "mask": return true
+        case let other:
+            throw ToolError(message: "target must be \"layer\" or \"mask\" (got \"\(other)\")")
+        }
+    }
+
     private func paintStroke(_ a: [String: Any], erase: Bool) throws -> String {
         let document = try target(a)
-        let layer = try paintLayerIndex(a, document)
+        let toMask = try paintTargetsMask(a)
+        let layer =
+            toMask
+            ? try maskedLayerIndex(a, document, erase ? "erase" : "paint")
+            : try paintLayerIndex(a, document)
         let points = try parsePoints(a)
         let size = CGFloat(min(max(doubleArg(a, "size") ?? 16, 1), 512))
         let opacity = min(max(doubleArg(a, "opacity") ?? 1, 0), 1)
-        // In ERASE mode only the overlay's alpha matters.
-        let color = erase ? NSColor.black : try parseColor(a, "color", fallback: .black)
-        let actionName = erase ? "Eraser Stroke" : "Brush Stroke"
+        // In ERASE mode only the overlay's alpha matters. A MASK is coverage
+        // rather than color — white reveals, black hides, whatever color was
+        // asked for — and it carries the opacity in the stroke's own alpha,
+        // since the mask-painting call takes no separate alpha.
+        let color: NSColor
+        if toMask {
+            let level: CGFloat = erase ? 0 : 1
+            color = NSColor(
+                srgbRed: level, green: level, blue: level, alpha: CGFloat(opacity))
+        } else if erase {
+            color = .black
+        } else {
+            color = try parseColor(a, "color", fallback: .black)
+        }
+        let actionName: String
+        if toMask {
+            actionName = erase ? "Erase Mask" : "Paint Mask"
+        } else {
+            actionName = erase ? "Eraser Stroke" : "Brush Stroke"
+        }
         try paintOverlay(
             document, layer: layer, actionName: actionName,
-            mode: erase ? RZ_COMPOSITE_ERASE : RZ_COMPOSITE_OVER, alpha: opacity
+            mode: erase ? RZ_COMPOSITE_ERASE : RZ_COMPOSITE_OVER, alpha: opacity,
+            toMask: toMask
         ) { context in
             context.setFillColor(color.cgColor)
             context.setStrokeColor(color.cgColor)
@@ -611,8 +724,10 @@ final class AgentServer {
             }
             context.strokePath()
         }
-        return try jsonResult(
-            ["ok": true, "action": actionName, "layer": layer, "points": points.count])
+        return try jsonResult([
+            "ok": true, "action": actionName, "layer": layer, "points": points.count,
+            "target": toMask ? "mask" : "layer",
+        ])
     }
 
     private func addText(_ a: [String: Any]) throws -> String {
@@ -1066,8 +1181,9 @@ final class AgentServer {
             tool(
                 "get_document",
                 "Full state of one document: canvas size and every layer's name, size, offset, "
-                    + "opacity, blend mode, and visibility. Layer index 0 is the bottom layer; "
-                    + "offsets are measured from the canvas top-left corner, y increasing down.",
+                    + "opacity, blend mode, visibility, and layer mask (has_mask, mask_enabled). "
+                    + "Layer index 0 is the bottom layer; offsets are measured from the canvas "
+                    + "top-left corner, y increasing down.",
                 ["document_id": docID]),
             tool(
                 "render",
@@ -1121,6 +1237,53 @@ final class AgentServer {
                     "document_id": docID,
                 ]),
             tool(
+                "add_layer_mask",
+                "Gives a layer a mask: a grayscale coverage channel that gates the layer's "
+                    + "alpha without touching its pixels (white shows, black hides, grays are "
+                    + "partial), so hiding is non-destructive and reversible. The mask is the "
+                    + "layer's size and moves with it. Replaces any existing mask and enables "
+                    + "it. Paint it afterwards with brush_stroke / eraser_stroke and "
+                    + "target: \"mask\".",
+                [
+                    "layer": index,
+                    "kind": [
+                        "type": "string",
+                        "enum": ["reveal_all", "hide_all", "from_selection"],
+                        "description": "reveal_all (default) starts fully white — nothing "
+                            + "hidden yet; hide_all starts black — the layer disappears until "
+                            + "you paint it back; from_selection builds the mask from the "
+                            + "CURRENT selection (selected shows, the rest hides), so it "
+                            + "requires an active selection from a select_* tool.",
+                    ],
+                    "document_id": docID,
+                ]),
+            tool(
+                "remove_layer_mask",
+                "Removes a layer's mask. With apply: true the coverage is first BAKED into "
+                    + "the layer's alpha — permanent, pixels lost, and it bakes regardless of "
+                    + "whether the mask was enabled — so what the mask hid becomes really "
+                    + "erased. With apply: false (the default) the mask is simply discarded "
+                    + "and the layer is revealed in full again, pixels untouched.",
+                [
+                    "layer": index,
+                    "apply": [
+                        "type": "boolean",
+                        "description": "Bake the mask into the layer's alpha before dropping "
+                            + "it (default false = discard it).",
+                    ],
+                    "document_id": docID,
+                ]),
+            tool(
+                "set_layer_mask_enabled",
+                "Turns a layer's mask on or off. A disabled mask is kept (and saved) but "
+                    + "ignored while compositing, so the layer shows in full — useful to "
+                    + "compare with and without. Errors when the layer has no mask.",
+                [
+                    "layer": index,
+                    "enabled": ["type": "boolean"],
+                    "document_id": docID,
+                ], required: ["enabled"]),
+            tool(
                 "apply_filter",
                 "Applies a filter or adjustment to one layer's pixels. Filters and their "
                     + "parameters: grayscale, invert, sepia, edge_detect, emboss (none); "
@@ -1153,7 +1316,8 @@ final class AgentServer {
                 "Paints a brush stroke onto a layer's pixels: a smooth polyline through "
                     + "points (canvas coordinates) with round caps and joins. One point "
                     + "paints a dot. Draw shapes with several strokes; use render to check "
-                    + "the result.",
+                    + "the result. With target: \"mask\" the same stroke paints the layer's "
+                    + "mask instead, revealing what it covers.",
                 [
                     "points": [
                         "type": "array",
@@ -1170,16 +1334,29 @@ final class AgentServer {
                     ],
                     "color": [
                         "type": "string",
-                        "description": "Hex color, #RRGGBB or #RRGGBBAA (default #000000).",
+                        "description": "Hex color, #RRGGBB or #RRGGBBAA (default #000000). "
+                            + "Ignored when target is \"mask\".",
                     ],
                     "opacity": ["type": "number", "minimum": 0, "maximum": 1],
                     "layer": index,
+                    "target": [
+                        "type": "string",
+                        "enum": ["layer", "mask"],
+                        "description": "What the stroke paints: \"layer\" (default) the "
+                            + "layer's own pixels, \"mask\" the layer's mask, where the "
+                            + "stroke REVEALS what it covers. A mask is coverage, not color, "
+                            + "so a mask stroke is forced to WHITE whatever color you pass, "
+                            + "and opacity becomes partial coverage. The layer must already "
+                            + "have a mask (add_layer_mask).",
+                    ],
                     "document_id": docID,
                 ], required: ["points"]),
             tool(
                 "eraser_stroke",
                 "Erases along a polyline (same geometry as brush_stroke): pixels under the "
-                    + "stroke become transparent. opacity is the eraser strength.",
+                    + "stroke become transparent. opacity is the eraser strength. With "
+                    + "target: \"mask\" it hides through the layer's mask instead, leaving "
+                    + "the pixels intact.",
                 [
                     "points": [
                         "type": "array",
@@ -1196,6 +1373,17 @@ final class AgentServer {
                     ],
                     "opacity": ["type": "number", "minimum": 0, "maximum": 1],
                     "layer": index,
+                    "target": [
+                        "type": "string",
+                        "enum": ["layer", "mask"],
+                        "description": "What the stroke erases: \"layer\" (default) makes the "
+                            + "layer's own pixels transparent, \"mask\" paints the layer's "
+                            + "mask so it HIDES what the stroke covers while the pixels stay "
+                            + "intact (undo it by brushing the mask with target: \"mask\"). "
+                            + "A mask is coverage, not color, so a mask stroke is forced to "
+                            + "BLACK, and opacity becomes partial coverage. The layer must "
+                            + "already have a mask (add_layer_mask).",
+                    ],
                     "document_id": docID,
                 ], required: ["points"]),
             tool(

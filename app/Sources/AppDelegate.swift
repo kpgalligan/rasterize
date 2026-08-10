@@ -223,9 +223,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Duplicate Layer", #selector(EditorViewController.duplicateLayer(_:)), "j"))
         menu.addItem(item("Delete Layer", #selector(EditorViewController.deleteLayer(_:))))
         menu.addItem(.separator())
+        menu.addItem(submenuItem(layerMaskMenu()))
+        menu.addItem(.separator())
         menu.addItem(
             item("Merge Down", #selector(EditorViewController.mergeDown(_:)), "e", [.command, .shift]))
         menu.addItem(item("Flatten Image", #selector(EditorViewController.flattenImage(_:))))
+        return menu
+    }
+
+    /// Layer > Mask. Enablement (and the Enable item's checkmark) comes from
+    /// EditorViewController.validateUserInterfaceItem.
+    private func layerMaskMenu() -> NSMenu {
+        let menu = NSMenu(title: "Mask")
+
+        let add = NSMenu(title: "Add Layer Mask")
+        add.addItem(
+            item("Reveal All", #selector(EditorViewController.addLayerMaskRevealAll(_:))))
+        add.addItem(item("Hide All", #selector(EditorViewController.addLayerMaskHideAll(_:))))
+        add.addItem(
+            item(
+                "From Selection", #selector(EditorViewController.addLayerMaskFromSelection(_:))))
+        menu.addItem(submenuItem(add))
+
+        menu.addItem(item("Delete Layer Mask", #selector(EditorViewController.deleteLayerMask(_:))))
+        menu.addItem(item("Apply Layer Mask", #selector(EditorViewController.applyLayerMask(_:))))
+        menu.addItem(.separator())
+        menu.addItem(
+            item("Enable Layer Mask", #selector(EditorViewController.toggleLayerMaskEnabled(_:))))
         return menu
     }
 

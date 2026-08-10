@@ -469,6 +469,70 @@ final class RasterDocument {
         return mask.withUnsafeBufferPointer { body($0.baseAddress) }
     }
 
+    // MARK: - Layer masks
+
+    /// Gives layer `idx` a mask (replacing any existing one) and enables it,
+    /// at exactly the layer's pixel size. `selection` is a CANVAS-sized
+    /// coverage buffer, required by `RZ_MASK_FROM_SELECTION` (it is cropped
+    /// to the layer) and unused — pass nil — by the other kinds.
+    func addingLayerMask(
+        _ idx: Int, kind: RzMaskKind, selection: [UInt8]? = nil
+    ) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        guard kind == RZ_MASK_FROM_SELECTION else {
+            return wrap(rz_doc_adding_layer_mask(ptr, idx, kind, nil, 0, 0))
+        }
+        guard let selection = selection, selection.count == width * height else { return nil }
+        return selection.withUnsafeBufferPointer { buffer in
+            wrap(
+                rz_doc_adding_layer_mask(
+                    ptr, idx, kind, buffer.baseAddress, UInt32(width), UInt32(height)))
+        }
+    }
+
+    /// Drops layer `idx`'s mask. With `apply` the coverage is first baked
+    /// into the layer's alpha (regardless of the enabled flag).
+    func removingLayerMask(_ idx: Int, apply: Bool) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_removing_layer_mask(ptr, idx, apply))
+    }
+
+    /// Enables or disables layer `idx`'s mask; a disabled mask is retained
+    /// (and saved) but ignored while compositing.
+    func withLayerMaskEnabled(_ idx: Int, _ enabled: Bool) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_with_layer_mask_enabled(ptr, idx, enabled))
+    }
+
+    /// Paints layer `idx`'s MASK with a CANVAS-frame premultiplied overlay —
+    /// the very buffer `paintingLayer` takes — mapped through the layer's
+    /// offset: white reveals, black hides, the overlay's alpha is the blend.
+    func paintingLayerMask(
+        _ idx: Int, overlay data: UnsafePointer<UInt8>, w: Int, h: Int
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), w == width, h == height else { return nil }
+        return wrap(rz_doc_painting_layer_mask(ptr, idx, data, UInt32(w), UInt32(h)))
+    }
+
+    /// Layer `idx`'s mask as an opaque grayscale image at the LAYER's size
+    /// (the source for the mask thumbnail); nil when the layer has no mask.
+    func layerMaskImage(_ idx: Int) -> RasterImage? {
+        guard isValidIndex(idx) else { return nil }
+        return wrapImage(rz_doc_layer_mask_image(ptr, idx))
+    }
+
+    func layerHasMask(_ idx: Int) -> Bool {
+        guard isValidIndex(idx) else { return false }
+        return rz_doc_layer_has_mask(ptr, idx)
+    }
+
+    /// True only for a layer that HAS a mask and has it enabled, so it can
+    /// drive a checkbox or menu item state directly.
+    func layerMaskEnabled(_ idx: Int) -> Bool {
+        guard isValidIndex(idx) else { return false }
+        return rz_doc_layer_mask_enabled(ptr, idx)
+    }
+
     // MARK: - Whole-document geometry
 
     func rotated90() -> RasterDocument? { wrap(rz_doc_rotate90(ptr)) }

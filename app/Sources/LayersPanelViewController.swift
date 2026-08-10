@@ -11,19 +11,91 @@ final class LayerRowView: NSTableRowView {
     }
 }
 
-/// One row of the layers table: 22px visibility eye, 34px framed thumbnail,
-/// then a two-line stack — editable name over a mono meta line reading
-/// "Soft Light · 62%". Callbacks route edits back to the panel controller.
+/// A framed thumbnail well. It handles its own clicks (choosing the paint
+/// target) and deliberately swallows them, so clicking a thumbnail never
+/// starts the table's row drag; the handler selects the layer itself.
+final class ThumbnailWellView: NSView {
+    var onClick: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        guard let onClick = onClick else {
+            super.mouseDown(with: event)
+            return
+        }
+        onClick()
+    }
+}
+
+/// Draws a thumbnail aspect-fit (never upscaled) inside a well, plus — for a
+/// DISABLED layer mask — a diagonal slash across it.
+final class ThumbnailImageView: NSView {
+    var image: NSImage? {
+        didSet { needsDisplay = true }
+    }
+
+    /// Struck through: the mask is retained but ignored while compositing.
+    var slashed = false {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if let image = image, image.size.width > 0, image.size.height > 0 {
+            let scale = min(
+                bounds.width / image.size.width, bounds.height / image.size.height, 1)
+            let size = NSSize(
+                width: image.size.width * scale, height: image.size.height * scale)
+            image.draw(
+                in: NSRect(
+                    x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
+                    width: size.width, height: size.height))
+        }
+        guard slashed else { return }
+        let slash = NSBezierPath()
+        slash.move(to: NSPoint(x: bounds.minX + 4, y: bounds.minY + 4))
+        slash.line(to: NSPoint(x: bounds.maxX - 4, y: bounds.maxY - 4))
+        // Halo underneath so the slash reads over any coverage.
+        slash.lineWidth = 3
+        DS.chromeBackground.setStroke()
+        slash.stroke()
+        slash.lineWidth = 1.5
+        DS.textStrong.setStroke()
+        slash.stroke()
+    }
+}
+
+/// One row of the layers table: 22px visibility eye, framed thumbnail (plus
+/// a second one for the layer's mask), then a two-line stack — editable name
+/// over a mono meta line reading "Soft Light · 62%". The active layer rings
+/// whichever thumbnail brush/eraser currently edit. Callbacks route edits
+/// back to the panel controller.
 final class LayerCellView: NSView, NSTextFieldDelegate {
+    /// Thumbnail well side: 34 on its own, smaller once a mask thumbnail
+    /// sits beside it — the row height never grows.
+    static let thumbSide: CGFloat = 34
+    static let pairedThumbSide: CGFloat = 28
+    private static let thumbGap: CGFloat = 5
+
     private let eyeButton = NSButton(title: "", target: nil, action: nil)
-    private let thumbView = NSImageView()
-    private let thumbFrame = NSView()
+    private let thumbView = ThumbnailImageView()
+    private let thumbFrame = ThumbnailWellView()
+    private let maskView = ThumbnailImageView()
+    private let maskFrame = ThumbnailWellView()
     private let nameField = NSTextField(string: "")
     private let metaLabel = NSTextField(labelWithString: "")
     private var committedName = ""
+    private var hasMask = false
+
+    private var thumbWidth: NSLayoutConstraint!
+    private var thumbHeight: NSLayoutConstraint!
+    private var maskWidth: NSLayoutConstraint!
+    private var maskHeight: NSLayoutConstraint!
+    private var maskLeading: NSLayoutConstraint!
 
     var onToggleVisible: (() -> Void)?
     var onRename: ((String) -> Void)?
+    /// Clicking either thumbnail selects this layer and points brush/eraser
+    /// at the clicked target.
+    var onSelectTarget: ((PaintTarget) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -34,16 +106,22 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
         eyeButton.target = self
         eyeButton.action = #selector(eyeClicked(_:))
 
-        thumbFrame.translatesAutoresizingMaskIntoConstraints = false
-        thumbFrame.wantsLayer = true
-        thumbFrame.layer?.cornerRadius = 5
-        thumbFrame.layer?.borderWidth = 1
-        thumbFrame.layer?.masksToBounds = true
+        for well in [thumbFrame, maskFrame] {
+            well.translatesAutoresizingMaskIntoConstraints = false
+            well.wantsLayer = true
+            well.layer?.cornerRadius = 5
+            well.layer?.borderWidth = 1
+            well.layer?.masksToBounds = true
+        }
+        thumbFrame.onClick = { [weak self] in self?.onSelectTarget?(.layer) }
+        maskFrame.onClick = { [weak self] in self?.onSelectTarget?(.mask) }
+        thumbFrame.toolTip = "Paint on the layer"
 
-        thumbView.translatesAutoresizingMaskIntoConstraints = false
-        thumbView.imageScaling = .scaleProportionallyDown
-        thumbView.imageFrameStyle = .none
+        for view in [thumbView, maskView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+        }
         thumbFrame.addSubview(thumbView)
+        maskFrame.addSubview(maskView)
 
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.isBordered = false
@@ -61,8 +139,19 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
 
         addSubview(eyeButton)
         addSubview(thumbFrame)
+        addSubview(maskFrame)
         addSubview(nameField)
         addSubview(metaLabel)
+
+        // The mask well collapses to zero (and hides) on a layer without a
+        // mask, so the name field's leading edge follows either way.
+        thumbWidth = thumbFrame.widthAnchor.constraint(equalToConstant: Self.thumbSide)
+        thumbHeight = thumbFrame.heightAnchor.constraint(equalToConstant: Self.thumbSide)
+        maskWidth = maskFrame.widthAnchor.constraint(equalToConstant: 0)
+        maskHeight = maskFrame.heightAnchor.constraint(equalToConstant: 0)
+        maskLeading = maskFrame.leadingAnchor.constraint(
+            equalTo: thumbFrame.trailingAnchor, constant: 0)
+
         NSLayoutConstraint.activate([
             eyeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             eyeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -70,15 +159,25 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
 
             thumbFrame.leadingAnchor.constraint(equalTo: eyeButton.trailingAnchor, constant: 9),
             thumbFrame.centerYAnchor.constraint(equalTo: centerYAnchor),
-            thumbFrame.widthAnchor.constraint(equalToConstant: 34),
-            thumbFrame.heightAnchor.constraint(equalToConstant: 34),
+            thumbWidth,
+            thumbHeight,
 
             thumbView.topAnchor.constraint(equalTo: thumbFrame.topAnchor),
             thumbView.bottomAnchor.constraint(equalTo: thumbFrame.bottomAnchor),
             thumbView.leadingAnchor.constraint(equalTo: thumbFrame.leadingAnchor),
             thumbView.trailingAnchor.constraint(equalTo: thumbFrame.trailingAnchor),
 
-            nameField.leadingAnchor.constraint(equalTo: thumbFrame.trailingAnchor, constant: 9),
+            maskLeading,
+            maskFrame.centerYAnchor.constraint(equalTo: centerYAnchor),
+            maskWidth,
+            maskHeight,
+
+            maskView.topAnchor.constraint(equalTo: maskFrame.topAnchor),
+            maskView.bottomAnchor.constraint(equalTo: maskFrame.bottomAnchor),
+            maskView.leadingAnchor.constraint(equalTo: maskFrame.leadingAnchor),
+            maskView.trailingAnchor.constraint(equalTo: maskFrame.trailingAnchor),
+
+            nameField.leadingAnchor.constraint(equalTo: maskFrame.trailingAnchor, constant: 9),
             nameField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             nameField.bottomAnchor.constraint(equalTo: centerYAnchor, constant: 1),
 
@@ -93,7 +192,10 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
         fatalError("LayerCellView does not support NSCoder")
     }
 
-    func configure(info: RasterDocument.LayerInfo, thumbnail: NSImage?, selected: Bool) {
+    func configure(
+        info: RasterDocument.LayerInfo, thumbnail: NSImage?, hasMask: Bool,
+        maskThumbnail: NSImage?, maskEnabled: Bool, selected: Bool, paintTarget: PaintTarget
+    ) {
         committedName = info.name
         nameField.stringValue = info.name
         nameField.font = DS.sans(13, weight: selected ? .semibold : .regular)
@@ -104,7 +206,22 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
         }
         let percent = Int((Double(info.opacity) * 100).rounded())
         metaLabel.stringValue = "\(RzBlendMode.displayName(for: info.blendMode)) · \(percent)%"
-        thumbFrame.layer?.borderColor = DS.border.cgColor
+
+        self.hasMask = hasMask
+        let side = hasMask ? Self.pairedThumbSide : Self.thumbSide
+        thumbWidth.constant = side
+        thumbHeight.constant = side
+        maskWidth.constant = hasMask ? side : 0
+        maskHeight.constant = hasMask ? side : 0
+        maskLeading.constant = hasMask ? Self.thumbGap : 0
+        maskFrame.isHidden = !hasMask
+        maskView.image = maskThumbnail
+        maskView.slashed = hasMask && !maskEnabled
+        maskView.alphaValue = maskEnabled ? 1.0 : 0.4
+        maskFrame.toolTip =
+            maskEnabled ? "Paint on the layer mask" : "Paint on the layer mask (disabled)"
+        setTargetHighlight(layerActive: selected, target: paintTarget)
+
         thumbView.image = thumbnail
         thumbView.alphaValue = info.visible ? 1.0 : 0.35
         let symbol = info.visible ? "eye" : "eye.slash"
@@ -117,6 +234,17 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
             eyeButton.title = info.visible ? "●" : "○"
         }
         eyeButton.toolTip = info.visible ? "Hide Layer" : "Show Layer"
+    }
+
+    /// Rings the thumbnail brush/eraser would hit — but only on the active
+    /// layer, where the paint target means anything.
+    func setTargetHighlight(layerActive: Bool, target: PaintTarget) {
+        let maskRinged = layerActive && hasMask && target == .mask
+        let layerRinged = layerActive && !maskRinged
+        thumbFrame.layer?.borderWidth = layerRinged ? 2 : 1
+        thumbFrame.layer?.borderColor = (layerRinged ? DS.accent : DS.border).cgColor
+        maskFrame.layer?.borderWidth = maskRinged ? 2 : 1
+        maskFrame.layer?.borderColor = (maskRinged ? DS.accent : DS.border).cgColor
     }
 
     @objc private func eyeClicked(_ sender: Any?) {
@@ -148,6 +276,14 @@ final class LayersPanelViewController: NSViewController {
 
     /// Called when the user clicks the Assistant tab.
     var onShowAssistant: (() -> Void)?
+
+    /// Called when the user clicks a layer's own thumbnail or its mask
+    /// thumbnail: the editor points brush/eraser at that target.
+    var onPaintTargetChange: ((PaintTarget) -> Void)?
+
+    /// What brush/eraser currently edit on the active layer, pushed in by the
+    /// editor and drawn as a focus ring around the matching thumbnail.
+    private(set) var paintTarget: PaintTarget = .layer
 
     private let blendPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let blendContainer = NSView()
@@ -420,6 +556,71 @@ final class LayersPanelViewController: NSViewController {
         updateButtonStates()
     }
 
+    // MARK: - Paint target
+
+    /// Mirrors the editor's paint target into the rows' focus rings.
+    func setPaintTarget(_ target: PaintTarget) {
+        paintTarget = target
+        refreshTargetRings()
+    }
+
+    /// Re-rings the visible rows in place — cheaper than a reload, which
+    /// would re-resample every thumbnail.
+    private func refreshTargetRings() {
+        guard isViewLoaded, let document = document else { return }
+        let active = document.activeLayerIndex
+        for row in 0..<tableView.numberOfRows {
+            guard
+                let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+                    as? LayerCellView
+            else { continue }
+            cell.setTargetHighlight(
+                layerActive: layerIndex(forRow: row) == active, target: paintTarget)
+        }
+    }
+
+    /// A click on one of a row's thumbnails: make that layer active, then
+    /// point brush/eraser at the clicked target.
+    private func selectPaintTarget(_ target: PaintTarget, layer idx: Int) {
+        guard let document = document, document.doc != nil else { return }
+        if document.activeLayerIndex != idx {
+            // Panel selection only retargets future edits: no undo, no dirty.
+            document.activeLayerIndex = idx
+            let row = row(forLayerIndex: idx)
+            if row >= 0, row < tableView.numberOfRows {
+                isReloading = true
+                tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                isReloading = false
+            }
+            updateHeaderControls()
+            updateButtonStates()
+            // Resets the editor's paint target for the new layer; the
+            // requested target lands right after.
+            onActiveLayerChange?()
+        }
+        onPaintTargetChange?(target)
+        refreshTargetRings()
+    }
+
+    /// The mask's grayscale image scaled down for its thumbnail well. Masks
+    /// come back at the LAYER's full size, so the scaling happens in the core
+    /// rather than at draw time.
+    private func maskThumbnail(_ doc: RasterDocument, _ idx: Int, maxSide: Int) -> NSImage? {
+        guard let mask = doc.layerMaskImage(idx), mask.width > 0, mask.height > 0 else {
+            return nil
+        }
+        let longest = max(mask.width, mask.height)
+        let scale = min(CGFloat(maxSide) / CGFloat(longest), 1)
+        let w = max(Int((CGFloat(mask.width) * scale).rounded()), 1)
+        let h = max(Int((CGFloat(mask.height) * scale).rounded()), 1)
+        let scaled =
+            (w == mask.width && h == mask.height)
+            ? mask : (mask.resized(w: w, h: h, filter: RZ_FILTER_BILINEAR) ?? mask)
+        guard let cgImage = scaled.makeCGImage() else { return nil }
+        return NSImage(
+            cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+
     private func updateHeaderControls() {
         guard let document = document, let doc = document.doc,
               let info = doc.layerInfo(document.activeLayerIndex)
@@ -517,13 +718,21 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
         guard let info = doc.layerInfo(idx) else { return nil }
 
         let cell = LayerCellView(frame: .zero)
+        let hasMask = doc.layerHasMask(idx)
+        let side = Int(hasMask ? LayerCellView.pairedThumbSide : LayerCellView.thumbSide)
         var thumbnail: NSImage? = nil
-        if let thumb = doc.layerThumbnail(idx, maxSide: 34), let cgImage = thumb.makeCGImage() {
+        if let thumb = doc.layerThumbnail(idx, maxSide: side), let cgImage = thumb.makeCGImage() {
             thumbnail = NSImage(
                 cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         }
         cell.configure(
-            info: info, thumbnail: thumbnail, selected: idx == document.activeLayerIndex)
+            info: info, thumbnail: thumbnail, hasMask: hasMask,
+            maskThumbnail: hasMask ? maskThumbnail(doc, idx, maxSide: side) : nil,
+            maskEnabled: doc.layerMaskEnabled(idx),
+            selected: idx == document.activeLayerIndex, paintTarget: paintTarget)
+        cell.onSelectTarget = { [weak self] target in
+            self?.selectPaintTarget(target, layer: idx)
+        }
         cell.onToggleVisible = { [weak self] in
             guard let document = self?.document else { return }
             document.applyEdit(info.visible ? "Hide Layer" : "Show Layer") {
@@ -552,6 +761,9 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
         updateHeaderControls()
         updateButtonStates()
         onActiveLayerChange?()
+        // The paint-target ring follows the active layer (and the editor has
+        // just dropped any mask target the old layer had).
+        refreshTargetRings()
     }
 
     // MARK: - Drag reorder

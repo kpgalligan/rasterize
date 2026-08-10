@@ -1,15 +1,18 @@
 //! Layered document model: `RzDocument` (canvas + bottom-to-top layer
-//! stack), the blend-mode table and f32 compositing, the RZDC native
-//! format, and layered PSD import. See include/rasterize_core.h for the
-//! contract. Layer pixel buffers are `Arc`-shared so document copies are
-//! copy-on-write.
+//! stack), the blend-mode table and f32 compositing, per-layer masks, the
+//! RZDC native format, and layered PSD import. See include/rasterize_core.h
+//! for the contract. Layer pixel and mask buffers are `Arc`-shared so
+//! document copies are copy-on-write.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use image::codecs::png::PngEncoder;
 use image::imageops::{self, FilterType};
-use image::{ExtendedColorType, ImageEncoder, RgbaImage};
+use image::{
+    ExtendedColorType, GenericImageView, GrayImage, ImageBuffer, ImageEncoder, Luma, Pixel,
+    RgbaImage,
+};
 
 use crate::ops::CompositeMode;
 use crate::RzImage;
@@ -23,6 +26,17 @@ const MAX_PIXELS: u64 = 100_000_000;
 const MAX_RZDC_LAYERS: u32 = 1024;
 const MAX_RZDC_NAME_LEN: u32 = 64 * 1024;
 const MAX_RZDC_PNG_LEN: u32 = 512 * 1024 * 1024;
+const MAX_RZDC_META_LEN: u32 = 16 * 1024 * 1024;
+
+/// The RZDC revision this build writes. Version 1 files (no mask, no layer
+/// meta) still load; anything newer is refused.
+const RZDC_VERSION: u32 = 2;
+
+/// Rec. 709 luma coefficients (private copy; `ops` and `ops_filters` keep
+/// their own). Used to reduce a mask-painting overlay to coverage.
+const LUMA_R: f32 = 0.2126;
+const LUMA_G: f32 = 0.7152;
+const LUMA_B: f32 = 0.0722;
 
 /// Ceiling on the SUM of decoded layer pixels across one RZDC file: even when
 /// every individual layer looks reasonable, a crafted file must not be able
@@ -401,9 +415,22 @@ pub struct Layer {
     pub blend: BlendMode,
     /// Invisible layers are skipped by the projection.
     pub visible: bool,
+    /// Optional coverage mask gating the layer's alpha (0 hides, 255 shows,
+    /// intermediate values scale). INVARIANT: its dimensions always equal
+    /// `pixels`' dimensions — the mask moves, rotates and scales with the
+    /// layer (GIMP-style), so canvas geometry never enters mask indexing.
+    /// Shared (`Arc`) for the same copy-on-write reason as the pixels.
+    pub mask: Option<Arc<GrayImage>>,
+    /// When false the mask is retained but ignored while compositing.
+    pub mask_enabled: bool,
+    /// Opaque per-layer metadata (a minimal "parasite"): the core stores,
+    /// copies and serializes this JSON blob but never interprets it.
+    pub meta: Option<String>,
 }
 
 impl Layer {
+    /// A plain layer at offset (0, 0): fully opaque, Normal, visible, with no
+    /// mask and no meta.
     fn new(pixels: RgbaImage, name: &str) -> Self {
         Layer {
             pixels: Arc::new(pixels),
@@ -412,7 +439,21 @@ impl Layer {
             opacity: 1.0,
             blend: BlendMode::Normal,
             visible: true,
+            mask: None,
+            mask_enabled: true,
+            meta: None,
         }
+    }
+
+    /// The mask that actually gates compositing: `None` when the layer has no
+    /// mask, the mask is disabled, or (defensively — the invariant should
+    /// prevent it) its dimensions disagree with the layer's pixels.
+    fn active_mask(&self) -> Option<&GrayImage> {
+        let mask = self.mask.as_deref()?;
+        if !self.mask_enabled || mask.dimensions() != self.pixels.dimensions() {
+            return None;
+        }
+        Some(mask)
     }
 }
 
@@ -442,8 +483,9 @@ fn sane_opacity(opacity: f32) -> f32 {
 /// Composites `layer` onto the straight-alpha f32 accumulator `acc` (size
 /// `acc_w` x `acc_h`, whose top-left pixel sits at canvas coordinate
 /// `origin`), using the W3C compositing formula with the layer's blend mode
-/// and opacity. Pixels outside the layer's extent are untouched. The caller
-/// is responsible for visibility filtering.
+/// and opacity. An enabled layer mask scales the source alpha per pixel
+/// (`mask / 255`) on top of the layer opacity. Pixels outside the layer's
+/// extent are untouched. The caller is responsible for visibility filtering.
 fn composite_layer_into(
     acc: &mut [[f32; 4]],
     acc_w: u32,
@@ -455,6 +497,7 @@ fn composite_layer_into(
     if opacity <= 0.0 {
         return;
     }
+    let mask = layer.active_mask().map(|m| m.as_raw().as_slice());
     let kind = blend_kind(layer.blend);
     let (lw, lh) = layer.pixels.dimensions();
     let rel_x = i64::from(layer.offset.0) - i64::from(origin.0);
@@ -468,8 +511,10 @@ fn composite_layer_into(
         let ly = (ay - rel_y) as u64;
         for ax in x0..x1 {
             let lx = (ax - rel_x) as u64;
-            let li = ((ly * u64::from(lw) + lx) * 4) as usize;
-            let sa = f32::from(raw[li + 3]) / 255.0 * opacity;
+            let mi = (ly * u64::from(lw) + lx) as usize;
+            let li = mi * 4;
+            let coverage = mask.map_or(1.0, |m| f32::from(m[mi]) / 255.0);
+            let sa = f32::from(raw[li + 3]) / 255.0 * coverage * opacity;
             if sa <= 0.0 {
                 continue;
             }
@@ -504,6 +549,34 @@ fn composite_layer_into(
             }
             out[3] = ao;
             acc[ai] = out;
+        }
+    }
+}
+
+/// The five exact (lossless, axis-aligned) whole-document transforms. Naming
+/// one lets `geometry` apply the SAME transform to a layer's pixels and to its
+/// mask, which is what keeps the two the same size.
+#[derive(Clone, Copy)]
+enum Geometry {
+    Rotate90,
+    Rotate180,
+    Rotate270,
+    FlipH,
+    FlipV,
+}
+
+impl Geometry {
+    fn apply<I>(self, img: &I) -> ImageBuffer<I::Pixel, Vec<<I::Pixel as Pixel>::Subpixel>>
+    where
+        I: GenericImageView,
+        I::Pixel: 'static,
+    {
+        match self {
+            Geometry::Rotate90 => imageops::rotate90(img),
+            Geometry::Rotate180 => imageops::rotate180(img),
+            Geometry::Rotate270 => imageops::rotate270(img),
+            Geometry::FlipH => imageops::flip_horizontal(img),
+            Geometry::FlipV => imageops::flip_vertical(img),
         }
     }
 }
@@ -573,9 +646,21 @@ impl RzDocument {
     }
 
     /// Pure setter: replaces layer `idx`'s pixels (any size; offset and
-    /// properties kept).
+    /// properties kept). A mask survives a same-size replacement (the paint
+    /// and fill ops rely on that) but is dropped when the new pixels have
+    /// different dimensions, which would otherwise break the mask's
+    /// same-size-as-the-layer invariant.
     pub fn with_layer_pixels(&self, idx: usize, pixels: RgbaImage) -> Option<Self> {
-        self.with_layer(idx, |l| l.pixels = Arc::new(pixels))
+        self.with_layer(idx, |l| {
+            if l.mask
+                .as_ref()
+                .is_some_and(|m| m.dimensions() != pixels.dimensions())
+            {
+                l.mask = None;
+                l.mask_enabled = true;
+            }
+            l.pixels = Arc::new(pixels);
+        })
     }
 
     fn with_layer(&self, idx: usize, edit: impl FnOnce(&mut Layer)) -> Option<Self> {
@@ -640,6 +725,11 @@ impl RzDocument {
     /// visibility. An invisible upper layer contributes nothing (it is simply
     /// removed); a hidden LOWER layer refuses the merge (`None`) so the upper
     /// layer's content cannot silently vanish.
+    ///
+    /// The merge is destructive, so the merged layer carries neither layer's
+    /// mask or meta: an ENABLED mask is baked into the pixels by the kernel
+    /// (like opacity and blend), a disabled one is simply dropped, and meta no
+    /// longer describes the pixels it is attached to.
     pub fn merging_down(&self, idx: usize) -> Option<Self> {
         if idx == 0 {
             return None;
@@ -675,10 +765,18 @@ impl RzDocument {
         merged.offset = origin;
         merged.opacity = 1.0;
         merged.blend = BlendMode::Normal;
+        merged.mask = None;
+        merged.mask_enabled = true;
+        merged.meta = None;
         Some(doc)
     }
 
     /// Single-layer document containing the projection, named "Background".
+    ///
+    /// Like [`RzDocument::merging_down`], this is destructive: the projection
+    /// bakes every ENABLED mask into the composited pixels (a disabled one is
+    /// simply dropped with its layer), so the resulting layer carries neither
+    /// a mask nor meta — nothing is left that could describe those pixels.
     pub fn flattening(&self) -> Self {
         RzDocument::from_pixels(self.flattened())
     }
@@ -740,24 +838,18 @@ impl RzDocument {
     /// Rotates the whole document 90 degrees clockwise.
     pub fn rotate90(&self) -> Self {
         let ch = i64::from(self.height);
-        self.geometry(self.height, self.width, |l, _lw, lh| {
-            (
-                imageops::rotate90(&*l.pixels),
-                (saturating_i32(ch - i64::from(l.offset.1) - lh), l.offset.0),
-            )
+        self.geometry(self.height, self.width, Geometry::Rotate90, |l, _lw, lh| {
+            (saturating_i32(ch - i64::from(l.offset.1) - lh), l.offset.0)
         })
     }
 
     /// Rotates the whole document 180 degrees.
     pub fn rotate180(&self) -> Self {
         let (cw, ch) = (i64::from(self.width), i64::from(self.height));
-        self.geometry(self.width, self.height, |l, lw, lh| {
+        self.geometry(self.width, self.height, Geometry::Rotate180, |l, lw, lh| {
             (
-                imageops::rotate180(&*l.pixels),
-                (
-                    saturating_i32(cw - i64::from(l.offset.0) - lw),
-                    saturating_i32(ch - i64::from(l.offset.1) - lh),
-                ),
+                saturating_i32(cw - i64::from(l.offset.0) - lw),
+                saturating_i32(ch - i64::from(l.offset.1) - lh),
             )
         })
     }
@@ -765,51 +857,49 @@ impl RzDocument {
     /// Rotates the whole document 90 degrees counter-clockwise.
     pub fn rotate270(&self) -> Self {
         let cw = i64::from(self.width);
-        self.geometry(self.height, self.width, |l, lw, _lh| {
-            (
-                imageops::rotate270(&*l.pixels),
-                (l.offset.1, saturating_i32(cw - i64::from(l.offset.0) - lw)),
-            )
-        })
+        self.geometry(
+            self.height,
+            self.width,
+            Geometry::Rotate270,
+            |l, lw, _lh| (l.offset.1, saturating_i32(cw - i64::from(l.offset.0) - lw)),
+        )
     }
 
     /// Mirrors the whole document left-right.
     pub fn flip_horizontal(&self) -> Self {
         let cw = i64::from(self.width);
-        self.geometry(self.width, self.height, |l, lw, _lh| {
-            (
-                imageops::flip_horizontal(&*l.pixels),
-                (saturating_i32(cw - i64::from(l.offset.0) - lw), l.offset.1),
-            )
+        self.geometry(self.width, self.height, Geometry::FlipH, |l, lw, _lh| {
+            (saturating_i32(cw - i64::from(l.offset.0) - lw), l.offset.1)
         })
     }
 
     /// Mirrors the whole document top-bottom.
     pub fn flip_vertical(&self) -> Self {
         let ch = i64::from(self.height);
-        self.geometry(self.width, self.height, |l, _lw, lh| {
-            (
-                imageops::flip_vertical(&*l.pixels),
-                (l.offset.0, saturating_i32(ch - i64::from(l.offset.1) - lh)),
-            )
+        self.geometry(self.width, self.height, Geometry::FlipV, |l, _lw, lh| {
+            (l.offset.0, saturating_i32(ch - i64::from(l.offset.1) - lh))
         })
     }
 
+    /// Applies one exact geometric transform to every layer's pixels AND its
+    /// mask (which must stay the same size as the pixels), with `f` supplying
+    /// each layer's new offset from its old one and its pixel dimensions.
     fn geometry(
         &self,
         new_w: u32,
         new_h: u32,
-        f: impl Fn(&Layer, i64, i64) -> (RgbaImage, (i32, i32)),
+        geom: Geometry,
+        f: impl Fn(&Layer, i64, i64) -> (i32, i32),
     ) -> Self {
         let layers = self
             .layers
             .iter()
             .map(|l| {
                 let (lw, lh) = l.pixels.dimensions();
-                let (pixels, offset) = f(l, i64::from(lw), i64::from(lh));
                 Layer {
-                    pixels: Arc::new(pixels),
-                    offset,
+                    pixels: Arc::new(geom.apply(&*l.pixels)),
+                    mask: l.mask.as_ref().map(|m| Arc::new(geom.apply(&**m))),
+                    offset: f(l, i64::from(lw), i64::from(lh)),
                     ..l.clone()
                 }
             })
@@ -824,6 +914,11 @@ impl RzDocument {
     /// Moves the canvas window: canvas becomes `w` x `h`, offsets shift by
     /// (-x, -y), layer pixels untouched. Bounds-checked against the canvas
     /// like `rz_image_crop`.
+    ///
+    /// Nothing changes in layer space — pixels outside the new canvas are
+    /// retained rather than trimmed — so masks and meta ride along untouched:
+    /// a mask is layer-space, and moving the window past it keeps it hiding
+    /// exactly the same pixels.
     pub fn crop(&self, x: u32, y: u32, w: u32, h: u32) -> Option<Self> {
         if w == 0 || h == 0 {
             return None;
@@ -855,6 +950,9 @@ impl RzDocument {
     /// `w` x `h` and every layer's offset shifts by `origin` — where the old
     /// canvas's top-left corner lands in the new canvas. Layer pixels are
     /// untouched; content outside the new canvas is retained, as with crop.
+    ///
+    /// Growing or shrinking the canvas is a pure offset change, so — exactly
+    /// as in [`RzDocument::crop`] — masks and meta ride along untouched.
     pub fn canvas_resize(&self, w: u32, h: u32, origin: (i32, i32)) -> Option<Self> {
         if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
             return None;
@@ -894,6 +992,11 @@ impl RzDocument {
                 let nh = ((f64::from(lh) * fy).round() as u32).max(1);
                 Layer {
                     pixels: Arc::new(imageops::resize(&*l.pixels, nw, nh, filter)),
+                    // The mask scales with the layer, staying the same size.
+                    mask: l
+                        .mask
+                        .as_ref()
+                        .map(|m| Arc::new(imageops::resize(&**m, nw, nh, filter))),
                     offset: (
                         saturating_i32((f64::from(l.offset.0) * fx).round() as i64),
                         saturating_i32((f64::from(l.offset.1) * fy).round() as i64),
@@ -912,6 +1015,159 @@ impl RzDocument {
 
 fn saturating_i32(v: i64) -> i32 {
     v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+// ------------------------------------------------------------ layer masks --
+
+/// What a freshly added layer mask is filled with.
+pub enum MaskKind<'a> {
+    /// Fully visible everywhere (255).
+    RevealAll,
+    /// Fully hidden everywhere (0).
+    HideAll,
+    /// A CANVAS-sized coverage buffer (`width * height` bytes, row 0 top —
+    /// the selection convention shared with `bucket_fill` and `gradient`),
+    /// cropped to the layer's rect. Layer pixels lying outside the canvas get
+    /// 0, since a selection never extends past the canvas.
+    FromSelection(&'a [u8]),
+}
+
+impl RzDocument {
+    /// Gives layer `idx` a mask (replacing any existing one) and enables it.
+    /// The mask is created at exactly the layer's pixel dimensions. `None` on
+    /// an out-of-range index or a `FromSelection` buffer that is not
+    /// canvas-sized.
+    pub fn add_mask(&self, idx: usize, kind: MaskKind) -> Option<Self> {
+        let layer = self.layer(idx)?;
+        let (lw, lh) = layer.pixels.dimensions();
+        let (off_x, off_y) = (i64::from(layer.offset.0), i64::from(layer.offset.1));
+        let mask = match kind {
+            MaskKind::RevealAll => GrayImage::from_pixel(lw, lh, Luma([255])),
+            MaskKind::HideAll => GrayImage::new(lw, lh),
+            MaskKind::FromSelection(sel) => {
+                let canvas_px = (self.width as usize).checked_mul(self.height as usize)?;
+                if sel.len() != canvas_px {
+                    return None;
+                }
+                GrayImage::from_fn(lw, lh, |x, y| {
+                    let cx = i64::from(x) + off_x;
+                    let cy = i64::from(y) + off_y;
+                    if cx < 0
+                        || cy < 0
+                        || cx >= i64::from(self.width)
+                        || cy >= i64::from(self.height)
+                    {
+                        return Luma([0]);
+                    }
+                    Luma([sel[cy as usize * self.width as usize + cx as usize]])
+                })
+            }
+        };
+        self.with_layer(idx, |l| {
+            l.mask = Some(Arc::new(mask));
+            l.mask_enabled = true;
+        })
+    }
+
+    /// Drops layer `idx`'s mask. With `apply`, the mask is first baked into
+    /// the layer's alpha (`alpha' = alpha * mask / 255`, straight alpha)
+    /// REGARDLESS of `mask_enabled` — "apply" always means what it says — so
+    /// the projection is unchanged for an enabled mask. `None` if the layer
+    /// has no mask.
+    pub fn remove_mask(&self, idx: usize, apply: bool) -> Option<Self> {
+        let layer = self.layer(idx)?;
+        let mask = layer.mask.as_deref()?;
+        let baked = (apply && mask.dimensions() == layer.pixels.dimensions()).then(|| {
+            let mut pixels = (*layer.pixels).clone();
+            for (px, cov) in pixels.pixels_mut().zip(mask.pixels()) {
+                px[3] = (f32::from(px[3]) * f32::from(cov[0]) / 255.0).round() as u8;
+            }
+            pixels
+        });
+        self.with_layer(idx, |l| {
+            if let Some(pixels) = baked {
+                l.pixels = Arc::new(pixels);
+            }
+            l.mask = None;
+            l.mask_enabled = true;
+        })
+    }
+
+    /// Enables or disables layer `idx`'s mask (a disabled mask is retained but
+    /// ignored while compositing). `None` if the layer has no mask.
+    pub fn set_mask_enabled(&self, idx: usize, enabled: bool) -> Option<Self> {
+        self.layer(idx)?.mask.as_ref()?;
+        self.with_layer(idx, |l| l.mask_enabled = enabled)
+    }
+
+    /// Paints layer `idx`'s mask with a canvas-frame PREMULTIPLIED RGBA8
+    /// overlay (`overlay`, exactly canvas w*h*4 bytes — the same buffer
+    /// `painting_layer` takes), mapped through the layer's offset: each mask
+    /// pixel samples the overlay at its canvas position, and
+    /// `mask' = round(lerp(mask, luma(straight colour), overlay alpha))`.
+    /// Painting white therefore reveals and black hides, with the stroke's
+    /// own anti-aliasing (and any selection clipping the caller already
+    /// applied to the overlay) carried by the alpha. Overlay pixels outside
+    /// the layer are ignored; `None` if the layer has no mask, the buffer is
+    /// the wrong size, or the layer's extent misses the canvas entirely (no
+    /// mask pixel could change), matching `painting_layer`.
+    pub fn paint_mask(&self, idx: usize, overlay: &[u8]) -> Option<Self> {
+        let layer = self.layer(idx)?;
+        let mask = layer.mask.as_deref()?;
+        let expected = (self.width as usize)
+            .checked_mul(self.height as usize)?
+            .checked_mul(4)?;
+        if overlay.len() != expected {
+            return None;
+        }
+        let (lw, lh) = layer.pixels.dimensions();
+        if mask.dimensions() != (lw, lh) {
+            return None;
+        }
+        let (off_x, off_y) = (i64::from(layer.offset.0), i64::from(layer.offset.1));
+        let lx0 = (-off_x).max(0);
+        let ly0 = (-off_y).max(0);
+        let lx1 = (i64::from(self.width) - off_x).min(i64::from(lw));
+        let ly1 = (i64::from(self.height) - off_y).min(i64::from(lh));
+        if lx0 >= lx1 || ly0 >= ly1 {
+            return None;
+        }
+        let mut painted = mask.clone();
+        let raw: &mut [u8] = &mut painted;
+        for ly in ly0..ly1 {
+            for lx in lx0..lx1 {
+                let cx = (lx + off_x) as u64;
+                let cy = (ly + off_y) as u64;
+                let si = ((cy * u64::from(self.width) + cx) * 4) as usize;
+                let a = f32::from(overlay[si + 3]) / 255.0;
+                if a <= 0.0 {
+                    continue;
+                }
+                // Unpremultiplying and taking the luma is one division: luma
+                // is linear, so luma(c / a) == luma(c) / a.
+                let luma = (LUMA_R * f32::from(overlay[si])
+                    + LUMA_G * f32::from(overlay[si + 1])
+                    + LUMA_B * f32::from(overlay[si + 2]))
+                    / a;
+                let luma = luma.clamp(0.0, 255.0);
+                let di = (ly as u64 * u64::from(lw) + lx as u64) as usize;
+                let m = f32::from(raw[di]);
+                raw[di] = (m + (luma - m) * a).clamp(0.0, 255.0).round() as u8;
+            }
+        }
+        self.with_layer(idx, |l| l.mask = Some(Arc::new(painted)))
+    }
+
+    /// Layer `idx`'s mask expanded to an opaque grayscale RGBA image (for the
+    /// layers-panel thumbnail); `None` if the layer has no mask.
+    pub fn mask_image(&self, idx: usize) -> Option<RgbaImage> {
+        let mask = self.layer(idx)?.mask.as_deref()?;
+        let (mw, mh) = mask.dimensions();
+        Some(RgbaImage::from_fn(mw, mh, |x, y| {
+            let v = mask.get_pixel(x, y)[0];
+            image::Rgba([v, v, v, 255])
+        }))
+    }
 }
 
 /// Per-pixel core of `rz_image_composite` (same math as `ops::composite`,
@@ -962,10 +1218,17 @@ fn paint_pixel(dp: &mut [u8], sp: [u8; 4], mode: CompositeMode, a: f32) {
 
 impl RzDocument {
     /// Serializes to the RZDC layout (see the header comment): "RZDC",
-    /// u32 version=1, u32 width, u32 height, u32 layer count; per layer
+    /// u32 version, u32 width, u32 height, u32 layer count; per layer
     /// bottom-to-top: u32 name len + UTF-8 name, i32 off x, i32 off y,
     /// f32 opacity, u32 blend, u8 visible, u32 PNG len + PNG pixels.
     /// All integers little-endian.
+    ///
+    /// Version 2 appends three fields to each layer record, after the pixel
+    /// PNG (so a version-1 record is a strict prefix of a version-2 one):
+    /// u8 mask present, u8 mask enabled, u32 mask len + that many RAW
+    /// coverage bytes when present (the mask's dimensions are the layer's
+    /// pixel dimensions and are not stored twice), then u8 meta present and,
+    /// when present, u32 meta len + UTF-8 meta bytes.
     fn encode_native(&self) -> Result<Vec<u8>, String> {
         // The writer enforces the reader's caps, so every file it produces
         // can be read back: layer count and per-layer PNG size are hard
@@ -976,7 +1239,7 @@ impl RzDocument {
             .ok_or_else(|| format!("too many layers (max {MAX_RZDC_LAYERS})"))?;
         let mut buf = Vec::new();
         buf.extend_from_slice(b"RZDC");
-        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&RZDC_VERSION.to_le_bytes());
         buf.extend_from_slice(&self.width.to_le_bytes());
         buf.extend_from_slice(&self.height.to_le_bytes());
         buf.extend_from_slice(&count.to_le_bytes());
@@ -1008,6 +1271,29 @@ impl RzDocument {
                 .ok_or_else(|| "layer PNG too large".to_string())?;
             buf.extend_from_slice(&png_len.to_le_bytes());
             buf.extend_from_slice(&png);
+            // Version 2 fields. The mask is stored raw: its length is always
+            // the layer's pixel count, which the reader re-derives and checks
+            // — so a mask that somehow broke that invariant is written as
+            // absent rather than as a file that cannot be read back.
+            let mask = layer.mask.as_deref().filter(|m| m.dimensions() == (lw, lh));
+            buf.push(u8::from(mask.is_some()));
+            buf.push(u8::from(layer.mask_enabled));
+            if let Some(mask) = mask {
+                let bytes = mask.as_raw();
+                let mask_len =
+                    u32::try_from(bytes.len()).map_err(|_| "layer mask too large".to_string())?;
+                buf.extend_from_slice(&mask_len.to_le_bytes());
+                buf.extend_from_slice(bytes);
+            }
+            buf.push(u8::from(layer.meta.is_some()));
+            if let Some(meta) = layer.meta.as_deref() {
+                let meta_len = u32::try_from(meta.len())
+                    .ok()
+                    .filter(|&len| len <= MAX_RZDC_META_LEN)
+                    .ok_or_else(|| format!("layer meta too large (max {MAX_RZDC_META_LEN})"))?;
+                buf.extend_from_slice(&meta_len.to_le_bytes());
+                buf.extend_from_slice(meta.as_bytes());
+            }
         }
         Ok(buf)
     }
@@ -1074,18 +1360,21 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Parses an RZDC buffer. Corrupt or truncated input produces `Err`, never a
-/// panic; unknown blend-mode values fall back to Normal and opacity is
-/// clamped.
+/// Parses an RZDC buffer of version 1 or 2 (version 1 predates layer masks
+/// and layer meta, which default to absent). Corrupt or truncated input
+/// produces `Err`, never a panic; unknown blend-mode values fall back to
+/// Normal and opacity is clamped.
 fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
     let mut r = Reader { bytes, pos: 0 };
     if r.take(4)? != b"RZDC" {
         return Err("not an RZDC document".to_string());
     }
     let version = r.u32()?;
-    if version != 1 {
+    if version == 0 || version > RZDC_VERSION {
         return Err(format!("unsupported RZDC version {version}"));
     }
+    // Version 1 layer records stop after the pixel PNG.
+    let has_mask_and_meta = version >= 2;
     let width = r.u32()?;
     let height = r.u32()?;
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
@@ -1127,6 +1416,34 @@ fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
                 "total layer pixels exceed {MAX_RZDC_TOTAL_LAYER_PIXELS}"
             ));
         }
+        let mut mask = None;
+        let mut mask_enabled = true;
+        let mut meta = None;
+        if has_mask_and_meta {
+            let present = r.u8()? != 0;
+            mask_enabled = r.u8()? != 0;
+            if present {
+                let mask_len = r.u32()?;
+                let expected = u64::from(lw) * u64::from(lh);
+                if u64::from(mask_len) != expected {
+                    return Err(format!(
+                        "layer mask length {mask_len} does not match the layer's {expected} pixels"
+                    ));
+                }
+                let raw = r.take(mask_len as usize)?.to_vec();
+                mask = Some(Arc::new(
+                    GrayImage::from_raw(lw, lh, raw)
+                        .ok_or_else(|| "invalid layer mask".to_string())?,
+                ));
+            }
+            if r.u8()? != 0 {
+                let meta_len = r.u32()?;
+                if meta_len > MAX_RZDC_META_LEN {
+                    return Err(format!("layer meta length {meta_len} out of range"));
+                }
+                meta = Some(String::from_utf8_lossy(r.take(meta_len as usize)?).into_owned());
+            }
+        }
         layers.push(Layer {
             pixels: Arc::new(pixels),
             offset: (off_x, off_y),
@@ -1134,6 +1451,9 @@ fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
             opacity,
             blend,
             visible,
+            mask,
+            mask_enabled,
+            meta,
         });
     }
     Ok(RzDocument {
@@ -1272,6 +1592,11 @@ fn open_psd(bytes: &[u8], path: &str) -> Result<RzDocument, String> {
             opacity: f32::from(l.opacity()) / 255.0,
             blend: map_psd_blend(l.blend_mode() as i32),
             visible: !l.visible(),
+            // PSD layer masks are not imported (the crate exposes them only
+            // as raw channel data); imported layers arrive unmasked.
+            mask: None,
+            mask_enabled: true,
+            meta: None,
         });
     }
     Ok(RzDocument {
