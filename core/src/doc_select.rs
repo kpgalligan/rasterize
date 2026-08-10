@@ -1,5 +1,6 @@
 //! Selection-region and region-paint operations on the layered document:
-//! magic-wand masks, bucket fill, and two-color gradients.
+//! magic-wand masks, mask feathering, bucket fill, and two-color
+//! gradients.
 //!
 //! Conventions shared by all three: coordinates are canvas pixels (row 0
 //! top); similarity means every RGBA channel differs by at most
@@ -209,6 +210,76 @@ impl RzDocument {
             over_straight(paint, px);
         }
         self.with_layer_pixels(idx, pixels)
+    }
+}
+
+/// Gaussian-feathers a selection mask in place (`width * height`
+/// coverage bytes, row 0 top).
+///
+/// The kernel derives from `radius` the same way the machinery behind
+/// the image blur does (the image crate's
+/// `GaussianBlurParameters::new_from_radius`): the separable kernel
+/// spans the nearest odd count of `2 * radius + 1` taps (floored at 3
+/// so any positive radius softens) with
+/// `sigma = 0.3 * (radius - 1) + 0.8`. Sampling clamps to the edges,
+/// so a selection touching the canvas border keeps full coverage there
+/// instead of fading toward zero from outside.
+///
+/// `radius <= 0` (or NaN/inf), a zero dimension, or a mask length that
+/// does not match `width * height` is a no-op.
+pub fn feather_mask(mask: &mut [u8], width: u32, height: u32, radius: f32) {
+    let (w, h) = (width as usize, height as usize);
+    if !radius.is_finite() || radius <= 0.0 || w == 0 || h == 0 || mask.len() != w * h {
+        return;
+    }
+    let taps = nearest_odd(radius * 2.0 + 1.0).max(3);
+    let half = (taps / 2) as i64;
+    let sigma = 0.3 * (radius - 1.0) + 0.8;
+    // Normalized 1-D Gaussian; the 1/(sqrt(2*pi)*sigma) scale cancels.
+    let mut kernel: Vec<f32> = (0..taps)
+        .map(|i| (-0.5 * ((i as i64 - half) as f32 / sigma).powi(2)).exp())
+        .collect();
+    let sum: f32 = kernel.iter().sum();
+    for k in &mut kernel {
+        *k /= sum;
+    }
+
+    // Horizontal pass into a float plane, then vertical back into the mask,
+    // both clamping sample coordinates to the edges.
+    let mut tmp = vec![0f32; w * h];
+    for y in 0..h {
+        let row = &mask[y * w..(y + 1) * w];
+        for x in 0..w {
+            let mut acc = 0.0;
+            for (i, k) in kernel.iter().enumerate() {
+                let sx = (x as i64 + i as i64 - half).clamp(0, w as i64 - 1) as usize;
+                acc += k * f32::from(row[sx]);
+            }
+            tmp[y * w + x] = acc;
+        }
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0;
+            for (i, k) in kernel.iter().enumerate() {
+                let sy = (y as i64 + i as i64 - half).clamp(0, h as i64 - 1) as usize;
+                acc += k * tmp[sy * w + x];
+            }
+            mask[y * w + x] = acc.clamp(0.0, 255.0).round() as u8;
+        }
+    }
+}
+
+/// Nearest odd integer to `x` (ties resolve to the lower odd value),
+/// mirroring the image crate's kernel-size rounding. `x` must be >= 1.
+fn nearest_odd(x: f32) -> u32 {
+    let n = x.round().max(1.0) as u32;
+    if n % 2 == 1 {
+        n
+    } else if x - (n - 1) as f32 <= (n + 1) as f32 - x {
+        n - 1
+    } else {
+        n + 1
     }
 }
 

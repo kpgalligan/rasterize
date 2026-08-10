@@ -203,7 +203,7 @@ final class EditorViewController: NSViewController {
             case .text: self?.selectTool(.text)
             }
         }
-        canvas.onWandClick = { [weak self] point in self?.wandClicked(point) }
+        canvas.onWandClick = { [weak self] point, mode in self?.wandClicked(point, mode: mode) }
         canvas.onFillClick = { [weak self] point in self?.fillClicked(point) }
         canvas.onGradientCommit = { [weak self] a, b in self?.gradientCommitted(a, b) }
         canvas.onBrushSizeKey = { [weak self] newSize in
@@ -678,7 +678,7 @@ final class EditorViewController: NSViewController {
         ]
     }
 
-    private func wandClicked(_ point: CGPoint) {
+    private func wandClicked(_ point: CGPoint, mode: SelectionCombineMode) {
         guard let doc = document?.doc,
             let mask = doc.magicWand(
                 x: Int(point.x), y: Int(point.y), tolerance: tolerance,
@@ -689,7 +689,8 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        canvas.setSelection(selection)
+        // An all-zero combination comes back nil and deselects.
+        canvas.setSelection(CanvasSelection.combine(canvas.selection, with: selection, mode: mode))
     }
 
     private func fillClicked(_ point: CGPoint) {
@@ -1195,6 +1196,27 @@ final class EditorViewController: NSViewController {
         canvas.setSelection(nil)
     }
 
+    /// Edit > Invert Selection: the complement over the full canvas.
+    /// Selections are not undoable; the result simply replaces the
+    /// current one (nil — a selection covering everything — deselects).
+    @objc func invertSelection(_ sender: Any?) {
+        guard let selection = canvas.selection else {
+            NSSound.beep()
+            return
+        }
+        canvas.setSelection(selection.inverted())
+    }
+
+    /// Edit > Feather Selection…: radius sheet, then a Gaussian feather
+    /// of the selection's coverage mask.
+    @objc func featherSelection(_ sender: Any?) {
+        guard canvas.selection != nil else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(FeatherSheetController(canvas: canvas))
+    }
+
     @objc func copy(_ sender: Any?) {
         guard let projection = document?.projection else {
             NSSound.beep()
@@ -1297,7 +1319,8 @@ extension EditorViewController: NSUserInterfaceValidations {
         }
 
         switch item.action {
-        case #selector(cropToSelection(_:)), #selector(deselect(_:)):
+        case #selector(cropToSelection(_:)), #selector(deselect(_:)),
+            #selector(invertSelection(_:)), #selector(featherSelection(_:)):
             return canvas.selectionRect != nil
         case #selector(deleteLayer(_:)):
             return (document?.doc?.layerCount ?? 1) > 1

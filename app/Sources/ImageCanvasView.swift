@@ -134,8 +134,9 @@ final class ImageCanvasView: NSView {
 
     var onSelectionChange: ((CGRect?) -> Void)?
 
-    /// Fired on a wand-tool click (image pixel coordinates).
-    var onWandClick: ((CGPoint) -> Void)?
+    /// Fired on a wand-tool click (image pixel coordinates, plus the
+    /// combine mode read from the click's modifiers).
+    var onWandClick: ((CGPoint, SelectionCombineMode) -> Void)?
     /// Fired on a fill-tool click.
     var onFillClick: ((CGPoint) -> Void)?
     /// Fired when a gradient drag commits (start, end in image pixels).
@@ -143,6 +144,15 @@ final class ImageCanvasView: NSView {
 
     // Lasso state: committed vertices of the in-progress polygon.
     private var lassoPoints: [CGPoint] = []
+
+    // Selection-combine state, decided at gesture start (mouse-down for
+    // marquee drags, the click that starts a new lasso polygon): Shift =
+    // add, Option = subtract, Shift+Option = intersect. Marquee drags
+    // also stash the pre-drag selection, since the live drag preview
+    // replaces it on every tick.
+    private var dragCombineMode: SelectionCombineMode = .replace
+    private var dragBaseSelection: CanvasSelection?
+    private var lassoCombineMode: SelectionCombineMode = .replace
 
     // Gradient drag state.
     private var gradientAnchor: CGPoint?
@@ -322,8 +332,8 @@ final class ImageCanvasView: NSView {
 
         // 2px dashed coral marquee — one of the design's two sanctioned
         // coral elements. Scaled by 1/magnification to stay 2 screen px.
-        // Mask selections get the marquee on their bounding box.
-        let path = selection.path ?? NSBezierPath(rect: selection.bounds)
+        // Mask selections get the marquee on their traced contour.
+        let path = selection.marqueePath ?? NSBezierPath(rect: selection.bounds)
         strokeMarquee(path)
     }
 
@@ -441,6 +451,29 @@ final class ImageCanvasView: NSView {
             shape: shape, canvasWidth: Int(bounds.width), canvasHeight: Int(bounds.height))
     }
 
+    /// Applies a completed selection gesture: combines the new shape with
+    /// the gesture's base selection under `mode`. A nil (empty) new shape
+    /// deselects in replace mode and keeps the base otherwise.
+    private func commitSelection(
+        _ new: CanvasSelection?, mode: SelectionCombineMode, base: CanvasSelection?
+    ) {
+        guard let new = new else {
+            setSelection(mode == .replace ? nil : base)
+            return
+        }
+        setSelection(CanvasSelection.combine(base, with: new, mode: mode))
+    }
+
+    /// Reads a gesture's combine mode from its modifier flags.
+    private static func combineMode(for event: NSEvent) -> SelectionCombineMode {
+        switch (event.modifierFlags.contains(.shift), event.modifierFlags.contains(.option)) {
+        case (true, true): return .intersect
+        case (true, false): return .add
+        case (false, true): return .subtract
+        case (false, false): return .replace
+        }
+    }
+
     /// Discards the lasso in progress (Escape, tool switch).
     private func cancelLasso() {
         guard !lassoPoints.isEmpty else { return }
@@ -448,12 +481,15 @@ final class ImageCanvasView: NSView {
         needsDisplay = true
     }
 
-    /// Closes the lasso polygon into a selection (nil result deselects).
+    /// Closes the lasso polygon into a selection, combining under the
+    /// mode read when the polygon was started.
     private func closeLasso() {
         let points = lassoPoints
         lassoPoints = []
+        let mode = lassoCombineMode
+        lassoCombineMode = .replace
         if points.count >= 3 {
-            setSelection(shapeSelection(.polygon(points)))
+            commitSelection(shapeSelection(.polygon(points)), mode: mode, base: selection)
         } else {
             needsDisplay = true
         }
@@ -473,6 +509,8 @@ final class ImageCanvasView: NSView {
         switch tool {
         case .select, .ellipseSelect:
             dragAnchor = point
+            dragCombineMode = Self.combineMode(for: event)
+            dragBaseSelection = selection
         case .lasso:
             if event.clickCount >= 2 {
                 closeLasso()
@@ -483,11 +521,15 @@ final class ImageCanvasView: NSView {
                 // Clicking back on the first vertex closes the polygon.
                 closeLasso()
             } else {
+                if lassoPoints.isEmpty {
+                    // The click that starts a new polygon decides the mode.
+                    lassoCombineMode = Self.combineMode(for: event)
+                }
                 lassoPoints.append(point)
                 needsDisplay = true
             }
         case .wand:
-            onWandClick?(point)
+            onWandClick?(point, Self.combineMode(for: event))
         case .fill:
             onFillClick?(point)
         case .gradient:
@@ -541,6 +583,9 @@ final class ImageCanvasView: NSView {
         case .select, .ellipseSelect:
             guard let anchor = dragAnchor else { return }
             dragAnchor = nil
+            let mode = dragCombineMode
+            let base = dragBaseSelection
+            dragBaseSelection = nil
             let point = clamp(point: convert(event.locationInWindow, from: nil))
             let dragged = rect(from: anchor, to: point)
             // The click-vs-drag threshold is ~2 SCREEN points; `dragged` is in
@@ -549,12 +594,13 @@ final class ImageCanvasView: NSView {
             // low zoom a jittery click commits a many-pixel accidental selection.
             let scale = magnification
             if dragged.width * scale < 2 || dragged.height * scale < 2 {
-                // Treat a tiny drag as click-to-deselect.
-                setSelection(nil)
+                // Treat a tiny drag as click-to-deselect; with a combine
+                // modifier held it restores the base selection instead.
+                setSelection(mode == .replace ? nil : base)
             } else if tool == .ellipseSelect {
-                setSelection(shapeSelection(.ellipse(dragged)))
+                commitSelection(shapeSelection(.ellipse(dragged)), mode: mode, base: base)
             } else {
-                setSelectionRect(dragged)
+                commitSelection(shapeSelection(.rect(dragged.integral)), mode: mode, base: base)
             }
         case .lasso, .wand, .fill:
             break

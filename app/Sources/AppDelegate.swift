@@ -186,6 +186,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(item("Select All", #selector(EditorViewController.selectAll(_:)), "a"))
         menu.addItem(item("Deselect", #selector(EditorViewController.deselect(_:)), "d"))
+        menu.addItem(
+            item(
+                "Invert Selection", #selector(EditorViewController.invertSelection(_:)), "i",
+                [.command, .shift]))
+        menu.addItem(
+            item("Feather Selection…", #selector(EditorViewController.featherSelection(_:))))
         return menu
     }
 

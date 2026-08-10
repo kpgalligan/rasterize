@@ -680,6 +680,87 @@ final class BlurSheetController: NSViewController {
     }
 }
 
+// MARK: - FeatherSheetController
+
+/// Edit > Feather Selection…: Gaussian-softens the current selection's
+/// coverage mask. Selections are not undoable and no pixels change, so
+/// there is no live preview — the marquee and dimming update on Apply.
+final class FeatherSheetController: NSViewController {
+    private weak var canvas: ImageCanvasView?
+
+    // Log-feel radius: the slider runs log10(0.5)…log10(250) so the
+    // useful small radii get most of the travel.
+    private let radiusSlider = NSSlider(
+        value: log10(4.0), minValue: log10(0.5), maxValue: log10(250.0),
+        target: nil, action: nil)
+    private let radiusValue = NSTextField(labelWithString: "4.0 px")
+
+    init(canvas: ImageCanvasView) {
+        self.canvas = canvas
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("FeatherSheetController does not support NSCoder")
+    }
+
+    override func loadView() {
+        radiusSlider.isContinuous = true
+        radiusSlider.target = self
+        radiusSlider.action = #selector(sliderChanged(_:))
+        radiusSlider.widthAnchor.constraint(equalToConstant: 180).isActive = true
+
+        radiusValue.font = DS.mono(12)
+        radiusValue.textColor = DS.textMuted
+        radiusValue.alignment = .right
+        radiusValue.widthAnchor.constraint(equalToConstant: 52).isActive = true
+
+        let grid = NSGridView(views: [
+            [fieldLabel("Radius:"), radiusSlider, radiusValue]
+        ])
+        grid.rowSpacing = 10
+        grid.columnSpacing = 12
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = 106
+
+        let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
+        let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
+        view = makeSheetView(
+            title: "Feather selection",
+            hint: "Softens the selection edge, so fills, gradients, and "
+                + "strokes fade out across the radius.",
+            content: grid,
+            buttonRow: makeButtonRow(
+                cancel: cancelButton, apply: applyButton,
+                leading: [sheetFootnote("0.5 – 250 px")]))
+    }
+
+    private var radius: Double {
+        pow(10, radiusSlider.doubleValue)
+    }
+
+    @objc private func sliderChanged(_ sender: Any?) {
+        radiusValue.stringValue = String(format: "%.1f px", radius)
+    }
+
+    @objc private func applyClicked(_ sender: Any?) {
+        let radius = radius
+        dismiss(self)
+        guard let canvas = canvas, let selection = canvas.selection else {
+            NSSound.beep()
+            return
+        }
+        // A feather that spreads all coverage to zero comes back nil and
+        // deselects — the same all-empty rule as the combine modes.
+        canvas.setSelection(selection.feathered(by: radius))
+    }
+
+    @objc private func cancelClicked(_ sender: Any?) {
+        dismiss(self)
+    }
+}
+
 // MARK: - SliderSheetController
 
 /// One slider row of a SliderSheetController: label, slider-space range, an

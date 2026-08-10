@@ -504,6 +504,25 @@ final class RasterDocument {
     }
 }
 
+/// Selection-mask operations. Unlike images and documents, selection masks
+/// cross the FFI as raw canvas-sized u8 coverage buffers (row 0 = top),
+/// not handles.
+enum RasterSelection {
+    /// Gaussian-feathers a coverage mask in place. Sampling clamps to the
+    /// canvas edges, so a selection touching the border keeps full
+    /// coverage there; radius <= 0 leaves the mask untouched. false on a
+    /// size mismatch or a non-finite radius.
+    static func featherMask(
+        _ mask: inout [UInt8], width: Int, height: Int, radius: Double
+    ) -> Bool {
+        guard width > 0, height > 0, mask.count == width * height else { return false }
+        return mask.withUnsafeMutableBufferPointer { buffer in
+            rz_selection_feather(
+                buffer.baseAddress, UInt32(width), UInt32(height), Float(radius))
+        }
+    }
+}
+
 /// The formats the app can export/write, bridging display name, RzFormat,
 /// UTType, and file extension.
 enum ExportFormat: CaseIterable {

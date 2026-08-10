@@ -8,6 +8,7 @@ use std::ptr;
 
 use image::{Rgba, RgbaImage};
 use rasterize_core::doc::RzDocument;
+use rasterize_core::doc_select::feather_mask;
 use rasterize_core::ffi::*;
 use rasterize_core::ffi_doc::*;
 use rasterize_core::RzImage;
@@ -2215,4 +2216,93 @@ fn gradient_linear_radial_and_offsets() {
     unsafe { rz_doc_free(out) };
     unsafe { rz_doc_free(out2) };
     unsafe { rz_doc_free(out3) };
+}
+
+// ---------------------------------------------------- selection feather --
+
+/// w*h mask, 255 inside the half-open rect [x0, x1) x [y0, y1), 0 outside.
+fn rect_mask(w: u32, h: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> Vec<u8> {
+    let mut mask = vec![0u8; (w * h) as usize];
+    for y in y0..y1 {
+        for x in x0..x1 {
+            mask[(y * w + x) as usize] = 255;
+        }
+    }
+    mask
+}
+
+#[test]
+fn feather_softens_rect_boundary_only() {
+    let (w, h) = (24u32, 24u32);
+    let mut mask = rect_mask(w, h, 6, 6, 18, 18);
+    assert!(unsafe { rz_selection_feather(mask.as_mut_ptr(), w, h, 2.0) });
+    let at = |x: u32, y: u32| mask[(y * w + x) as usize];
+
+    // Deep inside stays fully selected; far outside stays empty.
+    assert_eq!(at(12, 12), 255);
+    assert_eq!(at(0, 0), 0);
+    assert_eq!(at(23, 23), 0);
+
+    // The formerly hard edge is now a ramp: intermediate coverage on both
+    // sides of the boundary, decreasing outward.
+    let inside_edge = at(6, 12);
+    let outside_edge = at(5, 12);
+    assert!(
+        inside_edge > 0 && inside_edge < 255,
+        "inside boundary pixel intermediate, got {inside_edge}"
+    );
+    assert!(
+        outside_edge > 0 && outside_edge < 255,
+        "outside boundary pixel intermediate, got {outside_edge}"
+    );
+    assert!(inside_edge > outside_edge);
+}
+
+#[test]
+fn feather_symmetric_input_stays_symmetric() {
+    let (w, h) = (20u32, 20u32);
+    let mut mask = rect_mask(w, h, 5, 5, 15, 15);
+    feather_mask(&mut mask, w, h, 3.0);
+    let at = |x: u32, y: u32| mask[(y * w + x) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            assert_eq!(at(x, y), at(w - 1 - x, y), "mirror x at ({x},{y})");
+            assert_eq!(at(x, y), at(x, h - 1 - y), "mirror y at ({x},{y})");
+            assert_eq!(at(x, y), at(y, x), "transpose at ({x},{y})");
+        }
+    }
+}
+
+#[test]
+fn feather_clamps_at_canvas_edges() {
+    // A fully selected canvas must stay fully selected: clamp-to-edge
+    // sampling means nothing bleeds in from outside the canvas.
+    let (w, h) = (9u32, 7u32);
+    let mut mask = vec![255u8; (w * h) as usize];
+    feather_mask(&mut mask, w, h, 4.0);
+    assert!(mask.iter().all(|&v| v == 255), "edges faded: {mask:?}");
+}
+
+#[test]
+fn feather_zero_radius_is_identity() {
+    let (w, h) = (16u32, 12u32);
+    let original = rect_mask(w, h, 3, 2, 9, 11);
+    let mut mask = original.clone();
+    feather_mask(&mut mask, w, h, 0.0);
+    assert_eq!(mask, original);
+
+    // Negative radius is also a no-op, and still succeeds over the FFI.
+    assert!(unsafe { rz_selection_feather(mask.as_mut_ptr(), w, h, -3.0) });
+    assert_eq!(mask, original);
+}
+
+#[test]
+fn feather_rejects_null_zero_size_and_non_finite() {
+    let mut mask = vec![0u8; 4];
+    assert!(!unsafe { rz_selection_feather(ptr::null_mut(), 2, 2, 1.0) });
+    assert!(!unsafe { rz_selection_feather(mask.as_mut_ptr(), 0, 2, 1.0) });
+    assert!(!unsafe { rz_selection_feather(mask.as_mut_ptr(), 2, 0, 1.0) });
+    assert!(!unsafe { rz_selection_feather(mask.as_mut_ptr(), 2, 2, f32::NAN) });
+    assert!(!unsafe { rz_selection_feather(mask.as_mut_ptr(), 2, 2, f32::INFINITY) });
+    assert_eq!(mask, vec![0u8; 4]);
 }

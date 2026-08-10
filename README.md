@@ -31,8 +31,12 @@ decoding, encoding, and manipulation.
 - Selections beyond the rectangle: ellipse marquee (O), polygonal lasso
   (L — click vertices, double-click/Return/click-the-start closes, Escape
   cancels), and a magic wand (W) with tolerance + contiguous options that
-  samples the flattened composite; selections confine brush, eraser,
-  fill, and gradient, dim the outside, and define Crop
+  samples the flattened composite; combine selections with Shift (add),
+  Option (subtract), or Shift+Option (intersect), invert (⇧⌘I) or soften
+  them with Edit > Feather Selection…, and the marching ants trace the
+  true selection contour — disjoint pieces and holes each get their own
+  dashed loop; selections confine brush, eraser, fill, and gradient, dim
+  the outside, and define Crop
 - Fill tool (K): bucket flood fill on the active layer with tolerance,
   and a Gradient tool (G): drag to paint linear or radial two-color
   gradients (default fades the paint color to transparent), both
@@ -71,11 +75,12 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 31 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 32 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG), layer operations, blend modes, filters, geometry, brush and
 eraser strokes (polyline points with size/color/opacity), rasterized text,
-selections (rect/ellipse/polygon/magic wand — shared with the UI and
+selections (rect/ellipse/polygon/magic wand with add/subtract/intersect
+modes, plus invert and feather — shared with the UI and
 honored by every paint tool), bucket fill, gradients,
 undo/redo, and exporting. Agent edits run on the main thread through the same edit path
 as the UI: each tool call is one undo step, marks the document edited, and

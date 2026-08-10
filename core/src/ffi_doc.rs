@@ -853,3 +853,29 @@ pub unsafe extern "C" fn rz_doc_gradient(
         })
     }
 }
+
+/// Gaussian-feathers a selection mask in place (width*height coverage
+/// bytes, row 0 top). Sampling clamps to the canvas edges, so a
+/// selection touching the border keeps full coverage there. Returns
+/// false on NULL mask, zero dimensions, or a non-finite radius;
+/// `radius <= 0` returns true and leaves the mask untouched.
+///
+/// # Safety
+/// `mask` must be NULL or valid and writable for width*height bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_selection_feather(
+    mask: *mut u8,
+    width: u32,
+    height: u32,
+    radius: f32,
+) -> bool {
+    if mask.is_null() || width == 0 || height == 0 || !radius.is_finite() {
+        return false;
+    }
+    let len = width as usize * height as usize;
+    let slice = unsafe { std::slice::from_raw_parts_mut(mask, len) };
+    catch_unwind(AssertUnwindSafe(|| {
+        crate::doc_select::feather_mask(slice, width, height, radius);
+    }))
+    .is_ok()
+}

@@ -111,6 +111,7 @@ final class AgentServer {
         case "select_polygon": return try selectPolygon(a)
         case "select_magic_wand": return try selectMagicWand(a)
         case "deselect": return try deselect(a)
+        case "modify_selection": return try modifySelection(a)
         case "fill": return try fill(a)
         case "gradient": return try gradient(a)
         case "rotate": return try rotate(a)
@@ -231,7 +232,7 @@ final class AgentServer {
             case .rect: kind = "rect"
             case .ellipse: kind = "ellipse"
             case .polygon: kind = "polygon"
-            case .mask: kind = "magic-wand mask"
+            case .mask: kind = "mask"
             }
             result["selection"] = [
                 "kind": kind,
@@ -672,8 +673,21 @@ final class AgentServer {
         editor(document)?.agentSelection?.maskBytes()
     }
 
+    /// The select_* tools' optional "mode" argument (default replace).
+    private func selectionMode(_ a: [String: Any]) throws -> SelectionCombineMode {
+        switch stringArg(a, "mode") ?? "replace" {
+        case "replace": return .replace
+        case "add": return .add
+        case "subtract": return .subtract
+        case "intersect": return .intersect
+        case let other:
+            throw ToolError(
+                message: "mode must be replace, add, subtract, or intersect (got \"\(other)\")")
+        }
+    }
+
     private func applySelection(
-        _ document: ImageDocument, _ shape: CanvasSelection.Shape
+        _ document: ImageDocument, _ shape: CanvasSelection.Shape, mode: SelectionCombineMode
     ) throws -> String {
         guard let editorVC = editor(document) else {
             throw ToolError(message: "The document has no editor window to hold a selection.")
@@ -684,6 +698,22 @@ final class AgentServer {
                 shape: shape, canvasWidth: doc.width, canvasHeight: doc.height)
         else {
             throw ToolError(message: "The selection would be empty.")
+        }
+        return try setCombined(
+            editorVC, CanvasSelection.combine(editorVC.agentSelection, with: selection, mode: mode))
+    }
+
+    /// Applies a combine/modify result: an empty (nil) result deselects,
+    /// reported in-band rather than as an error.
+    private func setCombined(
+        _ editorVC: EditorViewController, _ selection: CanvasSelection?
+    ) throws -> String {
+        guard let selection = selection else {
+            editorVC.agentSetSelection(nil)
+            return try jsonResult([
+                "ok": true, "selection_empty": true,
+                "note": "The resulting selection is empty; the selection was cleared.",
+            ])
         }
         editorVC.agentSetSelection(selection)
         let b = selection.bounds
@@ -705,7 +735,8 @@ final class AgentServer {
         else {
             throw ToolError(message: "Requires x, y, width, height (width/height > 0)")
         }
-        return try applySelection(document, make(CGRect(x: x, y: y, width: w, height: h)))
+        return try applySelection(
+            document, make(CGRect(x: x, y: y, width: w, height: h)), mode: selectionMode(a))
     }
 
     private func selectPolygon(_ a: [String: Any]) throws -> String {
@@ -714,7 +745,7 @@ final class AgentServer {
         guard points.count >= 3 else {
             throw ToolError(message: "A polygon selection needs at least 3 points")
         }
-        return try applySelection(document, .polygon(points))
+        return try applySelection(document, .polygon(points), mode: selectionMode(a))
     }
 
     private func selectMagicWand(_ a: [String: Any]) throws -> String {
@@ -730,13 +761,37 @@ final class AgentServer {
         else {
             throw ToolError(message: "The seed point is outside the canvas")
         }
-        return try applySelection(document, .mask(mask))
+        return try applySelection(document, .mask(mask), mode: selectionMode(a))
     }
 
     private func deselect(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         editor(document)?.agentSetSelection(nil)
         return try jsonResult(["ok": true])
+    }
+
+    private func modifySelection(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        guard let editorVC = editor(document) else {
+            throw ToolError(message: "The document has no editor window to hold a selection.")
+        }
+        guard let selection = editorVC.agentSelection else {
+            throw ToolError(
+                message: "There is no selection to modify. Make one with the select_* tools.")
+        }
+        let modified: CanvasSelection?
+        switch try requiredString(a, "operation") {
+        case "invert":
+            modified = selection.inverted()
+        case "feather":
+            guard let radius = doubleArg(a, "radius"), radius.isFinite, radius > 0 else {
+                throw ToolError(message: "feather requires a positive radius (px)")
+            }
+            modified = selection.feathered(by: min(radius, 250))
+        case let other:
+            throw ToolError(message: "operation must be \"invert\" or \"feather\" (got \"\(other)\")")
+        }
+        return try setCombined(editorVC, modified)
     }
 
     private func fill(_ a: [String: Any]) throws -> String {
@@ -988,6 +1043,14 @@ final class AgentServer {
             "type": "integer",
             "description": "Layer index (0 = bottom); omit for the active layer.",
         ]
+        let selectionMode: [String: Any] = [
+            "type": "string",
+            "enum": ["replace", "add", "subtract", "intersect"],
+            "description": "How the new shape combines with the current selection "
+                + "(default replace). add unions, subtract removes the new shape from "
+                + "the current selection, intersect keeps the overlap; an empty result "
+                + "clears the selection.",
+        ]
         let blendNames = RzBlendMode.allBlendModes.map { $0.1 }
         let catalog: [[String: Any]] = [
             tool(
@@ -1166,6 +1229,7 @@ final class AgentServer {
                 [
                     "x": ["type": "integer"], "y": ["type": "integer"],
                     "width": ["type": "integer"], "height": ["type": "integer"],
+                    "mode": selectionMode,
                     "document_id": docID,
                 ], required: ["x", "y", "width", "height"]),
             tool(
@@ -1174,6 +1238,7 @@ final class AgentServer {
                 [
                     "x": ["type": "integer"], "y": ["type": "integer"],
                     "width": ["type": "integer"], "height": ["type": "integer"],
+                    "mode": selectionMode,
                     "document_id": docID,
                 ], required: ["x", "y", "width", "height"]),
             tool(
@@ -1190,6 +1255,7 @@ final class AgentServer {
                         ],
                         "minItems": 3, "maxItems": 10_000,
                     ],
+                    "mode": selectionMode,
                     "document_id": docID,
                 ], required: ["points"]),
             tool(
@@ -1202,10 +1268,26 @@ final class AgentServer {
                     "x": ["type": "integer"], "y": ["type": "integer"],
                     "tolerance": ["type": "integer", "minimum": 0, "maximum": 255],
                     "contiguous": ["type": "boolean"],
+                    "mode": selectionMode,
                     "document_id": docID,
                 ], required: ["x", "y"]),
             tool(
                 "deselect", "Clears the selection.", ["document_id": docID]),
+            tool(
+                "modify_selection",
+                "Transforms the current selection (errors when nothing is selected): "
+                    + "invert selects the complement over the canvas; feather "
+                    + "Gaussian-softens the selection edge by radius px, so later "
+                    + "fills, gradients, and strokes fade out across it. An empty "
+                    + "result clears the selection.",
+                [
+                    "operation": ["type": "string", "enum": ["invert", "feather"]],
+                    "radius": [
+                        "type": "number",
+                        "description": "Feather radius in px (0-250; required for feather).",
+                    ],
+                    "document_id": docID,
+                ], required: ["operation"]),
             tool(
                 "fill",
                 "Bucket fill: flood-fills the similar-color region around the seed "

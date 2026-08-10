@@ -374,6 +374,14 @@ RzDocument *rz_doc_gradient(const RzDocument *doc, size_t idx, float x0,
                             const uint8_t *end_rgba, RzGradientKind kind,
                             const uint8_t *mask);
 
+/* Gaussian-feathers a selection mask in place (width*height coverage
+ * bytes, row 0 top). Sampling clamps to the canvas edges, so a
+ * selection touching the border keeps full coverage there. false on
+ * NULL mask, zero dimensions, or a non-finite radius; radius <= 0
+ * returns true and leaves the mask untouched. */
+bool rz_selection_feather(uint8_t *mask, uint32_t width, uint32_t height,
+                          float radius);
+
 /* ---- Embedded agent (MCP) server ----------------------------------------
  *
  * A minimal MCP server (streamable-HTTP transport, tools only) hosted in
