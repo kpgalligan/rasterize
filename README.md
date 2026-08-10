@@ -41,6 +41,45 @@ files are rejected with a clear error); animated GIFs and multi-page TIFFs
 load their first frame/page only, so ⌘S on a GIF deliberately routes through
 Save As instead of overwriting the animation in place.
 
+## Built-in assistant
+
+The Assistant tab of the right panel (View > Assistant, ⌃⌘A) is a chat
+agent built into the app: it edits the window's document by calling the
+same tools the MCP server exposes, sees the canvas by rendering it, and
+verifies its own work. The agent loop lives in the Rust core
+(`core/src/assistant.rs`): a tool-use loop over the Anthropic Messages
+API (non-streaming v1; `api_base` is the provider seam), with per-turn
+events driving the panel UI, cancellation at tool/API boundaries, and
+automatic pruning of older canvas renders from the conversation so
+history stays small. Every assistant edit is a normal undo step.
+
+Bring your own API key: the panel asks once and stores it in the
+keychain (launching with `ANTHROPIC_API_KEY` set also works). The model
+defaults to `claude-sonnet-5`; override with
+`defaults write com.kgalligan.Rasterize AssistantModel <model-id>`.
+
+## AI agent access (MCP)
+
+Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
+the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
+to an ephemeral port). Any MCP client can drive the editor — 24 tools cover
+opening documents, inspecting and rendering the canvas (the agent *sees* the
+image as PNG), layer operations, blend modes, filters, geometry, brush and
+eraser strokes (polyline points with size/color/opacity), rasterized text,
+undo/redo, and exporting. Agent edits run on the main thread through the same edit path
+as the UI: each tool call is one undo step, marks the document edited, and
+updates the open window live. With [goose](https://github.com/aaif-goose/goose):
+
+```sh
+goose session --with-streamable-http-extension "http://127.0.0.1:4816/mcp"
+```
+
+The protocol layer lives in the Rust core (`core/src/agent.rs`, tools-only,
+stateless, single JSON responses); the Swift side registers the tool catalog
+and executes calls against the live documents (`app/Sources/AgentServer.swift`).
+The endpoint is unauthenticated and off by default — any local process can
+connect while it is enabled.
+
 ## Design
 
 The UI takes its structure from the Balopy design handoff in

@@ -70,7 +70,7 @@ final class ImageDocument: NSDocument {
         document.activeLayerIndex = 0
         document.refreshProjection()
         document.fileType = "public.png"
-        document.updateChangeCount(.changeDone)
+        document.countEditChange(.changeDone)
         return document
     }
 
@@ -154,6 +154,35 @@ final class ImageDocument: NSDocument {
         addWindowController(EditorWindowController(document: self))
     }
 
+    // MARK: - Change counting
+
+    /// NSDocument's automatic undo-based change counting is unreliable
+    /// here: whether the DidCloseUndoGroup/DidUndo/DidRedo counting fires
+    /// depends on how the run loop is being driven (real UI events versus
+    /// the agent server's dispatched-to-main tool calls), which double- or
+    /// zero-counts edits. So this class counts every edit explicitly at
+    /// the applyEdit/restoreDoc/endLiveEdit sites, and this override drops
+    /// the automatic done/undone/redone calls. Clearing (save) and other
+    /// change types pass through untouched.
+    private var allowEditChangeCount = false
+
+    override func updateChangeCount(_ change: NSDocument.ChangeType) {
+        switch change {
+        case .changeDone, .changeUndone, .changeRedone:
+            guard allowEditChangeCount else { return }
+        default:
+            break
+        }
+        super.updateChangeCount(change)
+    }
+
+    /// The explicit counting entry used by this class's edit paths.
+    func countEditChange(_ change: NSDocument.ChangeType) {
+        allowEditChangeCount = true
+        updateChangeCount(change)
+        allowEditChangeCount = false
+    }
+
     // MARK: - Editing
 
     /// Applies `transform` to the current document. A nil result beeps and
@@ -170,6 +199,7 @@ final class ImageDocument: NSDocument {
         }
         undoManager?.setActionName(actionName)
         doc = updated
+        countEditChange(.changeDone)
         docDidChange()
     }
 
@@ -195,6 +225,11 @@ final class ImageDocument: NSDocument {
         undoManager?.setActionName(actionName)
         doc = restored
         activeLayerIndex = activeIndex
+        if undoManager?.isRedoing == true {
+            countEditChange(.changeRedone)
+        } else {
+            countEditChange(.changeUndone)
+        }
         docDidChange() // clamps activeLayerIndex as a safety net
     }
 
@@ -250,6 +285,7 @@ final class ImageDocument: NSDocument {
                 document.restoreDoc(base, activeIndex: index, actionName: actionName)
             }
             undoManager?.setActionName(actionName)
+            countEditChange(.changeDone)
         }
         NotificationCenter.default.post(
             name: .imageDocumentImageDidChange, object: self, userInfo: ["isLive": false])

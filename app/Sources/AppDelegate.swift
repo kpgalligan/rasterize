@@ -15,8 +15,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if UserDefaults.standard.bool(forKey: AgentServer.enabledDefaultsKey) {
+            startAgentServer()
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        AgentServer.shared.stop()
+    }
+
+    // MARK: - Agent server
+
+    /// Tools > Allow Agent Connections: hosts an MCP endpoint on localhost
+    /// so an external AI agent (goose, etc.) can drive the editor. Off by
+    /// default; the preference persists across launches.
+    @objc func toggleAgentServer(_ sender: Any?) {
+        if AgentServer.shared.isRunning {
+            AgentServer.shared.stop()
+            UserDefaults.standard.set(false, forKey: AgentServer.enabledDefaultsKey)
+        } else if startAgentServer() {
+            UserDefaults.standard.set(true, forKey: AgentServer.enabledDefaultsKey)
+        }
+    }
+
+    @discardableResult
+    private func startAgentServer() -> Bool {
+        do {
+            try AgentServer.shared.start()
+            return true
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Could Not Start Agent Server"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+            return false
+        }
     }
 
     // MARK: - New from Clipboard
@@ -40,6 +78,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(newFromClipboard(_:)) {
             return NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
+        }
+        if item.action == #selector(toggleAgentServer(_:)) {
+            let server = AgentServer.shared
+            item.state = server.isRunning ? .on : .off
+            item.title =
+                server.isRunning
+                ? "Allow Agent Connections (127.0.0.1:\(server.port)/mcp)"
+                : "Allow Agent Connections"
         }
         return true
     }
@@ -209,6 +255,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Brush Tool", #selector(EditorViewController.selectBrushTool(_:))))
         menu.addItem(item("Eraser Tool", #selector(EditorViewController.selectEraserTool(_:))))
         menu.addItem(item("Text Tool", #selector(EditorViewController.selectTextTool(_:))))
+        menu.addItem(.separator())
+        menu.addItem(item("Allow Agent Connections", #selector(toggleAgentServer(_:))))
         return menu
     }
 
@@ -229,6 +277,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item(
                 "Hide Layers", #selector(EditorViewController.toggleLayersPanel(_:)), "l",
                 [.command, .option]))
+        menu.addItem(
+            item(
+                "Assistant", #selector(EditorViewController.showAssistant(_:)), "a",
+                [.command, .control]))
         return menu
     }
 

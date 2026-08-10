@@ -336,6 +336,83 @@ RzImage *rz_image_edge_detect(const RzImage *img);
 /* Emboss: 3x3 directional relief kernel on luma around mid-gray, opaque. */
 RzImage *rz_image_emboss(const RzImage *img);
 
+/* ---- Embedded agent (MCP) server ----------------------------------------
+ *
+ * A minimal MCP server (streamable-HTTP transport, tools only) hosted in
+ * this library so an external AI agent (goose, or any MCP client) can
+ * drive the application. The library owns the protocol; the application
+ * supplies the tool catalog and executes tool calls via the handler.
+ * One server per process. */
+
+/* Executes one tool call. Called from the server thread for every
+ * `tools/call`; `arguments_json` is the call's arguments object. Must
+ * return a CallToolResult JSON object (`{"content": [...], "isError":
+ * bool}`) allocated with rz_agent_string_create, or NULL to report a
+ * handler failure. */
+typedef char *(*RzAgentToolHandler)(void *context, const char *tool_name,
+                                    const char *arguments_json);
+
+/* Allocates a library-owned copy of `s` for handler return values.
+ * Ownership passes back to the library on return; never free it. */
+char *rz_agent_string_create(const char *s);
+
+/* Starts the MCP server on 127.0.0.1:port (0 picks an ephemeral port);
+ * the endpoint answers JSON-RPC POSTs on any path (/mcp canonical).
+ * `tools_json` is the tools/list catalog as a JSON array. `handler` and
+ * `context` must stay valid and callable from any thread until
+ * rz_agent_server_stop returns. Returns the bound port, or 0 on failure
+ * with a message through err_out (free with rz_string_free). */
+uint16_t rz_agent_server_start(uint16_t port, const char *server_name,
+                               const char *server_version,
+                               const char *tools_json,
+                               RzAgentToolHandler handler, void *context,
+                               char **err_out);
+
+/* Stops the server and joins its thread. Safe with no server running. */
+void rz_agent_server_stop(void);
+
+/* ---- Built-in assistant (agent loop) ------------------------------------
+ *
+ * A tool-use agent loop over the Anthropic Messages API, hosted in this
+ * library. One RzAssistant is one conversation. Turns run on a worker
+ * thread: the model is called, requested tools execute through the same
+ * RzAgentToolHandler contract the MCP server uses, results feed back,
+ * and the loop repeats until the model stops. Progress arrives through
+ * the event handler as JSON objects: turn_started, assistant_text,
+ * tool_call, tool_result, error, turn_finished. */
+
+typedef struct RzAssistant RzAssistant;
+
+/* Receives each event as a JSON string on the worker thread. The string
+ * is only valid for the duration of the call — copy it. */
+typedef void (*RzAssistantEventHandler)(void *context, const char *event_json);
+
+/* Creates a conversation. config_json: {"api_key", "model", "system"
+ * (required strings), "api_base" (default https://api.anthropic.com),
+ * "max_tokens" (default 4096)}. tools_json: the same MCP-format catalog
+ * array rz_agent_server_start takes. Both handler/context pairs must
+ * stay valid and callable from any thread until rz_assistant_free
+ * returns. NULL on failure with a message through err_out. */
+RzAssistant *rz_assistant_new(const char *config_json, const char *tools_json,
+                              RzAgentToolHandler tool_handler,
+                              void *tool_context,
+                              RzAssistantEventHandler event_handler,
+                              void *event_context, char **err_out);
+
+/* Starts one turn with the user's message. false while a turn is
+ * already running (nothing is queued). */
+bool rz_assistant_send(const RzAssistant *assistant, const char *user_text);
+
+/* True while a turn is running. */
+bool rz_assistant_is_busy(const RzAssistant *assistant);
+
+/* Asks the running turn to stop at the next tool/API boundary; the turn
+ * still emits turn_finished as it winds down. */
+void rz_assistant_cancel(const RzAssistant *assistant);
+
+/* Cancels, joins the worker, frees. NULL is a safe no-op. */
+void rz_assistant_free(RzAssistant *assistant);
+
 /* Frees strings returned via err_out parameters. NULL is a safe no-op. */
 void rz_string_free(char *s);
 

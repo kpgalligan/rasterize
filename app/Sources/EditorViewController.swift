@@ -46,12 +46,15 @@ final class EditorViewController: NSViewController {
     private var scrollTopToRoot: NSLayoutConstraint!
     private var scrollTopToOptions: NSLayoutConstraint!
 
-    // Layers panel (right side, toggled by View > Show/Hide Layers).
+    // Right panel (Layers/Assistant tabs, toggled by View > Show/Hide Layers).
     private var layersPanel: LayersPanelViewController!
+    private var assistantPanel: AssistantPanelViewController!
     private var panelSeparator: NSBox!
     private var scrollTrailingToRoot: NSLayoutConstraint!
     private var scrollTrailingToPanel: NSLayoutConstraint!
     private var layersPanelVisible = true
+    /// 0 = Layers, 1 = Assistant.
+    private var panelTab = 0
 
     // Move-tool drag state: the active layer's offset when the drag began.
     private var moveStartOffset: (x: Int, y: Int)?
@@ -280,16 +283,31 @@ final class EditorViewController: NSViewController {
         zoomPill.onZoomIn = { [weak self] in self?.zoomIn() }
         zoomPill.onZoomOut = { [weak self] in self?.zoomOut() }
 
-        // Layers panel + its 1px separator line.
+        // Right panel (Layers + Assistant tabs) + its 1px separator line.
         layersPanel = LayersPanelViewController()
         layersPanel.document = document
         layersPanel.onActiveLayerChange = { [weak self] in
             self?.updateStatus()
             self?.updateActiveLayerRect()
         }
+        layersPanel.onShowAssistant = { [weak self] in
+            self?.panelTab = 1
+            self?.updatePanelVisibility()
+        }
         addChild(layersPanel)
         let panelView = layersPanel.view
         panelView.translatesAutoresizingMaskIntoConstraints = false
+
+        assistantPanel = AssistantPanelViewController()
+        assistantPanel.document = document
+        assistantPanel.onShowLayers = { [weak self] in
+            self?.panelTab = 0
+            self?.updatePanelVisibility()
+        }
+        addChild(assistantPanel)
+        let assistantView = assistantPanel.view
+        assistantView.translatesAutoresizingMaskIntoConstraints = false
+        assistantView.isHidden = true
 
         panelSeparator = NSBox()
         panelSeparator.boxType = .separator
@@ -301,6 +319,7 @@ final class EditorViewController: NSViewController {
         root.addSubview(zoomPill)
         root.addSubview(panelSeparator)
         root.addSubview(panelView)
+        root.addSubview(assistantView)
         root.addSubview(statusBar)
 
         guard let toolbarStackView = toolbarBar.subviews.first else {
@@ -335,6 +354,11 @@ final class EditorViewController: NSViewController {
             panelView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
             panelView.topAnchor.constraint(equalTo: scrollView.topAnchor),
             panelView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+
+            assistantView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            assistantView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
+            assistantView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            assistantView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             panelSeparator.trailingAnchor.constraint(equalTo: panelView.leadingAnchor),
             panelSeparator.widthAnchor.constraint(equalToConstant: 1),
@@ -885,7 +909,19 @@ final class EditorViewController: NSViewController {
 
     @objc func toggleLayersPanel(_ sender: Any?) {
         layersPanelVisible.toggle()
-        layersPanel.view.isHidden = !layersPanelVisible
+        updatePanelVisibility()
+    }
+
+    /// View > Assistant (also the panel's Assistant tab).
+    @objc func showAssistant(_ sender: Any?) {
+        layersPanelVisible = true
+        panelTab = 1
+        updatePanelVisibility()
+    }
+
+    private func updatePanelVisibility() {
+        layersPanel.view.isHidden = !layersPanelVisible || panelTab != 0
+        assistantPanel.view.isHidden = !layersPanelVisible || panelTab != 1
         panelSeparator.isHidden = !layersPanelVisible
         scrollTrailingToRoot.isActive = false
         scrollTrailingToPanel.isActive = false

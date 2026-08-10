@@ -146,6 +146,9 @@ final class LayersPanelViewController: NSViewController {
     /// (the editor updates its status bar).
     var onActiveLayerChange: (() -> Void)?
 
+    /// Called when the user clicks the Assistant tab.
+    var onShowAssistant: (() -> Void)?
+
     private let blendPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let blendContainer = NSView()
     private let opacitySlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
@@ -182,12 +185,12 @@ final class LayersPanelViewController: NSViewController {
         let root = NSView(frame: NSRect(x: 0, y: 0, width: DS.panelWidth, height: 400))
         root.wantsLayer = true
 
-        // "Layers" pill tab — the active-tab treatment from the design's
-        // tab row. (The Adjust and Ask tabs are dropped: Adjust's sheets
-        // stay as sheets, and the agent does not exist yet.)
-        let tab = StickerButton(title: "Layers", style: .secondary, target: nil, action: nil)
+        // Panel tab row: Layers active here, Assistant switches over.
+        let tab = PanelTabsView(titles: ["Layers", "Assistant"], activeIndex: 0) {
+            [weak self] index in
+            if index == 1 { self?.onShowAssistant?() }
+        }
         tab.translatesAutoresizingMaskIntoConstraints = false
-        tab.isEnabled = true
 
         blendContainer.translatesAutoresizingMaskIntoConstraints = false
         blendContainer.wantsLayer = true

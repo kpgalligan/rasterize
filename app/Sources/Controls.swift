@@ -405,3 +405,50 @@ enum DSField {
         field.heightAnchor.constraint(equalToConstant: 26).isActive = true
     }
 }
+
+// MARK: - PanelTabsView
+
+/// The right panel's tab row: the active tab wears the sticker pill, the
+/// inactive ones are flat text buttons. Selection is owned by the editor
+/// (each panel is built with its own tab marked active).
+final class PanelTabsView: NSView {
+    private let onSelect: (Int) -> Void
+
+    init(titles: [String], activeIndex: Int, onSelect: @escaping (Int) -> Void) {
+        self.onSelect = onSelect
+        super.init(frame: .zero)
+        let stack = NSStackView()
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .horizontal
+        stack.spacing = 10
+        for (index, title) in titles.enumerated() {
+            if index == activeIndex {
+                let active = StickerButton(title: title, style: .secondary, target: nil, action: nil)
+                stack.addArrangedSubview(active)
+            } else {
+                let button = NSButton(title: title, target: self, action: #selector(tabClicked(_:)))
+                button.tag = index
+                button.isBordered = false
+                button.font = DS.sans(13, weight: .semibold)
+                button.contentTintColor = DS.textMuted
+                stack.addArrangedSubview(button)
+            }
+        }
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("PanelTabsView does not support NSCoder")
+    }
+
+    @objc private func tabClicked(_ sender: NSButton) {
+        onSelect(sender.tag)
+    }
+}
