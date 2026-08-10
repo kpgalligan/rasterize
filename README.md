@@ -28,10 +28,19 @@ decoding, encoding, and manipulation.
   Posterize adjustments with live in-context preview on the active layer
 - Grayscale, invert, sepia, Gaussian blur, sharpen, Pixelate, Add Noise,
   Edge Detect, Emboss
+- Selections beyond the rectangle: ellipse marquee (O), polygonal lasso
+  (L — click vertices, double-click/Return/click-the-start closes, Escape
+  cancels), and a magic wand (W) with tolerance + contiguous options that
+  samples the flattened composite; selections confine brush, eraser,
+  fill, and gradient, dim the outside, and define Crop
+- Fill tool (K): bucket flood fill on the active layer with tolerance,
+  and a Gradient tool (G): drag to paint linear or radial two-color
+  gradients (default fades the paint color to transparent), both
+  selection-aware
 - Brush and eraser (size, opacity, color; `[`/`]` resize; 1 px pixel-snapped
   mode; strokes confine to an active selection) and on-canvas text
   (font/size/color, ⌘Return commits, Escape cancels) — tools switch via
-  toolbar, Tools menu, or V/B/E/T
+  toolbar, Tools menu, or M/O/L/W/V/B/E/K/G/T
 - Full undo/redo, copy to clipboard, recent files
 - Drag image files onto a window to open them; File > New from Clipboard (⌘N)
 - Checkerboard backdrop for transparency
@@ -62,10 +71,12 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 24 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 31 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG), layer operations, blend modes, filters, geometry, brush and
 eraser strokes (polyline points with size/color/opacity), rasterized text,
+selections (rect/ellipse/polygon/magic wand — shared with the UI and
+honored by every paint tool), bucket fill, gradients,
 undo/redo, and exporting. Agent edits run on the main thread through the same edit path
 as the UI: each tool call is one undo step, marks the document edited, and
 updates the open window live. With [goose](https://github.com/aaif-goose/goose):

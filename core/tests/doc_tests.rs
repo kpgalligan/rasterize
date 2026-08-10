@@ -2011,3 +2011,208 @@ fn canvas_resize_shifts_offsets_without_scaling() {
     unsafe { rz_image_free(flat) };
     unsafe { rz_doc_free(doc) };
 }
+
+// -------------------------------------------------- selection & fill ops --
+
+/// Builds a 6x4 doc: left half solid red, right half solid blue.
+fn two_tone_doc(dir: &TempDir) -> *mut RzDocument {
+    let mut img = RgbaImage::new(6, 4);
+    for (x, _, px) in img.enumerate_pixels_mut() {
+        *px = if x < 3 {
+            Rgba([200, 0, 0, 255])
+        } else {
+            Rgba([0, 0, 200, 255])
+        };
+    }
+    doc_from(dir, "twotone.png", &img)
+}
+
+fn wand(doc: *const RzDocument, x: u32, y: u32, tol: u8, contiguous: bool) -> Vec<u8> {
+    let (w, h) = unsafe { (rz_doc_width(doc), rz_doc_height(doc)) };
+    let mut mask = vec![0u8; (w * h) as usize];
+    let ok = unsafe { rz_doc_magic_wand(doc, x, y, tol, contiguous, mask.as_mut_ptr()) };
+    assert!(ok, "magic_wand({x},{y}) failed");
+    mask
+}
+
+#[test]
+fn magic_wand_contiguous_and_global() {
+    let dir = TempDir::new().unwrap();
+    let doc = two_tone_doc(&dir);
+
+    // Seed in the red half selects exactly the 3x4 red block.
+    let mask = wand(doc, 0, 0, 0, true);
+    assert_eq!(mask.iter().filter(|&&m| m == 255).count(), 12);
+    assert_eq!(mask[0], 255); // top-left red
+    assert_eq!(mask[5], 0); // top-right blue
+
+    // Two disconnected red pixels at the far corner: contiguous excludes,
+    // global includes.
+    let mut img = RgbaImage::new(6, 4);
+    for (x, _, px) in img.enumerate_pixels_mut() {
+        *px = if x < 3 {
+            Rgba([200, 0, 0, 255])
+        } else {
+            Rgba([0, 0, 200, 255])
+        };
+    }
+    img.put_pixel(5, 3, Rgba([200, 0, 0, 255]));
+    let doc2 = doc_from(&dir, "twotone2.png", &img);
+    let contiguous = wand(doc2, 0, 0, 0, true);
+    assert_eq!(contiguous[3 * 6 + 5], 0);
+    let global = wand(doc2, 0, 0, 0, false);
+    assert_eq!(global[3 * 6 + 5], 255);
+
+    // Tolerance: 200-diff needs tolerance >= 200 to swallow both halves.
+    let loose = wand(doc, 0, 0, 200, true);
+    assert_eq!(loose.iter().filter(|&&m| m == 255).count(), 24);
+
+    // Out-of-canvas seed fails.
+    let mut mask = vec![0u8; 24];
+    assert!(!unsafe { rz_doc_magic_wand(doc, 99, 0, 0, true, mask.as_mut_ptr()) });
+
+    unsafe { rz_doc_free(doc) };
+    unsafe { rz_doc_free(doc2) };
+}
+
+#[test]
+fn bucket_fill_region_mask_and_blend() {
+    let dir = TempDir::new().unwrap();
+    let doc = two_tone_doc(&dir);
+
+    // Opaque green fill clicked in the blue half replaces exactly it.
+    let green = [0u8, 255, 0, 255];
+    let filled = apply(doc, |d| unsafe {
+        rz_doc_bucket_fill(d, 0, 5, 0, 0, green.as_ptr(), true, ptr::null())
+    });
+    let px = layer_pixels(filled, 0);
+    assert_eq!(&px[0..4], &[200, 0, 0, 255]); // red untouched
+    assert_eq!(&px[5 * 4..5 * 4 + 4], &[0, 255, 0, 255]); // blue -> green
+
+    // A mask covering only the top row halves the fill's reach; 50%
+    // coverage scales the paint.
+    let mut mask = vec![0u8; 24];
+    for m in mask.iter_mut().take(6) {
+        *m = 128;
+    }
+    let masked = apply(filled, |d| unsafe {
+        rz_doc_bucket_fill(d, 0, 0, 0, 0, green.as_ptr(), true, mask.as_ptr())
+    });
+    let px = layer_pixels(masked, 0);
+    // Top-left red got ~50% green blended over it.
+    assert!(
+        px[1] > 100 && px[1] < 160,
+        "half-coverage green, got {}",
+        px[1]
+    );
+    // Second row red untouched (mask 0).
+    assert_eq!(&px[6 * 4..6 * 4 + 4], &[200, 0, 0, 255]);
+
+    // Click outside the mask fails.
+    let out =
+        unsafe { rz_doc_bucket_fill(masked, 0, 0, 2, 0, green.as_ptr(), true, mask.as_ptr()) };
+    assert!(out.is_null());
+
+    unsafe { rz_doc_free(masked) };
+}
+
+#[test]
+fn gradient_linear_radial_and_offsets() {
+    let dir = TempDir::new().unwrap();
+    // Transparent 10x1 canvas: gradient endpoints land exactly.
+    let img = RgbaImage::new(10, 1);
+    let doc = doc_from(&dir, "empty.png", &img);
+    let black = [0u8, 0, 0, 255];
+    let white = [255u8, 255, 255, 255];
+
+    let out = apply(doc, |d| unsafe {
+        rz_doc_gradient(
+            d,
+            0,
+            0.0,
+            0.5,
+            10.0,
+            0.5,
+            black.as_ptr(),
+            white.as_ptr(),
+            0,
+            ptr::null(),
+        )
+    });
+    let px = layer_pixels(out, 0);
+    assert!(px[0 * 4] <= 13, "left end near black, got {}", px[0]);
+    assert!(px[9 * 4] >= 242, "right end near white, got {}", px[9 * 4]);
+    let mid = px[5 * 4];
+    assert!((110..=160).contains(&mid), "midpoint mid-gray, got {mid}");
+
+    // Radial: center black, edge white.
+    let img2 = RgbaImage::new(9, 9);
+    let doc2 = doc_from(&dir, "empty2.png", &img2);
+    let out2 = apply(doc2, |d| unsafe {
+        rz_doc_gradient(
+            d,
+            0,
+            4.5,
+            4.5,
+            8.5,
+            4.5,
+            black.as_ptr(),
+            white.as_ptr(),
+            1,
+            ptr::null(),
+        )
+    });
+    let px2 = layer_pixels(out2, 0);
+    let center = px2[(4 * 9 + 4) * 4];
+    let corner_right = px2[(4 * 9 + 8) * 4];
+    assert!(center <= 13, "radial center black, got {center}");
+    assert!(corner_right >= 242, "radial edge white, got {corner_right}");
+
+    // Degenerate p0 == p1 fails.
+    let bad = unsafe {
+        rz_doc_gradient(
+            out2,
+            0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            black.as_ptr(),
+            white.as_ptr(),
+            0,
+            ptr::null(),
+        )
+    };
+    assert!(bad.is_null());
+
+    // Offset layer: gradient coordinates are canvas coordinates.
+    let stripe = RgbaImage::new(4, 1);
+    let mut doc3 = doc_from(&dir, "empty3.png", &RgbaImage::new(10, 1));
+    doc3 = add_layer(&dir, "stripe.png", doc3, 0, &stripe, "S");
+    doc3 = apply(doc3, |d| unsafe { rz_doc_with_layer_offset(d, 1, 6, 0) });
+    let out3 = apply(doc3, |d| unsafe {
+        rz_doc_gradient(
+            d,
+            1,
+            0.0,
+            0.5,
+            10.0,
+            0.5,
+            black.as_ptr(),
+            white.as_ptr(),
+            0,
+            ptr::null(),
+        )
+    });
+    // The stripe sits at canvas x 6..10, so its own first pixel is ~65%.
+    let px3 = layer_pixels(out3, 1);
+    assert!(
+        px3[0] > 140,
+        "offset layer samples canvas-space t, got {}",
+        px3[0]
+    );
+
+    unsafe { rz_doc_free(out) };
+    unsafe { rz_doc_free(out2) };
+    unsafe { rz_doc_free(out3) };
+}

@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod assistant;
 pub mod doc;
+pub mod doc_select;
 pub mod ffi;
 pub mod ffi_agent;
 pub mod ffi_assistant;

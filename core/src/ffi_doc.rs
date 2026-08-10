@@ -718,3 +718,138 @@ pub unsafe extern "C" fn rz_doc_resize(
 ) -> *mut RzDocument {
     unsafe { doc_op(doc, |d| d.resize(w, h, filter_from_c(filter)?)) }
 }
+
+// ------------------------------------------------------- selection & fill --
+
+/// Similar-color selection from the flattened composite: writes a
+/// canvas-sized 0/255 mask (w*h bytes, row 0 top) into `mask_out`.
+/// `tolerance` is the maximum per-channel RGBA difference; `contiguous`
+/// restricts the selection to the connected region around the seed.
+/// Returns false on NULL/out-of-canvas input.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`;
+/// `mask_out` must be NULL or writable for canvas width*height bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_magic_wand(
+    doc: *const RzDocument,
+    x: u32,
+    y: u32,
+    tolerance: u8,
+    contiguous: bool,
+    mask_out: *mut u8,
+) -> bool {
+    if doc.is_null() || mask_out.is_null() {
+        return false;
+    }
+    let document = unsafe { &*doc };
+    let mask = catch_unwind(AssertUnwindSafe(|| {
+        document.magic_wand(x, y, tolerance, contiguous)
+    }));
+    match mask {
+        Ok(Some(mask)) => {
+            unsafe { ptr::copy_nonoverlapping(mask.as_ptr(), mask_out, mask.len()) };
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Reads an optional canvas-sized mask pointer into a slice.
+///
+/// # Safety
+/// `mask` must be NULL or valid for `len` bytes for the duration of the
+/// caller.
+unsafe fn mask_slice<'a>(mask: *const u8, len: usize) -> Option<&'a [u8]> {
+    if mask.is_null() {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(mask, len) })
+    }
+}
+
+/// Bucket fill on layer `idx`: grows a similar-color region over the
+/// layer's own pixels from canvas point (x, y) and paints `rgba`
+/// source-over it. `mask` is a canvas-sized selection coverage buffer or
+/// NULL; a seed outside the canvas, the layer, or the mask yields NULL.
+///
+/// # Safety
+/// `doc` must be NULL or a valid live `RzDocument`; `rgba` must point to
+/// 4 bytes; `mask` must be NULL or valid for canvas width*height bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_bucket_fill(
+    doc: *const RzDocument,
+    idx: usize,
+    x: i32,
+    y: i32,
+    tolerance: u8,
+    rgba: *const u8,
+    contiguous: bool,
+    mask: *const u8,
+) -> *mut RzDocument {
+    if rgba.is_null() {
+        return ptr::null_mut();
+    }
+    let color = unsafe { [*rgba, *rgba.add(1), *rgba.add(2), *rgba.add(3)] };
+    unsafe {
+        doc_op(doc, |d| {
+            let mask = mask_slice(mask, d.width as usize * d.height as usize);
+            d.bucket_fill(idx, x, y, tolerance, color, contiguous, mask)
+        })
+    }
+}
+
+/// Paints a two-color gradient source-over layer `idx` (the whole layer,
+/// scaled by `mask` where given): kind 0 = linear along p0->p1 (clamped
+/// past the ends), kind 1 = radial from p0 with radius |p1-p0|. Colors
+/// interpolate straight RGBA. NULL if p0 == p1, coordinates are not
+/// finite, or the kind is unknown.
+///
+/// # Safety
+/// `doc` must be NULL or a valid live `RzDocument`; `start_rgba` and
+/// `end_rgba` must point to 4 bytes; `mask` must be NULL or valid for
+/// canvas width*height bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_gradient(
+    doc: *const RzDocument,
+    idx: usize,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    start_rgba: *const u8,
+    end_rgba: *const u8,
+    kind: c_int,
+    mask: *const u8,
+) -> *mut RzDocument {
+    if start_rgba.is_null() || end_rgba.is_null() {
+        return ptr::null_mut();
+    }
+    let radial = match kind {
+        0 => false,
+        1 => true,
+        _ => return ptr::null_mut(),
+    };
+    let start = unsafe {
+        [
+            *start_rgba,
+            *start_rgba.add(1),
+            *start_rgba.add(2),
+            *start_rgba.add(3),
+        ]
+    };
+    let end = unsafe {
+        [
+            *end_rgba,
+            *end_rgba.add(1),
+            *end_rgba.add(2),
+            *end_rgba.add(3),
+        ]
+    };
+    unsafe {
+        doc_op(doc, |d| {
+            let mask = mask_slice(mask, d.width as usize * d.height as usize);
+            d.gradient(idx, (x0, y0), (x1, y1), start, end, radial, mask)
+        })
+    }
+}

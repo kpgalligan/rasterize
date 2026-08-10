@@ -4,9 +4,14 @@ import AppKit
 /// controller keeps the two in sync.
 enum CanvasTool {
     case select
+    case ellipseSelect
+    case lasso
+    case wand
     case move
     case brush
     case eraser
+    case fill
+    case gradient
     case text
 }
 
@@ -39,6 +44,13 @@ final class ImageCanvasView: NSView {
             } else {
                 destroyOverlay()
             }
+            // A selection made at a different canvas size is meaningless.
+            if let selection = selection,
+                selection.canvasWidth != (image?.width ?? 0)
+                    || selection.canvasHeight != (image?.height ?? 0)
+            {
+                setSelection(nil)
+            }
             needsDisplay = true
         }
     }
@@ -62,6 +74,9 @@ final class ImageCanvasView: NSView {
     var tool: CanvasTool = .select {
         didSet {
             cancelStroke()
+            cancelLasso()
+            gradientAnchor = nil
+            gradientCurrent = nil
             if moveDragOrigin != nil {
                 // A tool switch mid-drag must still close the live edit so
                 // the drag-so-far becomes one undo step.
@@ -110,11 +125,28 @@ final class ImageCanvasView: NSView {
     var onMoveEnd: (() -> Void)?
     var onMoveNudge: ((_ dx: Int, _ dy: Int) -> Void)?
 
-    /// Current selection in image pixel coordinates; always integral and
-    /// clamped to the image bounds.
-    private(set) var selectionRect: CGRect?
+    /// The active selection (rect, ellipse, polygon, or wand mask).
+    private(set) var selection: CanvasSelection?
+
+    /// Bounding box of the selection in image pixel coordinates (what
+    /// rectangle-shaped consumers like Crop use).
+    var selectionRect: CGRect? { selection?.bounds }
 
     var onSelectionChange: ((CGRect?) -> Void)?
+
+    /// Fired on a wand-tool click (image pixel coordinates).
+    var onWandClick: ((CGPoint) -> Void)?
+    /// Fired on a fill-tool click.
+    var onFillClick: ((CGPoint) -> Void)?
+    /// Fired when a gradient drag commits (start, end in image pixels).
+    var onGradientCommit: ((CGPoint, CGPoint) -> Void)?
+
+    // Lasso state: committed vertices of the in-progress polygon.
+    private var lassoPoints: [CGPoint] = []
+
+    // Gradient drag state.
+    private var gradientAnchor: CGPoint?
+    private var gradientCurrent: CGPoint?
 
     var hasActiveTextSession: Bool { activeTextView != nil }
 
@@ -243,8 +275,16 @@ final class ImageCanvasView: NSView {
             drawActiveLayerBounds(layerRect)
         }
 
-        if let selection = selectionRect {
+        if let selection = selection {
             drawSelection(selection)
+        }
+
+        if !lassoPoints.isEmpty {
+            drawLassoPreview()
+        }
+
+        if let anchor = gradientAnchor, let current = gradientCurrent {
+            drawGradientPreview(from: anchor, to: current)
         }
 
         if let textView = activeTextView {
@@ -263,23 +303,77 @@ final class ImageCanvasView: NSView {
         context.restoreGState()
     }
 
-    private func drawSelection(_ selection: CGRect) {
-        // Dim everything outside the selection.
-        let dimPath = NSBezierPath(rect: bounds)
-        dimPath.appendRect(selection)
-        dimPath.windingRule = .evenOdd
-        NSColor.black.withAlphaComponent(0.35).setFill()
-        dimPath.fill()
+    private func drawSelection(_ selection: CanvasSelection) {
+        // Dim everything outside the selected region.
+        if let outline = selection.path {
+            let dimPath = NSBezierPath(rect: bounds)
+            dimPath.append(outline)
+            dimPath.windingRule = .evenOdd
+            NSColor.black.withAlphaComponent(0.35).setFill()
+            dimPath.fill()
+        } else if let context = NSGraphicsContext.current?.cgContext {
+            // Mask (wand) selection: clip to the inverse coverage.
+            context.saveGState()
+            selection.clipOutside(context)
+            context.setFillColor(NSColor.black.withAlphaComponent(0.35).cgColor)
+            context.fill(bounds)
+            context.restoreGState()
+        }
 
         // 2px dashed coral marquee — one of the design's two sanctioned
         // coral elements. Scaled by 1/magnification to stay 2 screen px.
+        // Mask selections get the marquee on their bounding box.
+        let path = selection.path ?? NSBezierPath(rect: selection.bounds)
+        strokeMarquee(path)
+    }
+
+    private func strokeMarquee(_ path: NSBezierPath) {
         let scale = magnification
-        let path = NSBezierPath(rect: selection)
         path.lineWidth = 2 / scale
         let dashPattern: [CGFloat] = [5 / scale, 4 / scale]
         path.setLineDash(dashPattern, count: dashPattern.count, phase: 0)
         DS.marquee.setStroke()
         path.stroke()
+    }
+
+    /// In-progress lasso polygon: dashed polyline plus vertex dots.
+    private func drawLassoPreview() {
+        let scale = magnification
+        let path = NSBezierPath()
+        path.move(to: lassoPoints[0])
+        for point in lassoPoints.dropFirst() {
+            path.line(to: point)
+        }
+        strokeMarquee(path)
+        let radius = 3 / scale
+        DS.marquee.setFill()
+        for point in lassoPoints {
+            NSBezierPath(
+                ovalIn: CGRect(
+                    x: point.x - radius, y: point.y - radius,
+                    width: radius * 2, height: radius * 2)
+            ).fill()
+        }
+    }
+
+    /// Gradient drag rubber band: a line with endpoint dots.
+    private func drawGradientPreview(from a: CGPoint, to b: CGPoint) {
+        let scale = magnification
+        let line = NSBezierPath()
+        line.move(to: a)
+        line.line(to: b)
+        line.lineWidth = 2 / scale
+        DS.marquee.setStroke()
+        line.stroke()
+        let radius = 4 / scale
+        DS.marquee.setFill()
+        for point in [a, b] {
+            NSBezierPath(
+                ovalIn: CGRect(
+                    x: point.x - radius, y: point.y - radius,
+                    width: radius * 2, height: radius * 2)
+            ).fill()
+        }
     }
 
     /// Subtle dashed outline (selection stroke style, thinner) marking the
@@ -325,17 +419,44 @@ final class ImageCanvasView: NSView {
 
     // MARK: - Selection
 
-    func setSelection(_ rect: CGRect?) {
-        var clamped: CGRect? = nil
-        if let rect = rect {
-            let bounded = rect.integral.intersection(CGRect(origin: .zero, size: bounds.size))
-            if !bounded.isEmpty, bounded.width >= 1, bounded.height >= 1 {
-                clamped = bounded
-            }
-        }
-        selectionRect = clamped
+    func setSelection(_ new: CanvasSelection?) {
+        selection = new
         needsDisplay = true
-        onSelectionChange?(clamped)
+        onSelectionChange?(new?.bounds)
+    }
+
+    /// Rectangle convenience used by Select All and the marquee drag.
+    /// (Named distinctly: setSelection(nil) must stay unambiguous.)
+    func setSelectionRect(_ rect: CGRect?) {
+        guard let rect = rect else {
+            setSelection(nil)
+            return
+        }
+        setSelection(shapeSelection(.rect(rect.integral)))
+    }
+
+    /// Builds a CanvasSelection at the current image size.
+    private func shapeSelection(_ shape: CanvasSelection.Shape) -> CanvasSelection? {
+        CanvasSelection(
+            shape: shape, canvasWidth: Int(bounds.width), canvasHeight: Int(bounds.height))
+    }
+
+    /// Discards the lasso in progress (Escape, tool switch).
+    private func cancelLasso() {
+        guard !lassoPoints.isEmpty else { return }
+        lassoPoints = []
+        needsDisplay = true
+    }
+
+    /// Closes the lasso polygon into a selection (nil result deselects).
+    private func closeLasso() {
+        let points = lassoPoints
+        lassoPoints = []
+        if points.count >= 3 {
+            setSelection(shapeSelection(.polygon(points)))
+        } else {
+            needsDisplay = true
+        }
     }
 
     // MARK: - Mouse
@@ -350,8 +471,29 @@ final class ImageCanvasView: NSView {
         }
         let point = clamp(point: convert(event.locationInWindow, from: nil))
         switch tool {
-        case .select:
+        case .select, .ellipseSelect:
             dragAnchor = point
+        case .lasso:
+            if event.clickCount >= 2 {
+                closeLasso()
+            } else if let first = lassoPoints.first,
+                hypot(point.x - first.x, point.y - first.y) * magnification < 8,
+                lassoPoints.count >= 3
+            {
+                // Clicking back on the first vertex closes the polygon.
+                closeLasso()
+            } else {
+                lassoPoints.append(point)
+                needsDisplay = true
+            }
+        case .wand:
+            onWandClick?(point)
+        case .fill:
+            onFillClick?(point)
+        case .gradient:
+            gradientAnchor = point
+            gradientCurrent = point
+            needsDisplay = true
         case .move:
             // Unclamped: deltas stay honest when the drag leaves the canvas.
             moveDragOrigin = convert(event.locationInWindow, from: nil)
@@ -369,7 +511,17 @@ final class ImageCanvasView: NSView {
         switch tool {
         case .select:
             guard let anchor = dragAnchor else { return }
-            setSelection(rect(from: anchor, to: clamp(point: raw)))
+            setSelectionRect(rect(from: anchor, to: clamp(point: raw)))
+        case .ellipseSelect:
+            guard let anchor = dragAnchor else { return }
+            setSelection(
+                shapeSelection(.ellipse(rect(from: anchor, to: clamp(point: raw)))))
+        case .lasso, .wand, .fill:
+            break
+        case .gradient:
+            guard gradientAnchor != nil else { return }
+            gradientCurrent = clamp(point: raw)
+            needsDisplay = true
         case .move:
             guard let origin = moveDragOrigin else { return }
             NSCursor.closedHand.set()
@@ -386,7 +538,7 @@ final class ImageCanvasView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         switch tool {
-        case .select:
+        case .select, .ellipseSelect:
             guard let anchor = dragAnchor else { return }
             dragAnchor = nil
             let point = clamp(point: convert(event.locationInWindow, from: nil))
@@ -399,8 +551,22 @@ final class ImageCanvasView: NSView {
             if dragged.width * scale < 2 || dragged.height * scale < 2 {
                 // Treat a tiny drag as click-to-deselect.
                 setSelection(nil)
+            } else if tool == .ellipseSelect {
+                setSelection(shapeSelection(.ellipse(dragged)))
             } else {
-                setSelection(dragged)
+                setSelectionRect(dragged)
+            }
+        case .lasso, .wand, .fill:
+            break
+        case .gradient:
+            guard let anchor = gradientAnchor else { return }
+            let end = clamp(point: convert(event.locationInWindow, from: nil))
+            gradientAnchor = nil
+            gradientCurrent = nil
+            needsDisplay = true
+            // A tiny drag is a misclick, not a gradient.
+            if hypot(end.x - anchor.x, end.y - anchor.y) * magnification >= 4 {
+                onGradientCommit?(anchor, end)
             }
         case .move:
             guard moveDragOrigin != nil else { return }
@@ -438,9 +604,10 @@ final class ImageCanvasView: NSView {
             return
         }
         context.saveGState()
-        if let selection = selectionRect {
-            // Strokes and erases confine to the active selection.
-            context.clip(to: selection)
+        if let selection = selection {
+            // Strokes and erases confine to the active selection (exact
+            // shape, not just the bounding box).
+            selection.clip(context)
         }
         // For the eraser only alpha matters, so an opaque paint color works
         // for both tools.
@@ -665,7 +832,16 @@ final class ImageCanvasView: NSView {
                 cancelStroke()
                 return
             }
+            if !lassoPoints.isEmpty {
+                cancelLasso()
+                return
+            }
             setSelection(nil)
+            return
+        }
+        // Return closes an in-progress lasso.
+        if (event.keyCode == 36 || event.keyCode == 76), !lassoPoints.isEmpty {
+            closeLasso()
             return
         }
         // Arrow-key nudges for the move tool (Shift: 10px). Down is +y in the
@@ -704,6 +880,21 @@ final class ImageCanvasView: NSView {
             case "t":
                 onToolKey?(.text)
                 return
+            case "o":
+                onToolKey?(.ellipseSelect)
+                return
+            case "l":
+                onToolKey?(.lasso)
+                return
+            case "w":
+                onToolKey?(.wand)
+                return
+            case "k":
+                onToolKey?(.fill)
+                return
+            case "g":
+                onToolKey?(.gradient)
+                return
             case "[" where tool == .brush || tool == .eraser:
                 onBrushSizeKey?(min(max(brushSize * 0.8, 1), 200))
                 return
@@ -719,7 +910,7 @@ final class ImageCanvasView: NSView {
 
     override func resetCursorRects() {
         switch tool {
-        case .select, .brush, .eraser:
+        case .select, .ellipseSelect, .lasso, .wand, .fill, .gradient, .brush, .eraser:
             addCursorRect(bounds, cursor: .crosshair)
         case .move:
             addCursorRect(bounds, cursor: moveDragOrigin == nil ? .openHand : .closedHand)

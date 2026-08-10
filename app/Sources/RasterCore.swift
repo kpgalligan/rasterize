@@ -414,6 +414,61 @@ final class RasterDocument {
         return wrap(rz_doc_painting_layer(ptr, idx, data, UInt32(w), UInt32(h), mode, Float(alpha)))
     }
 
+    // MARK: - Selection regions and region painting
+
+    /// Similar-color mask from the flattened composite: canvas-sized
+    /// 0/255 bytes (row 0 top), or nil for an out-of-canvas seed.
+    func magicWand(x: Int, y: Int, tolerance: Int, contiguous: Bool) -> [UInt8]? {
+        guard x >= 0, y >= 0, x < width, y < height else { return nil }
+        var mask = [UInt8](repeating: 0, count: width * height)
+        let ok = mask.withUnsafeMutableBufferPointer { buffer in
+            rz_doc_magic_wand(
+                ptr, UInt32(x), UInt32(y), UInt8(tolerance.clamped(0, 255)),
+                contiguous, buffer.baseAddress)
+        }
+        return ok ? mask : nil
+    }
+
+    /// Bucket fill on layer `idx` from canvas point (x, y). `mask` is a
+    /// canvas-sized selection coverage buffer or nil.
+    func bucketFilled(
+        _ idx: Int, x: Int, y: Int, tolerance: Int, rgba: [UInt8], contiguous: Bool,
+        mask: [UInt8]?
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), rgba.count == 4 else { return nil }
+        return withMask(mask) { maskPtr in
+            rgba.withUnsafeBufferPointer { color in
+                wrap(
+                    rz_doc_bucket_fill(
+                        ptr, idx, Int32(x), Int32(y), UInt8(tolerance.clamped(0, 255)),
+                        color.baseAddress, contiguous, maskPtr))
+            }
+        }
+    }
+
+    /// Two-color gradient over layer `idx` (scaled by `mask` if given).
+    func gradiented(
+        _ idx: Int, from p0: CGPoint, to p1: CGPoint, start: [UInt8], end: [UInt8],
+        kind: RzGradientKind, mask: [UInt8]?
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), start.count == 4, end.count == 4 else { return nil }
+        return withMask(mask) { maskPtr in
+            start.withUnsafeBufferPointer { s in
+                end.withUnsafeBufferPointer { e in
+                    wrap(
+                        rz_doc_gradient(
+                            ptr, idx, Float(p0.x), Float(p0.y), Float(p1.x), Float(p1.y),
+                            s.baseAddress, e.baseAddress, kind, maskPtr))
+                }
+            }
+        }
+    }
+
+    private func withMask<T>(_ mask: [UInt8]?, _ body: (UnsafePointer<UInt8>?) -> T) -> T {
+        guard let mask = mask, mask.count == width * height else { return body(nil) }
+        return mask.withUnsafeBufferPointer { body($0.baseAddress) }
+    }
+
     // MARK: - Whole-document geometry
 
     func rotated90() -> RasterDocument? { wrap(rz_doc_rotate90(ptr)) }
@@ -511,5 +566,11 @@ enum ExportFormat: CaseIterable {
         guard let type = UTType(typeName) else { return nil }
         if let exact = from(utType: type) { return exact }
         return allCases.first { type.conforms(to: $0.utType) }
+    }
+}
+
+extension Int {
+    func clamped(_ low: Int, _ high: Int) -> Int {
+        Swift.min(Swift.max(self, low), high)
     }
 }

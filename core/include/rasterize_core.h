@@ -336,6 +336,44 @@ RzImage *rz_image_edge_detect(const RzImage *img);
 /* Emboss: 3x3 directional relief kernel on luma around mid-gray, opaque. */
 RzImage *rz_image_emboss(const RzImage *img);
 
+/* ---- Selection regions and region painting ------------------------------
+ *
+ * Selection masks are canvas-sized u8 coverage buffers (width*height
+ * bytes, row 0 top): 0 = outside, 255 = fully inside, intermediate
+ * values scale paint coverage at anti-aliased edges. */
+
+/* Similar-color selection from the flattened composite ("select what you
+ * see"): writes a canvas-sized 0/255 mask into mask_out. `tolerance` is
+ * the maximum per-channel RGBA difference; `contiguous` restricts the
+ * selection to the connected region around the seed. false on NULL or
+ * out-of-canvas input. */
+bool rz_doc_magic_wand(const RzDocument *doc, uint32_t x, uint32_t y,
+                       uint8_t tolerance, bool contiguous, uint8_t *mask_out);
+
+/* Bucket fill on layer idx: grows a similar-color region over the
+ * layer's OWN pixels from canvas point (x, y) and paints rgba (straight,
+ * 4 bytes) source-over it. `mask` is a selection coverage buffer or NULL
+ * for none; a seed outside the canvas, the layer, or the mask is NULL. */
+RzDocument *rz_doc_bucket_fill(const RzDocument *doc, size_t idx, int32_t x,
+                               int32_t y, uint8_t tolerance,
+                               const uint8_t *rgba, bool contiguous,
+                               const uint8_t *mask);
+
+typedef enum {
+  RZ_GRADIENT_LINEAR = 0, /* along p0->p1, clamped past the ends */
+  RZ_GRADIENT_RADIAL = 1, /* from p0, radius |p1-p0| */
+} RzGradientKind;
+
+/* Paints a two-color gradient source-over layer idx (the whole layer,
+ * scaled by `mask` where given). Colors are straight RGBA (4 bytes
+ * each), interpolated component-wise. NULL if p0 == p1 or coordinates
+ * are not finite. */
+RzDocument *rz_doc_gradient(const RzDocument *doc, size_t idx, float x0,
+                            float y0, float x1, float y1,
+                            const uint8_t *start_rgba,
+                            const uint8_t *end_rgba, RzGradientKind kind,
+                            const uint8_t *mask);
+
 /* ---- Embedded agent (MCP) server ----------------------------------------
  *
  * A minimal MCP server (streamable-HTTP transport, tools only) hosted in

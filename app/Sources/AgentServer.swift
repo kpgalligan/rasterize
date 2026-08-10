@@ -106,6 +106,13 @@ final class AgentServer {
         case "brush_stroke": return try paintStroke(a, erase: false)
         case "eraser_stroke": return try paintStroke(a, erase: true)
         case "add_text": return try addText(a)
+        case "select_rect": return try selectShape(a) { rect in .rect(rect) }
+        case "select_ellipse": return try selectShape(a) { rect in .ellipse(rect) }
+        case "select_polygon": return try selectPolygon(a)
+        case "select_magic_wand": return try selectMagicWand(a)
+        case "deselect": return try deselect(a)
+        case "fill": return try fill(a)
+        case "gradient": return try gradient(a)
         case "rotate": return try rotate(a)
         case "flip": return try flip(a)
         case "crop": return try crop(a)
@@ -217,6 +224,21 @@ final class AgentServer {
         }
         var result = summary(document)
         result["layers"] = layers
+        if let selection = editor(document)?.agentSelection {
+            let b = selection.bounds
+            let kind: String
+            switch selection.shape {
+            case .rect: kind = "rect"
+            case .ellipse: kind = "ellipse"
+            case .polygon: kind = "polygon"
+            case .mask: kind = "magic-wand mask"
+            }
+            result["selection"] = [
+                "kind": kind,
+                "x": Int(b.minX), "y": Int(b.minY),
+                "width": Int(b.width), "height": Int(b.height),
+            ]
+        }
         result["note"] = "index 0 is the bottom layer; offsets are from the canvas top-left, y down"
         return try jsonResult(result)
     }
@@ -497,6 +519,11 @@ final class AgentServer {
                 else { return nil }
                 context.translateBy(x: 0, y: CGFloat(height))
                 context.scaleBy(x: 1, y: -1)
+                // Strokes and text confine to the active selection, exactly
+                // like the interactive tools.
+                if let selection = editor(document)?.agentSelection {
+                    selection.clip(context)
+                }
                 draw(context)
                 return current.paintingLayer(
                     layer, overlay: base, w: width, h: height, mode: mode, alpha: alpha)
@@ -629,6 +656,148 @@ final class AgentServer {
                 "height": Int(measured.height.rounded(.up)),
             ],
         ])
+    }
+
+    // MARK: - Selection, fill, gradient
+
+    private func editor(_ document: ImageDocument) -> EditorViewController? {
+        document.windowControllers
+            .compactMap { $0.contentViewController as? EditorViewController }
+            .first
+    }
+
+    /// The document's live selection mask (nil when nothing is selected
+    /// or the document has no editor window).
+    private func selectionMask(_ document: ImageDocument) -> [UInt8]? {
+        editor(document)?.agentSelection?.maskBytes()
+    }
+
+    private func applySelection(
+        _ document: ImageDocument, _ shape: CanvasSelection.Shape
+    ) throws -> String {
+        guard let editorVC = editor(document) else {
+            throw ToolError(message: "The document has no editor window to hold a selection.")
+        }
+        guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
+        guard
+            let selection = CanvasSelection(
+                shape: shape, canvasWidth: doc.width, canvasHeight: doc.height)
+        else {
+            throw ToolError(message: "The selection would be empty.")
+        }
+        editorVC.agentSetSelection(selection)
+        let b = selection.bounds
+        return try jsonResult([
+            "ok": true,
+            "bounds": [
+                "x": Int(b.minX), "y": Int(b.minY),
+                "width": Int(b.width), "height": Int(b.height),
+            ],
+        ])
+    }
+
+    private func selectShape(
+        _ a: [String: Any], _ make: (CGRect) -> CanvasSelection.Shape
+    ) throws -> String {
+        let document = try target(a)
+        guard let x = intArg(a, "x"), let y = intArg(a, "y"),
+            let w = intArg(a, "width"), let h = intArg(a, "height"), w > 0, h > 0
+        else {
+            throw ToolError(message: "Requires x, y, width, height (width/height > 0)")
+        }
+        return try applySelection(document, make(CGRect(x: x, y: y, width: w, height: h)))
+    }
+
+    private func selectPolygon(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        let points = try parsePoints(a)
+        guard points.count >= 3 else {
+            throw ToolError(message: "A polygon selection needs at least 3 points")
+        }
+        return try applySelection(document, .polygon(points))
+    }
+
+    private func selectMagicWand(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        guard let doc = document.doc, let x = intArg(a, "x"), let y = intArg(a, "y") else {
+            throw ToolError(message: "select_magic_wand requires x and y")
+        }
+        let tolerance = intArg(a, "tolerance") ?? 32
+        let contiguous = boolArg(a, "contiguous") ?? true
+        guard
+            let mask = doc.magicWand(
+                x: x, y: y, tolerance: tolerance, contiguous: contiguous)
+        else {
+            throw ToolError(message: "The seed point is outside the canvas")
+        }
+        return try applySelection(document, .mask(mask))
+    }
+
+    private func deselect(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        editor(document)?.agentSetSelection(nil)
+        return try jsonResult(["ok": true])
+    }
+
+    private func fill(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        let index = try paintLayerIndex(a, document)
+        guard let x = intArg(a, "x"), let y = intArg(a, "y") else {
+            throw ToolError(message: "fill requires x and y (the seed point)")
+        }
+        let rgba = try colorRGBA(parseColor(a, "color", fallback: .black))
+        let tolerance = intArg(a, "tolerance") ?? 32
+        let contiguous = boolArg(a, "contiguous") ?? true
+        let mask = selectionMask(document)
+        try performEdit(document, "Fill") { doc in
+            doc.bucketFilled(
+                index, x: x, y: y, tolerance: tolerance, rgba: rgba,
+                contiguous: contiguous, mask: mask)
+        }
+        return try jsonResult(["ok": true, "layer": index])
+    }
+
+    private func gradient(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        let index = try paintLayerIndex(a, document)
+        guard let x0 = doubleArg(a, "x0"), let y0 = doubleArg(a, "y0"),
+            let x1 = doubleArg(a, "x1"), let y1 = doubleArg(a, "y1")
+        else {
+            throw ToolError(message: "gradient requires x0, y0, x1, y1")
+        }
+        let start = try colorRGBA(parseColor(a, "start_color", fallback: .black))
+        let end: [UInt8]
+        if stringArg(a, "end_color") != nil {
+            end = try colorRGBA(parseColor(a, "end_color", fallback: .clear))
+        } else {
+            end = [0, 0, 0, 0] // fade to transparent
+        }
+        let kind: RzGradientKind
+        switch stringArg(a, "shape") ?? "linear" {
+        case "linear": kind = RZ_GRADIENT_LINEAR
+        case "radial": kind = RZ_GRADIENT_RADIAL
+        default: throw ToolError(message: "shape must be \"linear\" or \"radial\"")
+        }
+        let mask = selectionMask(document)
+        try performEdit(document, "Gradient") { doc in
+            doc.gradiented(
+                index, from: CGPoint(x: x0, y: y0), to: CGPoint(x: x1, y: y1),
+                start: start, end: end, kind: kind, mask: mask)
+        }
+        return try jsonResult(["ok": true, "layer": index])
+    }
+
+    /// sRGB straight-alpha bytes of a parsed color.
+    private func colorRGBA(_ color: NSColor) throws -> [UInt8] {
+        guard let c = color.usingColorSpace(.sRGB) else {
+            throw ToolError(message: "Could not convert the color")
+        }
+        return [
+            UInt8((c.redComponent * 255).rounded()),
+            UInt8((c.greenComponent * 255).rounded()),
+            UInt8((c.blueComponent * 255).rounded()),
+            UInt8((c.alphaComponent * 255).rounded()),
+        ]
     }
 
     private func rotate(_ a: [String: Any]) throws -> String {
@@ -990,6 +1159,90 @@ final class AgentServer {
                     "layer": index,
                     "document_id": docID,
                 ], required: ["text", "x", "y"]),
+            tool(
+                "select_rect",
+                "Selects a rectangle (canvas coordinates). Selections confine "
+                    + "brush/eraser strokes, fill, and gradient, and define Crop.",
+                [
+                    "x": ["type": "integer"], "y": ["type": "integer"],
+                    "width": ["type": "integer"], "height": ["type": "integer"],
+                    "document_id": docID,
+                ], required: ["x", "y", "width", "height"]),
+            tool(
+                "select_ellipse",
+                "Selects an ellipse inscribed in the given rectangle.",
+                [
+                    "x": ["type": "integer"], "y": ["type": "integer"],
+                    "width": ["type": "integer"], "height": ["type": "integer"],
+                    "document_id": docID,
+                ], required: ["x", "y", "width", "height"]),
+            tool(
+                "select_polygon",
+                "Selects a polygon through the given vertices (at least 3, "
+                    + "closed automatically).",
+                [
+                    "points": [
+                        "type": "array",
+                        "description": "[[x, y], …] polygon vertices in canvas px.",
+                        "items": [
+                            "type": "array", "items": ["type": "number"],
+                            "minItems": 2, "maxItems": 2,
+                        ],
+                        "minItems": 3, "maxItems": 10_000,
+                    ],
+                    "document_id": docID,
+                ], required: ["points"]),
+            tool(
+                "select_magic_wand",
+                "Selects the region of similar color around a seed point, sampled "
+                    + "from the flattened composite (what you see in a render). "
+                    + "tolerance is the max per-channel difference (0-255, default 32); "
+                    + "contiguous (default true) limits to the connected region.",
+                [
+                    "x": ["type": "integer"], "y": ["type": "integer"],
+                    "tolerance": ["type": "integer", "minimum": 0, "maximum": 255],
+                    "contiguous": ["type": "boolean"],
+                    "document_id": docID,
+                ], required: ["x", "y"]),
+            tool(
+                "deselect", "Clears the selection.", ["document_id": docID]),
+            tool(
+                "fill",
+                "Bucket fill: flood-fills the similar-color region around the seed "
+                    + "point on a layer's own pixels with a color. Respects the active "
+                    + "selection. tolerance as in select_magic_wand.",
+                [
+                    "x": ["type": "integer"], "y": ["type": "integer"],
+                    "color": [
+                        "type": "string",
+                        "description": "Hex color, #RRGGBB or #RRGGBBAA (default #000000).",
+                    ],
+                    "tolerance": ["type": "integer", "minimum": 0, "maximum": 255],
+                    "contiguous": ["type": "boolean"],
+                    "layer": index,
+                    "document_id": docID,
+                ], required: ["x", "y"]),
+            tool(
+                "gradient",
+                "Paints a two-color gradient over a layer (the whole layer, or the "
+                    + "active selection if one exists). Linear runs along "
+                    + "(x0,y0)->(x1,y1); radial spreads from (x0,y0) with radius to "
+                    + "(x1,y1). end_color defaults to transparent (a fade-out).",
+                [
+                    "x0": ["type": "number"], "y0": ["type": "number"],
+                    "x1": ["type": "number"], "y1": ["type": "number"],
+                    "start_color": [
+                        "type": "string",
+                        "description": "Hex color, #RRGGBB or #RRGGBBAA.",
+                    ],
+                    "end_color": [
+                        "type": "string",
+                        "description": "Hex color; omit to fade to transparent.",
+                    ],
+                    "shape": ["type": "string", "enum": ["linear", "radial"]],
+                    "layer": index,
+                    "document_id": docID,
+                ], required: ["x0", "y0", "x1", "y1", "start_color"]),
             tool(
                 "rotate", "Rotates the whole document clockwise.",
                 [

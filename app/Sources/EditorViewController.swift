@@ -4,9 +4,14 @@ import AppKit
 /// segment indices.
 enum EditorTool: Int {
     case select = 0
+    case ellipseSelect
+    case lasso
+    case wand
     case move
     case brush
     case eraser
+    case fill
+    case gradient
     case text
 }
 
@@ -43,6 +48,18 @@ final class EditorViewController: NSViewController {
     private let fontLabel = NSTextField(labelWithString: "Font")
     private let fontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let fontSizeField = NSTextField(string: "48")
+    private let toleranceLabel = NSTextField(labelWithString: "Tolerance")
+    private let toleranceSlider = NSSlider(
+        value: 32, minValue: 0, maxValue: 255, target: nil, action: nil)
+    private let toleranceValueLabel = NSTextField(labelWithString: "32")
+    private let contiguousCheck = NSButton(
+        checkboxWithTitle: "Contiguous", target: nil, action: nil)
+    private let gradientShapePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let gradientEndLabel = NSTextField(labelWithString: "End")
+    private let gradientEndWell = NSColorWell()
+
+    /// Magic wand / bucket fill color tolerance (max per-channel diff).
+    private var tolerance = 32
     private var scrollTopToRoot: NSLayoutConstraint!
     private var scrollTopToOptions: NSLayoutConstraint!
 
@@ -175,12 +192,20 @@ final class EditorViewController: NSViewController {
         canvas.onToolKey = { [weak self] tool in
             switch tool {
             case .select: self?.selectTool(.select)
+            case .ellipseSelect: self?.selectTool(.ellipseSelect)
+            case .lasso: self?.selectTool(.lasso)
+            case .wand: self?.selectTool(.wand)
             case .move: self?.selectTool(.move)
             case .brush: self?.selectTool(.brush)
             case .eraser: self?.selectTool(.eraser)
+            case .fill: self?.selectTool(.fill)
+            case .gradient: self?.selectTool(.gradient)
             case .text: self?.selectTool(.text)
             }
         }
+        canvas.onWandClick = { [weak self] point in self?.wandClicked(point) }
+        canvas.onFillClick = { [weak self] point in self?.fillClicked(point) }
+        canvas.onGradientCommit = { [weak self] a, b in self?.gradientCommitted(a, b) }
         canvas.onBrushSizeKey = { [weak self] newSize in
             guard let self = self else { return }
             self.brushSize = newSize
@@ -230,12 +255,22 @@ final class EditorViewController: NSViewController {
         toolPill = ToolPillControl(segments: [
             .init(symbol: "cursorarrow", fallback: "S", label: "Select",
                   action: #selector(selectSelectTool(_:))),
+            .init(symbol: "circle.dashed", fallback: "O", label: "Ellipse",
+                  action: #selector(selectEllipseTool(_:))),
+            .init(symbol: "lasso", fallback: "L", label: "Lasso",
+                  action: #selector(selectLassoTool(_:))),
+            .init(symbol: "wand.and.stars", fallback: "W", label: "Wand",
+                  action: #selector(selectWandTool(_:))),
             .init(symbol: "arrow.up.and.down.and.arrow.left.and.right", fallback: "M",
                   label: "Move", action: #selector(selectMoveTool(_:))),
             .init(symbol: "paintbrush.pointed", fallback: "B", label: "Brush",
                   action: #selector(selectBrushTool(_:))),
             .init(symbol: "eraser", fallback: "E", label: "Eraser",
                   action: #selector(selectEraserTool(_:))),
+            .init(symbol: "drop.fill", fallback: "K", label: "Fill",
+                  action: #selector(selectFillTool(_:))),
+            .init(symbol: "circle.lefthalf.filled", fallback: "G", label: "Grad",
+                  action: #selector(selectGradientTool(_:))),
             .init(symbol: "textformat", fallback: "T", label: "Text",
                   action: #selector(selectTextTool(_:))),
         ])
@@ -468,10 +503,37 @@ final class EditorViewController: NSViewController {
         fontSizeField.action = #selector(fontSizeChanged(_:))
         fontSizeField.widthAnchor.constraint(equalToConstant: 44).isActive = true
 
+        toleranceSlider.isContinuous = true
+        toleranceSlider.controlSize = .small
+        toleranceSlider.target = self
+        toleranceSlider.action = #selector(toleranceChanged(_:))
+        toleranceSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
+
+        toleranceValueLabel.font = NSFont.monospacedDigitSystemFont(
+            ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        toleranceValueLabel.alignment = .right
+        toleranceValueLabel.widthAnchor.constraint(equalToConstant: 32).isActive = true
+
+        contiguousCheck.state = .on
+        contiguousCheck.controlSize = .small
+        contiguousCheck.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+
+        gradientShapePopup.controlSize = .small
+        gradientShapePopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        gradientShapePopup.addItems(withTitles: ["Linear", "Radial"])
+        gradientShapePopup.widthAnchor.constraint(equalToConstant: 90).isActive = true
+
+        // Default end color: fade to transparent.
+        gradientEndWell.color = .clear
+        gradientEndWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        gradientEndWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
+
         let controls: [NSView] = [
             sizeLabel, sizeSlider, sizeField,
             opacityLabel, opacitySlider, opacityValueLabel,
             colorWell,
+            toleranceLabel, toleranceSlider, toleranceValueLabel, contiguousCheck,
+            gradientShapePopup, gradientEndLabel, gradientEndWell,
             fontLabel, fontPopup, fontSizeField,
         ]
         for control in controls {
@@ -525,9 +587,14 @@ final class EditorViewController: NSViewController {
         currentTool = tool
         switch tool {
         case .select: canvas.tool = .select
+        case .ellipseSelect: canvas.tool = .ellipseSelect
+        case .lasso: canvas.tool = .lasso
+        case .wand: canvas.tool = .wand
         case .move: canvas.tool = .move
         case .brush: canvas.tool = .brush
         case .eraser: canvas.tool = .eraser
+        case .fill: canvas.tool = .fill
+        case .gradient: canvas.tool = .gradient
         case .text: canvas.tool = .text
         }
         updateOptionsBar()
@@ -541,30 +608,116 @@ final class EditorViewController: NSViewController {
     }
 
     @objc func selectSelectTool(_ sender: Any?) { selectTool(.select) }
+    @objc func selectEllipseTool(_ sender: Any?) { selectTool(.ellipseSelect) }
+    @objc func selectLassoTool(_ sender: Any?) { selectTool(.lasso) }
+    @objc func selectWandTool(_ sender: Any?) { selectTool(.wand) }
     @objc func selectMoveTool(_ sender: Any?) { selectTool(.move) }
     @objc func selectBrushTool(_ sender: Any?) { selectTool(.brush) }
     @objc func selectEraserTool(_ sender: Any?) { selectTool(.eraser) }
+    @objc func selectFillTool(_ sender: Any?) { selectTool(.fill) }
+    @objc func selectGradientTool(_ sender: Any?) { selectTool(.gradient) }
     @objc func selectTextTool(_ sender: Any?) { selectTool(.text) }
 
     private func updateOptionsBar() {
         let tool = currentTool
         let paintTool = tool == .brush || tool == .eraser
+        let toleranceTool = tool == .wand || tool == .fill
         for control in [sizeLabel, sizeSlider, sizeField] as [NSView] {
             control.isHidden = !paintTool
         }
         for control in [opacityLabel, opacitySlider, opacityValueLabel] as [NSView] {
             control.isHidden = !paintTool
         }
-        colorWell.isHidden = !(tool == .brush || tool == .text)
+        colorWell.isHidden = !(tool == .brush || tool == .text || tool == .fill
+            || tool == .gradient)
         fontLabel.isHidden = tool != .text
         fontPopup.isHidden = tool != .text
         fontSizeField.isHidden = tool != .text
+        for control in [toleranceLabel, toleranceSlider, toleranceValueLabel] as [NSView] {
+            control.isHidden = !toleranceTool
+        }
+        contiguousCheck.isHidden = !toleranceTool
+        gradientShapePopup.isHidden = tool != .gradient
+        gradientEndLabel.isHidden = tool != .gradient
+        gradientEndWell.isHidden = tool != .gradient
 
-        let barHidden = tool == .select || tool == .move
+        let barHidden =
+            tool == .select || tool == .ellipseSelect || tool == .lasso || tool == .move
         optionsBar.isHidden = barHidden
         scrollTopToRoot.isActive = false
         scrollTopToOptions.isActive = false
         (barHidden ? scrollTopToRoot : scrollTopToOptions).isActive = true
+    }
+
+    // MARK: - Agent access to the selection
+
+    /// The canvas selection, for the agent's fill/gradient/crop tools.
+    var agentSelection: CanvasSelection? { canvas.selection }
+
+    func agentSetSelection(_ selection: CanvasSelection?) {
+        canvas.setSelection(selection)
+    }
+
+    // MARK: - Wand, fill, gradient actions
+
+    @objc private func toleranceChanged(_ sender: Any?) {
+        tolerance = Int(toleranceSlider.doubleValue.rounded())
+        toleranceValueLabel.stringValue = "\(tolerance)"
+    }
+
+    private var contiguous: Bool { contiguousCheck.state == .on }
+
+    /// sRGB bytes of a color (straight alpha).
+    private func colorBytes(_ color: NSColor) -> [UInt8] {
+        let c = color.usingColorSpace(.sRGB) ?? .black
+        return [
+            UInt8((c.redComponent * 255).rounded()),
+            UInt8((c.greenComponent * 255).rounded()),
+            UInt8((c.blueComponent * 255).rounded()),
+            UInt8((c.alphaComponent * 255).rounded()),
+        ]
+    }
+
+    private func wandClicked(_ point: CGPoint) {
+        guard let doc = document?.doc,
+            let mask = doc.magicWand(
+                x: Int(point.x), y: Int(point.y), tolerance: tolerance,
+                contiguous: contiguous),
+            let selection = CanvasSelection(
+                shape: .mask(mask), canvasWidth: doc.width, canvasHeight: doc.height)
+        else {
+            NSSound.beep()
+            return
+        }
+        canvas.setSelection(selection)
+    }
+
+    private func fillClicked(_ point: CGPoint) {
+        guard let document = document else { return }
+        let idx = document.activeLayerIndex
+        let rgba = colorBytes(paintColor)
+        let mask = canvas.selection?.maskBytes()
+        let tolerance = tolerance
+        let contiguous = contiguous
+        document.applyEdit("Fill") { doc in
+            doc.bucketFilled(
+                idx, x: Int(point.x), y: Int(point.y), tolerance: tolerance,
+                rgba: rgba, contiguous: contiguous, mask: mask)
+        }
+    }
+
+    private func gradientCommitted(_ a: CGPoint, _ b: CGPoint) {
+        guard let document = document else { return }
+        let idx = document.activeLayerIndex
+        let start = colorBytes(paintColor)
+        let end = colorBytes(gradientEndWell.color)
+        let kind: RzGradientKind =
+            gradientShapePopup.indexOfSelectedItem == 1
+            ? RZ_GRADIENT_RADIAL : RZ_GRADIENT_LINEAR
+        let mask = canvas.selection?.maskBytes()
+        document.applyEdit("Gradient") { doc in
+            doc.gradiented(idx, from: a, to: b, start: start, end: end, kind: kind, mask: mask)
+        }
     }
 
     private func currentFont() -> NSFont {
@@ -674,10 +827,10 @@ final class EditorViewController: NSViewController {
         canvas.previewImage = nil
         canvas.setFrameSize(newSize)
         if dimensionsChanged {
+            // The canvas.image setter also drops selections when the size
+            // changes; same-size doc swaps keep the selection as-is.
             canvas.setSelection(nil)
             zoomToFit()
-        } else if let selection = canvas.selectionRect {
-            canvas.setSelection(selection) // re-clamp
         }
         canvas.needsDisplay = true
         updateStatus()
@@ -717,9 +870,14 @@ final class EditorViewController: NSViewController {
     private func toolDisplayName(_ tool: EditorTool) -> String {
         switch tool {
         case .select: return "Select"
+        case .ellipseSelect: return "Ellipse Select"
+        case .lasso: return "Lasso"
+        case .wand: return "Magic Wand"
         case .move: return "Move"
         case .brush: return "Brush"
         case .eraser: return "Eraser"
+        case .fill: return "Fill"
+        case .gradient: return "Gradient"
         case .text: return "Text"
         }
     }
@@ -1030,7 +1188,7 @@ final class EditorViewController: NSViewController {
     // MARK: - Selection and clipboard
 
     override func selectAll(_ sender: Any?) {
-        canvas.setSelection(CGRect(origin: .zero, size: canvas.bounds.size))
+        canvas.setSelectionRect(CGRect(origin: .zero, size: canvas.bounds.size))
     }
 
     @objc func deselect(_ sender: Any?) {
@@ -1097,9 +1255,14 @@ extension EditorViewController {
 extension EditorViewController: NSUserInterfaceValidations {
     private static let toolActions: [Selector: EditorTool] = [
         #selector(selectSelectTool(_:)): .select,
+        #selector(selectEllipseTool(_:)): .ellipseSelect,
+        #selector(selectLassoTool(_:)): .lasso,
+        #selector(selectWandTool(_:)): .wand,
         #selector(selectMoveTool(_:)): .move,
         #selector(selectBrushTool(_:)): .brush,
         #selector(selectEraserTool(_:)): .eraser,
+        #selector(selectFillTool(_:)): .fill,
+        #selector(selectGradientTool(_:)): .gradient,
         #selector(selectTextTool(_:)): .text,
     ]
 

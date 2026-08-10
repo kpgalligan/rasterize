@@ -3,6 +3,8 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = buildMainMenu()
+        // Gradient end colors (and brush colors) may carry alpha.
+        NSColorPanel.shared.showsAlpha = true
     }
 
     // AppKit calls this only when the app is launched or reactivated with no
@@ -251,9 +253,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // from text editing.
         let menu = NSMenu(title: "Tools")
         menu.addItem(item("Select Tool", #selector(EditorViewController.selectSelectTool(_:))))
+        menu.addItem(
+            item("Ellipse Select Tool", #selector(EditorViewController.selectEllipseTool(_:))))
+        menu.addItem(item("Lasso Tool", #selector(EditorViewController.selectLassoTool(_:))))
+        menu.addItem(item("Magic Wand Tool", #selector(EditorViewController.selectWandTool(_:))))
         menu.addItem(item("Move Tool", #selector(EditorViewController.selectMoveTool(_:))))
         menu.addItem(item("Brush Tool", #selector(EditorViewController.selectBrushTool(_:))))
         menu.addItem(item("Eraser Tool", #selector(EditorViewController.selectEraserTool(_:))))
+        menu.addItem(item("Fill Tool", #selector(EditorViewController.selectFillTool(_:))))
+        menu.addItem(
+            item("Gradient Tool", #selector(EditorViewController.selectGradientTool(_:))))
         menu.addItem(item("Text Tool", #selector(EditorViewController.selectTextTool(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Allow Agent Connections", #selector(toggleAgentServer(_:))))

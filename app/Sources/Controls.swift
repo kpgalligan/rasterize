@@ -256,7 +256,7 @@ final class ToolPillControl: NSView {
     private(set) var selectedIndex = 0
     private var hoveredIndex: Int?
 
-    private let segmentWidth: CGFloat = 56
+    private let segmentWidth: CGFloat = 46
     private let pillHeight: CGFloat = 46
 
     init(segments: [Segment]) {
