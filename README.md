@@ -10,7 +10,8 @@ decoding, encoding, and manipulation.
   Dissolve, Vivid/Linear/Pin Light, Hard Mix, Divide, Darker/Lighter Color,
   and the non-separable Hue/Saturation/Color/Luminosity — grouped in the
   panel exactly like Photoshop's menu;
-  layers panel with thumbnails, inline rename, drag-reorder, and
+  layers panel with thumbnails, inline rename, drag-reorder, a right-click
+  row menu (Rename, Delete Layer), and
   new/delete/duplicate/merge-down/flatten; Move tool (V) with arrow-key
   nudges; Paste as New Layer; PSD files import with their real layers; the
   native `.rz` format saves the full layer stack — masks, clipping flags,
@@ -34,8 +35,8 @@ decoding, encoding, and manipulation.
   and Red/Green/Blue individually), Hue Rotate, Posterize, Threshold,
   Invert, Grayscale, and Sepia. The parameterized ops open live-preview
   dialogs and re-open any time via Layer > Adjustment Options… or a
-  double-click on the layer's thumbnail (the panel badges adjustment layers
-  "◐"). Every adjustment layer is created with a layer mask gating where
+  double-click on the layer's row in the panel (which badges adjustment
+  layers "◐"). Every adjustment layer is created with a layer mask gating where
   the adjustment applies — built from the selection when one exists, else
   revealing all — and brush and eraser strokes on the layer paint that mask
   automatically. Because it is just a layer, opacity, blend mode and
@@ -124,7 +125,9 @@ decoding, encoding, and manipulation.
   remembers the string, font, size, color and alignment it was rendered
   from — click it again with the text tool to reopen the editor pre-filled,
   with its font/size/color/alignment restored into the options bar, and the
-  layers panel badges it with a "T". A destructive edit (filter, adjustment, fill, gradient,
+  layers panel badges it with a "T". Double-clicking the layer's row in the
+  panel reopens it the same way from anywhere: it switches to the text tool
+  and selects the whole string, so typing replaces it. A destructive edit (filter, adjustment, fill, gradient,
   brush, eraser) asks "Rasterize text layer?" first and drops the
   description on confirm, keeping the pixels. The native `.rz` format stores
   the description alongside the pixels, so text stays editable across

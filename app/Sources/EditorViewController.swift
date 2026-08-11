@@ -433,6 +433,9 @@ final class EditorViewController: NSViewController {
         layersPanel.onAdjustmentEdit = { [weak self] idx in
             self?.editAdjustmentLayer(idx)
         }
+        layersPanel.onTextEdit = { [weak self] idx in
+            self?.editTextLayer(idx)
+        }
         layersPanel.onShowAssistant = { [weak self] in
             self?.panelTab = 1
             self?.updatePanelVisibility()
@@ -1175,11 +1178,45 @@ final class EditorViewController: NSViewController {
     /// A text-tool click: re-open the topmost VISIBLE text layer under the
     /// point, or start a new text entry there.
     private func textClicked(_ point: CGPoint) {
+        guard let doc = document?.doc, let idx = topmostTextLayer(at: point, in: doc) else {
+            canvas.beginTextSession(at: point)
+            return
+        }
+        // A click puts the caret where it landed, so nothing is preselected.
+        openTextSession(layer: idx, selectAll: false)
+    }
+
+    /// Double-clicking a TEXT layer in the layers panel: switch to the text
+    /// tool and reopen the layer's description with the whole string
+    /// selected, so typing replaces it and the options bar exposes the font,
+    /// size, color and alignment. The layer needn't be under the cursor or
+    /// even visible — the panel already said which one.
+    func editTextLayer(_ idx: Int) {
+        guard let doc = document?.doc, doc.textPayload(idx) != nil else {
+            NSSound.beep()
+            return
+        }
+        // A click that ends an open session only ends it — the rule the
+        // canvas follows too — because committing may insert a layer and
+        // renumber everything above it, `idx` included.
+        if canvas.hasActiveTextSession {
+            canvas.commitTextSession()
+            return
+        }
+        // The session belongs to the text tool; entering it also drops any
+        // mask paint target and swaps the options bar over.
+        selectTool(.text)
+        openTextSession(layer: idx, selectAll: true)
+    }
+
+    /// Opens the on-canvas editor on text layer `idx`, restoring its
+    /// description into the options bar and the session. Shared by the
+    /// text-tool click and the layers panel's double-click.
+    private func openTextSession(layer idx: Int, selectAll: Bool) {
         guard let document = document, let doc = document.doc,
-              let idx = topmostTextLayer(at: point, in: doc),
               let info = doc.layerInfo(idx), let payload = doc.textPayload(idx)
         else {
-            canvas.beginTextSession(at: point)
+            NSSound.beep()
             return
         }
         // Editing a layer makes it the active one (the commit replaces its
@@ -1195,12 +1232,14 @@ final class EditorViewController: NSViewController {
         // draws with those very parameters.
         applyTextOptions(payload)
         // Hide the layer's own raster underneath the session, or the old
-        // glyphs ghost behind every edit to the string.
+        // glyphs ghost behind every edit to the string. An already-hidden
+        // layer has nothing to hide: the pure op returns nil and the session
+        // runs over the unmodified canvas, which is correct.
         canvas.previewImage = doc.withLayerVisible(idx, false)?.flattened()?.makeCGImage()
         canvas.beginTextSession(
             at: TextLayer.editorOrigin(
                 offsetX: info.offsetX, offsetY: info.offsetY, payload: payload),
-            string: payload.string, editingLayer: idx)
+            string: payload.string, editingLayer: idx, selectAll: selectAll)
     }
 
     /// The topmost visible layer that carries a text description and whose

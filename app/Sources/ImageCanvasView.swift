@@ -1568,8 +1568,13 @@ final class ImageCanvasView: NSView {
     /// session as a re-edit of that text layer: the commit replaces its
     /// content instead of adding a layer. The session always draws with the
     /// canvas's current textFont/paintColor, so the caller restores those
-    /// from the layer's description first.
-    func beginTextSession(at point: CGPoint, string: String = "", editingLayer: Int? = nil) {
+    /// from the layer's description first. `selectAll` opens with the whole
+    /// string selected — the layers panel's double-click, which has no click
+    /// position to put a caret at, so typing replaces the text.
+    func beginTextSession(
+        at point: CGPoint, string: String = "", editingLayer: Int? = nil,
+        selectAll: Bool = false
+    ) {
         // Shift the box left rather than letting the 40px minimum overhang
         // the right edge, where committed glyphs would be clipped away.
         let width = min(600, max(bounds.width - point.x, 40))
@@ -1604,6 +1609,11 @@ final class ImageCanvasView: NSView {
         }
         needsDisplay = true
         window?.makeFirstResponder(textView)
+        // Last, so the restyling above (which rewrites the storage) cannot
+        // collapse the selection again.
+        if selectAll, !string.isEmpty {
+            textView.setSelectedRange(NSRange(location: 0, length: (string as NSString).length))
+        }
     }
 
     /// Applies the current textFont/paintColor/textAlignment to the whole
