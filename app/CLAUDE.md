@@ -1,0 +1,27 @@
+# app/CLAUDE.md — Swift app rules
+
+Applies to everything under `app/`. Build/verification commands and the FFI lockstep are in the root CLAUDE.md.
+
+## File map
+
+- `RasterCore.swift` — the **only** home for `rz_*` function calls: handle-owning wrappers (`RasterImage`, `RasterDocument`), `deinit` frees the Rust allocation. C *constants* (`RZ_FILTER_*`, …) may be used anywhere. The agent/assistant handle lifecycles belong in `RasterCore`-adjacent files, not in feature code.
+- `ImageDocument.swift` — NSDocument; the single mutation point (see Undo below).
+- `EditorViewController.swift`, `ImageCanvasView.swift`, `AgentServer.swift`, `Sheets.swift` — **frozen at current size.** Any change adding more than ~50 lines goes in an extension file instead: `EditorViewController+<Feature>.swift`, `AgentServer+<Feature>.swift`, or a new `…SheetController` file. A feature's MARK block is exactly the granularity that becomes a file.
+- `Tools.swift` — the single `EditorTool` enum plus per-tool facts (display name, cursor, key mapping) as computed properties.
+- `AgentCatalog.swift` — the MCP tool catalog; a debug-build startup check enforces that catalog names match the dispatch registry.
+- Feature model files (`TextLayer.swift`, `LayerTransform.swift`, `AdjustmentLayer.swift` are the pattern): pure value types, geometry/math, `extension RasterDocument`.
+- Shared chrome: `Theme.swift` (`DS` design tokens), `Controls.swift` (reusable controls), `EditorChrome.swift`; dialogs are `…SheetController`s built on the `makeSheetView` builders in `Sheets.swift`, live previews via `PreviewRenderer`.
+
+## Rules
+
+**Placement.** New feature = small model file + VC extension file + canvas session state; the frozen four get wiring only. Interactive gestures are modeled as a session struct (`TransformSession` is the template): one stored property on the view/VC, logic in the feature's file. Closures assigned in `loadView` are one-line forwards to named methods (`canvas.onStrokeEnd = { [weak self] in self?.strokeDidEnd($0) }`) — no business logic in closure bodies.
+
+**Tools.** One enum: `EditorTool` in `Tools.swift`, used by VC and canvas alike; per-tool facts live on the enum, not in scattered switches. Mouse/key dispatch switches stay exhaustive with **no `default:`** so the compiler flags every site a new tool must handle. Remaining touchpoints for a new tool: enum case (+ facts), toolbar segment, `selectXTool` action + `toolActions` entry, options-bar visibility, canvas mouse switches, Tools menu in `AppDelegate`. Canvas point convention: positions are clamped to the canvas for most tools, deliberately unclamped for move/eyedropper/transform.
+
+**Undo and dirty tracking.** All document mutation flows through `ImageDocument`'s entry points — `applyEdit`, `applyRasterizingEdit`, `applyToActiveLayer`, and the `beginLiveEdit`/`updateLiveEdit`/`endLiveEdit` trio for gestures. `registerUndo` appears nowhere outside `ImageDocument`. `ImageDocument` overrides `updateChangeCount` to drop AppKit's automatic undo-based counting; the entry points count deterministically via `countEditChange()` — any new edit path must go through them or the dirty flag breaks. **Pitfall:** undo registrations outside an AppKit event (agent edits, async callbacks) land in an implicit event group that never closes, silently merging edits into one undo step; any off-event path must use the explicit `beginUndoGrouping`/`endUndoGrouping` + flush pattern in `AgentServer.performGroupedEdit`.
+
+**Agent parity.** Every user-visible edit gets an MCP mirror: a handler in the dispatch registry + a catalog entry in `AgentCatalog.swift` (the debug parity check enforces the names match) + a comment naming the UI path it mirrors. Handlers follow the canonical shape: `target(a)` → validate indices → `performGroupedEdit`/`performPixelEdit` → `jsonResult`; failures throw `ToolError` and return in-band (`isError: true`) so models can self-correct. Argument helpers (`intArg`/`doubleArg`/`boolArg`/`stringArg`) accept string forms uniformly. The UI and the agent share one selection — agent-set selections show the marquee; user selections confine agent strokes — via the two-member `agentSelection`/`agentSetSelection` surface, the only place `AgentServer` may reach into a view controller.
+
+**State flow.** Canvas → VC through `on*` closures (`[weak self]`); panels → VC through closures or nil-target responder-chain selectors (so menus and panel buttons share handlers); document → observers via `.imageDocumentImageDidChange` with `userInfo["isLive"]` — live gestures pass `isLive: true` and observers skip expensive reloads mid-gesture. VC → canvas/panels is direct property assignment or method calls. `Selection.swift` is the shared model: geometric shapes keep an exact `NSBezierPath`; the magic wand uses a canvas-sized u8 coverage mask.
+
+**Hygiene.** No storyboards/xibs. No `!` force-unwraps, `as!`, or `try!`; implicitly-unwrapped optionals only for post-`loadView` view refs. Every non-NSCoder class: `@available(*, unavailable) required init?(coder:) { fatalError("<Type> does not support NSCoder") }`. `[weak self]` in retained closures, never `unowned`. Main-thread AppKit; `DispatchQueue` only at the documented seams (agent trampoline, assistant event pump, `PreviewRenderer`) — no async/await, no Combine. Colors/fonts/metrics come from `DS` tokens; shared controls go in `Controls.swift`. Refusals beep (`NSSound.beep()`), errors never crash. 4-space indent, ~100 columns.

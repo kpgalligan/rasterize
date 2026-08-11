@@ -2,7 +2,7 @@ APP := Rasterize
 BUILD_DIR := build
 APP_PATH := $(BUILD_DIR)/Build/Products/Release/$(APP).app
 
-.PHONY: all app rust test typecheck project run clean
+.PHONY: all app rust test lint typecheck project run clean
 
 all: app
 
@@ -11,6 +11,9 @@ rust:
 
 test:
 	cd core && cargo test --release
+
+lint:
+	cd core && cargo clippy --all-targets -- -D warnings
 
 project:
 	xcodegen generate
