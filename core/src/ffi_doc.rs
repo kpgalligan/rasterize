@@ -8,7 +8,9 @@ use std::ptr;
 
 use image::imageops::FilterType;
 
-use crate::doc::{BlendMode, MaskKind, RzDocument};
+use image::RgbaImage;
+
+use crate::doc::{BlendMode, MaskKind, RzDocument, MAX_PIXELS, MAX_RZDC_META_LEN};
 use crate::ops::CompositeMode;
 use crate::RzImage;
 
@@ -467,6 +469,44 @@ pub unsafe extern "C" fn rz_doc_with_layer_pixels(
     }
     let image = unsafe { &*img };
     unsafe { doc_op(doc, |d| d.with_layer_pixels(idx, image.pixels.clone())) }
+}
+
+/// Pure setter: the twin of `rz_doc_with_layer_pixels` for hosts that render
+/// into memory rather than into a file — replaces layer `idx`'s pixels with a
+/// copy of the straight-alpha RGBA8 buffer `src`, which must hold exactly
+/// `w * h * 4` bytes (row 0 top). The layer takes the buffer's size, keeping
+/// its offset and properties; a mask survives only a same-size replacement.
+/// NULL on NULL args, zero dimensions, dimensions past the `MAX_PIXELS`
+/// ceiling, or out-of-range idx.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `src` must be
+/// NULL or a valid pointer to at least `w * h * 4` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_with_layer_pixels_rgba(
+    doc: *const RzDocument,
+    idx: usize,
+    src: *const u8,
+    w: u32,
+    h: u32,
+) -> *mut RzDocument {
+    // The dimensions ARE the buffer's length here (no document-side size to
+    // check them against), so bound them the way every other sizing op is
+    // bounded before a slice is built from them.
+    if src.is_null() || w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
+        return ptr::null_mut();
+    }
+    unsafe {
+        doc_op(doc, |d| {
+            // Length computed from the same dimensions that size the layer,
+            // with checked arithmetic — never a separate (and possibly
+            // larger) length argument.
+            let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+            let src = std::slice::from_raw_parts(src, len);
+            let pixels = RgbaImage::from_raw(w, h, src.to_vec())?;
+            d.with_layer_pixels(idx, pixels)
+        })
+    }
 }
 
 /// Inserts a transparent canvas-sized layer (offset 0) above `idx`. NULL on
@@ -1040,6 +1080,65 @@ pub unsafe extern "C" fn rz_doc_layer_mask_enabled(doc: *const RzDocument, idx: 
         doc_get(doc, false, |d| {
             let layer = d.layers.get(idx)?;
             Some(layer.mask.is_some() && layer.mask_enabled)
+        })
+    }
+}
+
+// --------------------------------------------------------- layer metadata --
+
+/// Heap copy of layer `idx`'s metadata blob (free with `rz_string_free`);
+/// NULL on NULL doc, out-of-range idx, or a layer with no metadata. The core
+/// never parses the string — it is the host's blob, returned exactly as it was
+/// stored, except that interior NUL bytes (which an RZDC file could carry, its
+/// reader being lenient) become spaces so a C string can hold it, as in
+/// `rz_doc_layer_name`.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_layer_meta(doc: *const RzDocument, idx: usize) -> *mut c_char {
+    unsafe {
+        doc_get(doc, ptr::null_mut(), |d| {
+            let meta = d.layers.get(idx)?.meta.as_deref()?;
+            let sanitized = meta.replace('\0', " ");
+            Some(CString::new(sanitized).ok()?.into_raw())
+        })
+    }
+}
+
+/// Pure setter: returns a new document with layer `idx`'s metadata replaced by
+/// a copy of `meta`, or CLEARED when `meta` is NULL. The blob is stored
+/// verbatim and never interpreted. NULL on NULL doc, out-of-range idx, a
+/// payload that is not valid UTF-8 (refused rather than mangled — the host
+/// owns the encoding), or one longer than the RZDC writer's cap (so a
+/// document can never hold metadata the native format would refuse to store).
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `meta` must
+/// be NULL or a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_with_layer_meta(
+    doc: *const RzDocument,
+    idx: usize,
+    meta: *const c_char,
+) -> *mut RzDocument {
+    let value = if meta.is_null() {
+        None
+    } else {
+        let Ok(s) = unsafe { CStr::from_ptr(meta) }.to_str() else {
+            return ptr::null_mut();
+        };
+        if s.len() > MAX_RZDC_META_LEN as usize {
+            return ptr::null_mut();
+        }
+        Some(s.to_string())
+    };
+    unsafe {
+        doc_op(doc, move |d| {
+            d.layers.get(idx)?;
+            let mut out = d.clone();
+            out.layers[idx].meta = value;
+            Some(out)
         })
     }
 }

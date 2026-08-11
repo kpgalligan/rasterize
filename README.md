@@ -55,6 +55,15 @@ decoding, encoding, and manipulation.
   mode; strokes confine to an active selection) and on-canvas text
   (font/size/color, ⌘Return commits, Escape cancels) — tools switch via
   toolbar, Tools menu, or M/O/L/W/V/B/E/K/G/T
+- **Re-editable text layers**: committing text adds its own layer that
+  remembers the string, font, size and color it was rendered from — click it
+  again with the text tool to reopen the editor pre-filled, with its
+  font/size/color restored into the options bar, and the layers panel badges
+  it with a "T". A destructive edit (filter, adjustment, fill, gradient,
+  brush, eraser) asks "Rasterize text layer?" first and drops the
+  description on confirm, keeping the pixels. The native `.rz` format stores
+  the description alongside the pixels, so text stays editable across
+  save and open
 - Full undo/redo, copy to clipboard, recent files
 - Drag image files onto a window to open them; File > New from Clipboard (⌘N)
 - Checkerboard backdrop for transparency
@@ -62,7 +71,9 @@ decoding, encoding, and manipulation.
 Known limits: PSD support is 8-bit RGB/grayscale composites (16-bit and CMYK
 files are rejected with a clear error); animated GIFs and multi-page TIFFs
 load their first frame/page only, so ⌘S on a GIF deliberately routes through
-Save As instead of overwriting the animation in place.
+Save As instead of overwriting the animation in place. Document-level rotate,
+flip and resize move a text layer's pixels but keep its description, so
+re-editing the text after one re-renders it upright at the layer's corner.
 
 ## Built-in assistant
 
@@ -85,12 +96,14 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 35 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 37 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG), layer operations, blend modes, layer masks (add revealing,
 hiding or from the selection; enable, apply, or delete), filters, geometry,
 brush and eraser strokes (polyline points with size/color/opacity, and a
-`target` choosing the layer's pixels or its mask), rasterized text,
+`target` choosing the layer's pixels or its mask), text — `add_text_layer`
+and `edit_text_layer` for re-editable text layers (`get_document` reports
+each layer's text parameters) and `add_text` for the rasterizing variant —
 selections (rect/ellipse/polygon/magic wand with add/subtract/intersect
 modes, plus invert and feather — shared with the UI and
 honored by every paint tool), bucket fill, gradients,

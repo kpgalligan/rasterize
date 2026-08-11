@@ -204,13 +204,56 @@ final class ImageDocument: NSDocument {
     }
 
     /// Applies a flat-image operation to the ACTIVE layer's pixels as one
-    /// undo step (filters and adjustments).
+    /// undo step (filters and adjustments). Rewriting the pixels of a text
+    /// layer invalidates its description, so this goes through
+    /// applyRasterizingEdit.
     func applyToActiveLayer(_ actionName: String, _ op: (RasterImage) -> RasterImage?) {
         let idx = activeLayerIndex
-        applyEdit(actionName) { doc in
+        applyRasterizingEdit(actionName, layer: idx) { doc in
             guard let layer = doc.layerImage(idx), let filtered = op(layer) else { return nil }
             return doc.withLayerPixels(idx, filtered)
         }
+    }
+
+    /// applyEdit for an edit that rewrites a layer's pixels DESTRUCTIVELY —
+    /// painting, filling, filtering, adjusting. A plain raster layer goes
+    /// straight through. On a text layer the raster would stop being the
+    /// rendering of its description, so the user is asked first: Cancel
+    /// abandons the edit entirely, Rasterize drops the description inside the
+    /// SAME edit, keeping it one undo step.
+    ///
+    /// Whole-document geometry (rotate, flip, image/canvas size) deliberately
+    /// does NOT come through here: it moves a layer without contradicting
+    /// what the layer says it is, so the description survives.
+    ///
+    /// USER-initiated edits only — it can put up a modal alert, so anything
+    /// running on the agent's dispatched-to-main path must use applyEdit and
+    /// decide about the metadata itself.
+    func applyRasterizingEdit(
+        _ actionName: String, layer idx: Int, _ transform: (RasterDocument) -> RasterDocument?
+    ) {
+        guard let current = doc else {
+            NSSound.beep()
+            return
+        }
+        let describesText = current.textPayload(idx) != nil
+        guard confirmTextRasterize(layer: idx) else { return }
+        applyEdit(actionName) { doc in
+            guard let updated = transform(doc) else { return nil }
+            guard describesText else { return updated }
+            return updated.withLayerMeta(idx, nil) ?? updated
+        }
+    }
+
+    /// Asks — once, app-modally — whether a destructive edit may drop layer
+    /// `idx`'s text description. True means the edit may proceed: either the
+    /// layer carries no description, or the user confirmed. Callers that do
+    /// not run through applyRasterizingEdit (the live-edit brush path) must
+    /// clear the metadata themselves once this returns true.
+    func confirmTextRasterize(layer idx: Int) -> Bool {
+        guard let doc = doc, doc.textPayload(idx) != nil else { return true }
+        return TextLayer.confirmRasterize(
+            layerName: doc.layerInfo(idx)?.name ?? "this layer")
     }
 
     /// Undo/redo target. Restores the snapshot AND the active-layer index

@@ -3647,3 +3647,263 @@ fn ffi_layer_mask_null_and_range_guards() {
     unsafe { rz_doc_free(hidden) };
     unsafe { rz_doc_free(doc) };
 }
+
+// ---------------------------------------------------- layer metadata (FFI) --
+//
+// `meta` is an opaque host blob: the core stores, copies and serializes it but
+// never looks inside. These drive the two entry points that surface it, plus
+// the raw-buffer pixel replacement a re-render chains with them.
+
+/// A realistic text-layer payload with non-ASCII content, so "came back
+/// unchanged" means byte-for-byte rather than merely non-empty.
+const TEXT_META: &str = concat!(
+    "{\"type\":\"text\",\"string\":\"héllo 层 — ✎\",",
+    "\"font\":\"Helvetica Neue\",\"size\":24.5,",
+    "\"color\":\"#ff8800\",\"alignment\":\"center\"}"
+);
+
+/// Layer `idx`'s metadata through `rz_doc_layer_meta`; None when the call
+/// returns NULL (no metadata, or an out-of-range index).
+fn ffi_meta(doc: *const RzDocument, idx: usize) -> Option<String> {
+    let p = unsafe { rz_doc_layer_meta(doc, idx) };
+    if p.is_null() {
+        return None;
+    }
+    let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+    unsafe { rz_string_free(p) };
+    Some(s)
+}
+
+/// Sets layer `idx`'s metadata, asserting success and freeing the old handle.
+fn set_meta(doc: *mut RzDocument, idx: usize, meta: &str) -> *mut RzDocument {
+    let c = CString::new(meta).expect("no interior NUL");
+    apply(doc, |d| unsafe {
+        rz_doc_with_layer_meta(d, idx, c.as_ptr())
+    })
+}
+
+/// A 4x3 red background under a 2x2 blue "Top" layer (index 1).
+fn meta_fixture(dir: &TempDir, tag: &str) -> *mut RzDocument {
+    let doc = doc_from(dir, &format!("{tag}-bg.png"), &solid(4, 3, RED));
+    add_layer(
+        dir,
+        &format!("{tag}-top.png"),
+        doc,
+        0,
+        &solid(2, 2, BLUE),
+        "Top",
+    )
+}
+
+#[test]
+fn ffi_layer_meta_round_trips_sets_and_clears() {
+    let dir = TempDir::new().unwrap();
+    let doc = meta_fixture(&dir, "roundtrip");
+    assert_eq!(ffi_meta(doc, 0), None, "a fresh layer has no metadata");
+    assert_eq!(ffi_meta(doc, 1), None);
+
+    let c = CString::new(TEXT_META).unwrap();
+    let tagged = unsafe { rz_doc_with_layer_meta(doc, 1, c.as_ptr()) };
+    assert!(!tagged.is_null());
+    assert_eq!(
+        ffi_meta(tagged, 1).as_deref(),
+        Some(TEXT_META),
+        "the blob comes back verbatim, non-ASCII and all"
+    );
+    assert_eq!(ffi_meta(tagged, 0), None, "only the named layer is touched");
+    assert_eq!(ffi_meta(doc, 1), None, "the setter is pure");
+
+    // Setting again replaces; NULL clears.
+    const SECOND: &str = "{\"type\":\"text\",\"string\":\"second\"}";
+    let replaced = set_meta(tagged, 1, SECOND);
+    assert_eq!(ffi_meta(replaced, 1).as_deref(), Some(SECOND));
+    let cleared = unsafe { rz_doc_with_layer_meta(replaced, 1, ptr::null()) };
+    assert!(!cleared.is_null(), "NULL clears rather than failing");
+    assert_eq!(ffi_meta(cleared, 1), None);
+    assert!(ffi_meta(replaced, 1).is_some(), "clearing is pure too");
+
+    // Getting past the end of the stack is NULL, like every other getter.
+    assert_eq!(ffi_meta(cleared, 2), None);
+    assert_eq!(ffi_meta(cleared, usize::MAX), None);
+
+    unsafe { rz_doc_free(cleared) };
+    unsafe { rz_doc_free(replaced) };
+    unsafe { rz_doc_free(doc) };
+}
+
+#[test]
+fn ffi_layer_meta_rejects_invalid_utf8_and_over_long_payloads() {
+    // The cap the RZDC writer enforces: accepting more here would let a
+    // document hold metadata that rz_doc_save_native would then refuse.
+    const META_CAP: usize = 16 * 1024 * 1024;
+
+    let dir = TempDir::new().unwrap();
+    let doc = meta_fixture(&dir, "reject");
+
+    // A lone 0xFF is not valid UTF-8: refused outright, never lossily
+    // converted into replacement characters behind the host's back.
+    let invalid = CString::new(vec![0x7bu8, 0xff, 0xfe, 0x7d]).unwrap();
+    assert!(unsafe { rz_doc_with_layer_meta(doc, 1, invalid.as_ptr()) }.is_null());
+
+    let at_cap = CString::new("a".repeat(META_CAP)).unwrap();
+    let big = unsafe { rz_doc_with_layer_meta(doc, 1, at_cap.as_ptr()) };
+    assert!(!big.is_null(), "a payload exactly at the cap is accepted");
+    assert_eq!(ffi_meta(big, 1).map(|s| s.len()), Some(META_CAP));
+    unsafe { rz_doc_free(big) };
+
+    let over_cap = CString::new("a".repeat(META_CAP + 1)).unwrap();
+    assert!(unsafe { rz_doc_with_layer_meta(doc, 1, over_cap.as_ptr()) }.is_null());
+    assert_eq!(ffi_meta(doc, 1), None, "a refused set changes nothing");
+
+    unsafe { rz_doc_free(doc) };
+}
+
+#[test]
+fn ffi_layer_meta_survives_a_native_save_and_reopen() {
+    let dir = TempDir::new().unwrap();
+    let doc = meta_fixture(&dir, "save");
+    let doc = set_meta(doc, 1, TEXT_META);
+
+    let path = dir.path().join("meta.rzdc");
+    let c = cpath(&path);
+    let mut err: *mut c_char = ptr::null_mut();
+    assert!(
+        unsafe { rz_doc_save_native(doc, c.as_ptr(), &mut err) },
+        "save failed: {}",
+        take_err_string(err)
+    );
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let back = unsafe { rz_doc_open(c.as_ptr(), &mut err) };
+    assert!(!back.is_null(), "reopen failed: {}", take_err_string(err));
+    assert_eq!(unsafe { rz_doc_layer_count(back) }, 2);
+    assert_eq!(
+        ffi_meta(back, 1).as_deref(),
+        Some(TEXT_META),
+        "metadata round-trips through the version-2 format"
+    );
+    assert_eq!(ffi_meta(back, 0), None, "a layer without stays without");
+
+    unsafe { rz_doc_free(back) };
+    unsafe { rz_doc_free(doc) };
+}
+
+#[test]
+fn ffi_re_render_replaces_content_and_keeps_metadata() {
+    let dir = TempDir::new().unwrap();
+    let doc = meta_fixture(&dir, "rerender");
+    let doc = set_meta(doc, 1, TEXT_META);
+    assert_eq!(layer_dims(doc, 1), (2, 2));
+
+    // The chain a text re-render uses: new pixels, then a new offset. Both
+    // are pure, so the host commits only the final handle — one undo step.
+    let green = solid(2, 2, GREEN).into_raw();
+    let repainted = unsafe { rz_doc_with_layer_pixels_rgba(doc, 1, green.as_ptr(), 2, 2) };
+    assert!(!repainted.is_null());
+    let moved = apply(repainted, |d| unsafe {
+        rz_doc_with_layer_offset(d, 1, 2, 1)
+    });
+    assert_eq!(layer_dims(moved, 1), (2, 2));
+    assert_eq!(layer_pixels(moved, 1), green, "the buffer landed verbatim");
+    assert_eq!(layer_offset(moved, 1), (2, 1));
+    assert_eq!(
+        ffi_meta(moved, 1).as_deref(),
+        Some(TEXT_META),
+        "metadata survives a pixel replacement and an offset change"
+    );
+    assert_eq!(
+        layer_pixels(doc, 1),
+        solid(2, 2, BLUE).into_raw(),
+        "the input document is untouched"
+    );
+    assert_eq!(layer_offset(doc, 1), (0, 0));
+
+    // The re-rendered content shows at its new position in the projection.
+    let flat = flat_pixels(moved);
+    assert_eq!(pixel(&flat, 4, 2, 1), GREEN);
+    assert_eq!(pixel(&flat, 4, 3, 2), GREEN);
+    assert_eq!(pixel(&flat, 4, 0, 0), RED);
+    assert_eq!(pixel(&flat, 4, 1, 1), RED, "the old position is exposed");
+
+    // A re-render at a different size resizes the layer and keeps the blob.
+    let wide = solid(3, 1, WHITE).into_raw();
+    let resized = apply(moved, |d| unsafe {
+        rz_doc_with_layer_pixels_rgba(d, 1, wide.as_ptr(), 3, 1)
+    });
+    assert_eq!(layer_dims(resized, 1), (3, 1));
+    assert_eq!(layer_pixels(resized, 1), wide);
+    assert_eq!(ffi_meta(resized, 1).as_deref(), Some(TEXT_META));
+
+    unsafe { rz_doc_free(resized) };
+    unsafe { rz_doc_free(doc) };
+}
+
+#[test]
+fn ffi_with_layer_pixels_rgba_keeps_a_mask_only_at_the_same_size() {
+    let dir = TempDir::new().unwrap();
+    let doc = ffi_mask_fixture(&dir, "rgba-mask", (4, 2), (4, 2), (0, 0));
+    let sel = selection(4, 2, |x, _| if x < 2 { 255 } else { 0 });
+    let masked = apply(doc, |d| unsafe {
+        rz_doc_adding_layer_mask(d, 1, MASK_FROM_SELECTION, sel.as_ptr(), 4, 2)
+    });
+    assert_eq!(ffi_mask_flags(masked, 1), (true, true));
+
+    let same = solid(4, 2, GREEN).into_raw();
+    let kept = unsafe { rz_doc_with_layer_pixels_rgba(masked, 1, same.as_ptr(), 4, 2) };
+    assert!(!kept.is_null());
+    assert_eq!(
+        ffi_mask_flags(kept, 1),
+        (true, true),
+        "a same-size re-render keeps the mask"
+    );
+    assert_eq!(ffi_mask_bytes(kept, 1), ffi_mask_bytes(masked, 1));
+
+    let smaller = solid(2, 2, GREEN).into_raw();
+    let dropped = unsafe { rz_doc_with_layer_pixels_rgba(masked, 1, smaller.as_ptr(), 2, 2) };
+    assert!(!dropped.is_null());
+    assert_eq!(layer_dims(dropped, 1), (2, 2));
+    assert_eq!(
+        ffi_mask_flags(dropped, 1),
+        (false, false),
+        "a differently sized re-render drops it (the mask is layer-sized)"
+    );
+
+    unsafe { rz_doc_free(dropped) };
+    unsafe { rz_doc_free(kept) };
+    unsafe { rz_doc_free(masked) };
+}
+
+#[test]
+fn ffi_layer_meta_and_pixels_rgba_null_and_range_guards() {
+    let null_doc: *const RzDocument = ptr::null();
+    let meta = CString::new("{}").unwrap();
+    let px = [0u8; 16]; // a 2x2 RGBA8 buffer
+
+    unsafe {
+        assert!(rz_doc_layer_meta(null_doc, 0).is_null());
+        assert!(rz_doc_with_layer_meta(null_doc, 0, meta.as_ptr()).is_null());
+        assert!(rz_doc_with_layer_meta(null_doc, 0, ptr::null()).is_null());
+        assert!(rz_doc_with_layer_pixels_rgba(null_doc, 0, px.as_ptr(), 2, 2).is_null());
+    }
+
+    let dir = TempDir::new().unwrap();
+    let doc = meta_fixture(&dir, "guards");
+    unsafe {
+        // Out-of-range indices on every entry point.
+        assert!(rz_doc_layer_meta(doc, 2).is_null());
+        assert!(rz_doc_with_layer_meta(doc, 2, meta.as_ptr()).is_null());
+        assert!(rz_doc_with_layer_meta(doc, 2, ptr::null()).is_null());
+        assert!(rz_doc_with_layer_pixels_rgba(doc, 2, px.as_ptr(), 2, 2).is_null());
+
+        // A NULL buffer, a zero dimension, or dimensions past the pixel
+        // ceiling are refused before any slice is built from them.
+        assert!(rz_doc_with_layer_pixels_rgba(doc, 1, ptr::null(), 2, 2).is_null());
+        assert!(rz_doc_with_layer_pixels_rgba(doc, 1, px.as_ptr(), 0, 2).is_null());
+        assert!(rz_doc_with_layer_pixels_rgba(doc, 1, px.as_ptr(), 2, 0).is_null());
+        assert!(rz_doc_with_layer_pixels_rgba(doc, 1, px.as_ptr(), 100_001, 1_000).is_null());
+        assert!(rz_doc_with_layer_pixels_rgba(doc, 1, px.as_ptr(), u32::MAX, u32::MAX).is_null());
+        assert_eq!(ffi_meta(doc, 1), None, "no refused call changed anything");
+        assert_eq!(layer_dims(doc, 1), (2, 2));
+    }
+    unsafe { rz_doc_free(doc) };
+}

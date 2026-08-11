@@ -18,15 +18,17 @@ use crate::ops::CompositeMode;
 use crate::RzImage;
 
 /// Largest permitted canvas or merged-extent size, in total pixels (matches
-/// the `rz_image_resize` guard).
-const MAX_PIXELS: u64 = 100_000_000;
+/// the `rz_image_resize` guard). The FFI applies it to caller-declared layer
+/// buffer dimensions too, so absurd dimensions are refused rather than read.
+pub(crate) const MAX_PIXELS: u64 = 100_000_000;
 
 /// Hard caps applied while reading RZDC files so corrupt headers cannot ask
-/// for absurd allocations.
+/// for absurd allocations. The meta cap is also what the FFI meta setter
+/// enforces, so a document can never carry meta the writer would refuse.
 const MAX_RZDC_LAYERS: u32 = 1024;
 const MAX_RZDC_NAME_LEN: u32 = 64 * 1024;
 const MAX_RZDC_PNG_LEN: u32 = 512 * 1024 * 1024;
-const MAX_RZDC_META_LEN: u32 = 16 * 1024 * 1024;
+pub(crate) const MAX_RZDC_META_LEN: u32 = 16 * 1024 * 1024;
 
 /// The RZDC revision this build writes. Version 1 files (no mask, no layer
 /// meta) still load; anything newer is refused.

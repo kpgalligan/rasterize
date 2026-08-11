@@ -53,9 +53,12 @@ Undo registrations made outside an AppKit event (agent edits, async callbacks) l
 The MCP server is the reliable way to exercise the app end-to-end (open documents, run tools, render the canvas as PNG, check undo):
 
 ```sh
-(RZ_AGENT_PORT=4917 ./build/Build/Products/Release/Rasterize.app/Contents/MacOS/Rasterize \
+(RZ_AGENT_PORT=4917 ANTHROPIC_API_KEY=dummy \
+  ./build/Build/Products/Release/Rasterize.app/Contents/MacOS/Rasterize \
   -ApplePersistenceIgnoreState YES -AgentServerEnabled YES &)
 # then POST MCP JSON-RPC to http://127.0.0.1:4917/mcp
 ```
+
+A freshly built binary otherwise blocks on launch behind a keychain authorization prompt when the assistant panel looks for its API key — a dummy `ANTHROPIC_API_KEY` in the environment short-circuits that read.
 
 Use a non-default port (default is 4816) and argv-style defaults so nothing leaks into the user's own instances. The user often has their own Xcode-launched Rasterize running — never signal or kill Rasterize processes you didn't launch; find your own with `pgrep -f '^\./build/.*MacOS/Rasterize'`. Prefer opening documents via the `open_document` MCP tool over launch-time argv paths.

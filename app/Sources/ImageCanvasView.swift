@@ -130,10 +130,23 @@ final class ImageCanvasView: NSView {
     /// drawMaskStrokeGhost).
     var onCommitMaskOverlay: ((_ data: UnsafePointer<UInt8>, _ actionName: String) -> Void)?
 
-    /// Called once per text-session commit with the overlay's premultiplied
-    /// RGBA8 bytes; the receiver routes them through ImageDocument.applyEdit
-    /// as a single undo step.
-    var onCommitTextOverlay: ((_ data: UnsafePointer<UInt8>, _ mode: RzCompositeMode, _ alpha: Double, _ actionName: String) -> Void)?
+    /// Fired on a text-tool click (image pixel coordinates). The receiver
+    /// owns the document, so it decides whether the click re-opens an
+    /// existing text layer or starts a new entry, then calls
+    /// beginTextSession.
+    var onTextClick: ((CGPoint) -> Void)?
+
+    /// Called once per text-session commit with the session's parameters,
+    /// the canvas-space origin of the text block, the width it wrapped at,
+    /// and the text layer being re-edited (nil when the session is new). The
+    /// receiver renders the description into a text LAYER; the canvas itself
+    /// paints nothing.
+    var onCommitText: ((_ payload: TextLayerPayload, _ origin: CGPoint, _ wrapWidth: CGFloat, _ editingLayer: Int?) -> Void)?
+
+    /// Fired whenever a text session goes away, committed or cancelled (the
+    /// receiver drops any preview it put up for the session).
+    var onTextSessionEnd: (() -> Void)?
+
     var onToolKey: ((CanvasTool) -> Void)?
     var onBrushSizeKey: ((CGFloat) -> Void)?
 
@@ -191,15 +204,17 @@ final class ImageCanvasView: NSView {
     private var strokeOnMask = false
     private var strokeLastPoint: CGPoint?
 
-    // Full-image premultiplied overlay accumulating stroke geometry and
-    // rendering text commits. Never drawn directly: the projection previews
-    // strokes via the live-edit round trip.
+    // Full-image premultiplied overlay accumulating stroke geometry. Never
+    // drawn directly: the projection previews strokes via the live-edit
+    // round trip.
     private var overlayData: UnsafeMutableRawPointer?
     private var overlayContext: CGContext?
     private var overlayWidth = 0
     private var overlayHeight = 0
 
     private var activeTextView: CanvasTextView?
+    /// The text layer the active session re-edits; nil for a new one.
+    private var textSessionLayer: Int?
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -594,7 +609,7 @@ final class ImageCanvasView: NSView {
         case .brush, .eraser:
             beginStroke(at: point)
         case .text:
-            beginTextSession(at: point)
+            onTextClick?(point)
         }
     }
 
@@ -814,7 +829,13 @@ final class ImageCanvasView: NSView {
 
     // MARK: - Text sessions
 
-    private func beginTextSession(at point: CGPoint) {
+    /// Opens the on-canvas editor at `point` (the text block's top-left in
+    /// image pixels), pre-filled with `string`. `editingLayer` marks the
+    /// session as a re-edit of that text layer: the commit replaces its
+    /// content instead of adding a layer. The session always draws with the
+    /// canvas's current textFont/paintColor, so the caller restores those
+    /// from the layer's description first.
+    func beginTextSession(at point: CGPoint, string: String = "", editingLayer: Int? = nil) {
         // Shift the box left rather than letting the 40px minimum overhang
         // the right edge, where committed glyphs would be clipped away.
         let width = min(600, max(bounds.width - point.x, 40))
@@ -826,6 +847,7 @@ final class ImageCanvasView: NSView {
         textView.isRichText = false
         textView.allowsUndo = false
         textView.font = textFont
+        textView.string = string
         textView.textColor = paintColor
         textView.insertionPointColor = paintColor
         textView.minSize = NSSize(width: width, height: height)
@@ -838,6 +860,12 @@ final class ImageCanvasView: NSView {
         textView.onCommandReturn = { [weak self] in self?.commitTextSession() }
         addSubview(textView)
         activeTextView = textView
+        textSessionLayer = editingLayer
+        // Pre-filled text arrives with the typing attributes, and the box is
+        // still one line tall: restyle and refit it exactly as an edit would.
+        if !string.isEmpty {
+            updateActiveTextSessionStyle()
+        }
         needsDisplay = true
         window?.makeFirstResponder(textView)
     }
@@ -874,8 +902,10 @@ final class ImageCanvasView: NSView {
         needsDisplay = true
     }
 
-    /// Renders the session's text into the overlay and commits it as one
-    /// undo step. An all-whitespace session cancels instead.
+    /// Hands the session's text off as a DESCRIPTION — string, font, size,
+    /// color plus the origin and wrap width it was laid out at — so the
+    /// receiver can render it into a re-editable text layer. An
+    /// all-whitespace session cancels instead.
     func commitTextSession() {
         guard let textView = activeTextView else { return }
         let string = textView.string
@@ -887,6 +917,7 @@ final class ImageCanvasView: NSView {
         let sessionColor = textView.textColor ?? paintColor
         let origin = textView.frame.origin
         let width = textView.frame.width
+        let editingLayer = textSessionLayer
         removeTextSessionView()
 
         // A session pushed fully outside the image (e.g. the canvas shrank
@@ -895,32 +926,9 @@ final class ImageCanvasView: NSView {
             return
         }
 
-        guard let context = ensureOverlayContext() else {
-            NSSound.beep()
-            return
-        }
-        // The overlay is idle between strokes; start from empty regardless.
-        clearOverlay()
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
-        let attributed = NSAttributedString(
-            string: string,
-            attributes: [.font: sessionFont, .foregroundColor: sessionColor])
-        attributed.draw(
-            with: NSRect(x: origin.x, y: origin.y, width: width, height: 10_000_000),
-            // .usesFontLeading matches NSLayoutManager's live-session line
-            // metrics; without it each committed line lands ~1.4px high per
-            // line of leading and the block visibly contracts on commit.
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            context: nil)
-        NSGraphicsContext.restoreGraphicsState()
-
-        if let data = overlayData {
-            onCommitTextOverlay?(
-                UnsafePointer(data.assumingMemoryBound(to: UInt8.self)),
-                RZ_COMPOSITE_OVER, 1.0, "Add Text")
-        }
-        clearOverlay()
+        onCommitText?(
+            TextLayerPayload(string: string, font: sessionFont, color: sessionColor),
+            origin, width, editingLayer)
         needsDisplay = true
     }
 
@@ -932,10 +940,12 @@ final class ImageCanvasView: NSView {
     private func removeTextSessionView() {
         guard let textView = activeTextView else { return }
         activeTextView = nil
+        textSessionLayer = nil
         textView.delegate = nil
         textView.removeFromSuperview()
         window?.makeFirstResponder(self)
         needsDisplay = true
+        onTextSessionEnd?()
     }
 
     // MARK: - Keyboard and cursor

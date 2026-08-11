@@ -195,9 +195,9 @@ void rz_doc_free(RzDocument *doc);
  * version-1 record simply lacks: u8 mask present, u8 mask enabled, u32 mask
  * byte length + that many RAW coverage bytes when present (a mask is always
  * the layer's pixel count, so its dimensions are not stored twice), then u8
- * layer-metadata present and, when present, u32 byte length + UTF-8 bytes (a
- * reserved slot this API does not surface yet). Version-1 files still load,
- * with no mask on any layer. */
+ * layer-metadata present and, when present, u32 byte length + UTF-8 bytes (see
+ * "Layer metadata" below). Version-1 files still load, with no mask and no
+ * metadata on any layer. */
 bool rz_doc_save_native(const RzDocument *doc, const char *path,
                         char **err_out);
 
@@ -244,7 +244,9 @@ RzDocument *rz_doc_with_layer_visible(const RzDocument *doc, size_t idx,
 RzDocument *rz_doc_with_layer_offset(const RzDocument *doc, size_t idx,
                                      int32_t x, int32_t y);
 
-/* Replaces a layer's pixels (any size; offset and properties kept). */
+/* Replaces a layer's pixels (any size; offset and properties kept). See
+ * rz_doc_with_layer_pixels_rgba under "Layer metadata" for the variant that
+ * takes a rendered buffer instead of an image handle. */
 RzDocument *rz_doc_with_layer_pixels(const RzDocument *doc, size_t idx,
                                      const RzImage *img);
 
@@ -465,6 +467,68 @@ RzImage *rz_doc_layer_mask_image(const RzDocument *doc, size_t idx);
  * nothing to enable), so it can drive a checkbox or menu item directly. */
 bool rz_doc_layer_has_mask(const RzDocument *doc, size_t idx);
 bool rz_doc_layer_mask_enabled(const RzDocument *doc, size_t idx);
+
+/* ---- Layer metadata -----------------------------------------------------
+ *
+ * Every layer carries an optional metadata string: an OPAQUE, host-owned blob
+ * that the core stores, copies and serializes but NEVER parses. Its meaning,
+ * its schema and its versioning belong entirely to the host — the core only
+ * guarantees the bytes come back exactly as they went in. Rasterize uses it to
+ * keep the parameters a layer's pixels were rendered from (a text layer's
+ * string, font, size, color, alignment), making the raster a cache of a
+ * description the host can re-render.
+ *
+ * Lifetime rules, all of them consequences of ONE principle — metadata is
+ * attached to a layer's identity, not to its pixel values:
+ *   - It rides along wherever the layer survives as itself: the pure per-layer
+ *     setters, pixel replacement, painting/fill/gradient, mask operations,
+ *     duplicating (the copy gets it too), reordering, adding and removing
+ *     layers, whole-document rotate/flip/crop/canvas-resize/resize.
+ *   - It is DROPPED exactly where a layer stops being itself, alongside the
+ *     mask: rz_doc_merging_down clears it on the merged layer (the pixels are
+ *     now two layers' worth, so nothing describes them) and rz_doc_flattening
+ *     produces one plain "Background" layer with none.
+ *   - It round-trips through rz_doc_save_native / rz_doc_open in the
+ *     version-2 RZDC format, per layer. Older readers see a plain raster
+ *     layer, which is the intended graceful degradation.
+ * The host stays responsible for dropping metadata that its own rules say a
+ * destructive edit invalidates — the core has no opinion, because it cannot
+ * read the blob.
+ *
+ * Re-rendering a layer in place needs no special entry point: every operation
+ * is pure, so chain rz_doc_with_layer_pixels_rgba, rz_doc_with_layer_offset
+ * and rz_doc_with_layer_meta and commit only the final handle — one edit, one
+ * undo step. */
+
+/* Layer idx's metadata as a heap string freed with rz_string_free; NULL on
+ * out-of-range idx or a layer with no metadata (so NULL means "none", not an
+ * error). Interior NUL bytes, which only a hand-crafted RZDC file could carry,
+ * come back as spaces — the price of a C string. */
+char *rz_doc_layer_meta(const RzDocument *doc, size_t idx);
+
+/* Replaces layer idx's metadata with a copy of `meta`, or CLEARS it when
+ * `meta` is NULL. `meta` must be valid UTF-8 of at most 16 MiB (16777216
+ * bytes) — the RZDC writer's own cap, enforced here so a document can never
+ * hold metadata the format would later refuse to store. NULL on out-of-range
+ * idx, invalid UTF-8 (refused, never lossily converted), or an over-long
+ * payload. */
+RzDocument *rz_doc_with_layer_meta(const RzDocument *doc, size_t idx,
+                                   const char *meta);
+
+/* Replaces layer idx's pixels with a copy of a straight-alpha RGBA8 buffer
+ * (`src`, exactly w*h*4 bytes, row 0 top) — the same op as
+ * rz_doc_with_layer_pixels, for a host that renders into memory rather than
+ * into a file. The layer takes the buffer's size and keeps its offset, name,
+ * opacity, blend mode, visibility and metadata. NOTE the size rule it shares
+ * with rz_doc_with_layer_pixels: a layer MASK survives a same-size
+ * replacement, but a replacement at different dimensions drops it (a mask is
+ * always exactly the layer's pixel size), so a re-render that changes size
+ * loses the mask. NULL on out-of-range idx, NULL src, w == 0, h == 0, or
+ * w*h > 100000000 — the dimensions are the buffer's only declared length, so
+ * they are bounded like rz_doc_resize's before anything is read. */
+RzDocument *rz_doc_with_layer_pixels_rgba(const RzDocument *doc, size_t idx,
+                                          const uint8_t *src, uint32_t w,
+                                          uint32_t h);
 
 /* ---- Embedded agent (MCP) server ----------------------------------------
  *

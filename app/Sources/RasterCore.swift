@@ -364,6 +364,47 @@ final class RasterDocument {
         return wrap(rz_doc_with_layer_pixels(ptr, idx, image.ptr))
     }
 
+    /// The in-memory twin of `withLayerPixels`: replaces a layer's pixels
+    /// from a STRAIGHT-alpha (non-premultiplied) RGBA8 buffer, row 0 = top,
+    /// exactly `width * height * 4` bytes — not the premultiplied convention
+    /// the painting overlay uses. The layer takes the buffer's size and keeps
+    /// its offset, name, opacity, blend mode, visibility and metadata; as
+    /// with `withLayerPixels`, a replacement at a DIFFERENT size drops the
+    /// layer's mask (a mask is always exactly the layer's pixel size).
+    func withLayerPixels(
+        _ idx: Int, rgba pixels: [UInt8], width: Int, height: Int
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), width > 0, height > 0,
+              pixels.count == width * height * 4,
+              width * height <= RasterImage.maxResizePixels
+        else { return nil }
+        return pixels.withUnsafeBufferPointer { buffer in
+            wrap(
+                rz_doc_with_layer_pixels_rgba(
+                    ptr, idx, buffer.baseAddress, UInt32(width), UInt32(height)))
+        }
+    }
+
+    // MARK: - Layer metadata
+
+    /// Layer `idx`'s metadata string, or nil when it carries none. The core
+    /// stores this blob without ever parsing it; the schema is the app's
+    /// (see TextLayer.swift).
+    func layerMeta(_ idx: Int) -> String? {
+        guard isValidIndex(idx), let cMeta = rz_doc_layer_meta(ptr, idx) else { return nil }
+        defer { rz_string_free(cMeta) }
+        return String(cString: cMeta)
+    }
+
+    /// Attaches `meta` to layer `idx`, or CLEARS its metadata when `meta` is
+    /// nil. nil comes back for an over-long payload (the core caps it at
+    /// 16 MiB, the native format's own limit).
+    func withLayerMeta(_ idx: Int, _ meta: String?) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        guard let meta = meta else { return wrap(rz_doc_with_layer_meta(ptr, idx, nil)) }
+        return wrap(rz_doc_with_layer_meta(ptr, idx, meta))
+    }
+
     // MARK: - Stack operations
 
     /// Inserts a transparent canvas-sized layer ABOVE `idx`.

@@ -27,7 +27,8 @@ final class ThumbnailWellView: NSView {
 }
 
 /// Draws a thumbnail aspect-fit (never upscaled) inside a well, plus — for a
-/// DISABLED layer mask — a diagonal slash across it.
+/// DISABLED layer mask — a diagonal slash across it, and — for a layer that
+/// carries a description — a corner badge naming its kind ("T" for text).
 final class ThumbnailImageView: NSView {
     var image: NSImage? {
         didSet { needsDisplay = true }
@@ -36,6 +37,13 @@ final class ThumbnailImageView: NSView {
     /// Struck through: the mask is retained but ignored while compositing.
     var slashed = false {
         didSet { needsDisplay = true }
+    }
+
+    /// One or two characters in a corner chip; nil for a plain raster layer.
+    var badge: String? {
+        didSet {
+            if badge != oldValue { needsDisplay = true }
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -49,17 +57,43 @@ final class ThumbnailImageView: NSView {
                     x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
                     width: size.width, height: size.height))
         }
-        guard slashed else { return }
-        let slash = NSBezierPath()
-        slash.move(to: NSPoint(x: bounds.minX + 4, y: bounds.minY + 4))
-        slash.line(to: NSPoint(x: bounds.maxX - 4, y: bounds.maxY - 4))
-        // Halo underneath so the slash reads over any coverage.
-        slash.lineWidth = 3
-        DS.chromeBackground.setStroke()
-        slash.stroke()
-        slash.lineWidth = 1.5
-        DS.textStrong.setStroke()
-        slash.stroke()
+        if slashed {
+            let slash = NSBezierPath()
+            slash.move(to: NSPoint(x: bounds.minX + 4, y: bounds.minY + 4))
+            slash.line(to: NSPoint(x: bounds.maxX - 4, y: bounds.maxY - 4))
+            // Halo underneath so the slash reads over any coverage.
+            slash.lineWidth = 3
+            DS.chromeBackground.setStroke()
+            slash.stroke()
+            slash.lineWidth = 1.5
+            DS.textStrong.setStroke()
+            slash.stroke()
+        }
+        drawBadge()
+    }
+
+    /// The badge chip, bottom-right: a filled, bordered plate — the slash's
+    /// halo idea as a solid — so the letter reads over any thumbnail.
+    private func drawBadge() {
+        guard let badge = badge, !badge.isEmpty else { return }
+        let label = NSAttributedString(
+            string: badge,
+            attributes: [.font: DS.sans(10, weight: .semibold), .foregroundColor: DS.textStrong])
+        let labelSize = label.size()
+        let chip = NSRect(
+            x: bounds.maxX - max(labelSize.width + 7, 14) - 2,
+            y: bounds.minY + 2,
+            width: max(labelSize.width + 7, 14),
+            height: 14)
+        let plate = NSBezierPath(roundedRect: chip, xRadius: 4, yRadius: 4)
+        DS.chromeBackground.withAlphaComponent(0.94).setFill()
+        plate.fill()
+        plate.lineWidth = 1
+        DS.border.setStroke()
+        plate.stroke()
+        label.draw(
+            at: NSPoint(
+                x: chip.midX - labelSize.width / 2, y: chip.midY - labelSize.height / 2))
     }
 }
 
@@ -194,7 +228,8 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
 
     func configure(
         info: RasterDocument.LayerInfo, thumbnail: NSImage?, hasMask: Bool,
-        maskThumbnail: NSImage?, maskEnabled: Bool, selected: Bool, paintTarget: PaintTarget
+        maskThumbnail: NSImage?, maskEnabled: Bool, isText: Bool, selected: Bool,
+        paintTarget: PaintTarget
     ) {
         committedName = info.name
         nameField.stringValue = info.name
@@ -224,6 +259,12 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
 
         thumbView.image = thumbnail
         thumbView.alphaValue = info.visible ? 1.0 : 0.35
+        // A text layer is still editable as text: say so on the thumbnail,
+        // and the badge goes away the moment the description is dropped.
+        thumbView.badge = isText ? "T" : nil
+        thumbFrame.toolTip = isText
+            ? "Paint on the layer (text layer — painting rasterizes it)"
+            : "Paint on the layer"
         let symbol = info.visible ? "eye" : "eye.slash"
         let label = info.visible ? "Visible" : "Hidden"
         if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
@@ -729,6 +770,7 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
             info: info, thumbnail: thumbnail, hasMask: hasMask,
             maskThumbnail: hasMask ? maskThumbnail(doc, idx, maxSide: side) : nil,
             maskEnabled: doc.layerMaskEnabled(idx),
+            isText: doc.textPayload(idx) != nil,
             selected: idx == document.activeLayerIndex, paintTarget: paintTarget)
         cell.onSelectTarget = { [weak self] target in
             self?.selectPaintTarget(target, layer: idx)

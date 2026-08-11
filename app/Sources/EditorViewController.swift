@@ -199,11 +199,29 @@ final class EditorViewController: NSViewController {
         canvas.onStrokeEnd = { [weak self] actionName in
             guard let self = self, let document = self.document else { return }
             let wasMask = self.strokeTargetsMask
+            let base = self.strokeBase
             self.strokeTargetsMask = false
             self.strokeBase = nil
             // A mask stroke already committed itself (onCommitMaskOverlay)
             // and never opened a live-edit session.
             guard !wasMask else { return }
+            // A stroke that actually landed on a text layer contradicts the
+            // description its pixels were rendered from. Ask at mouse-up
+            // rather than mouse-down: a modal alert during mouse-down would
+            // swallow the drag. Rasterize drops the description inside this
+            // same gesture (one undo step); Cancel rolls the stroke back to
+            // the pre-stroke snapshot, which makes endLiveEdit a same-handle
+            // no-op — no undo step, no pixels changed.
+            let idx = document.activeLayerIndex
+            if let base = base, document.doc !== base, document.doc?.textPayload(idx) != nil {
+                if document.confirmTextRasterize(layer: idx) {
+                    if let cleared = document.doc?.withLayerMeta(idx, nil) {
+                        document.updateLiveEdit(cleared)
+                    }
+                } else {
+                    document.updateLiveEdit(base)
+                }
+            }
             // endLiveEdit no-ops when the handle never changed, so a stroke
             // that entirely missed the layer registers no undo step.
             document.endLiveEdit(actionName)
@@ -220,19 +238,14 @@ final class EditorViewController: NSViewController {
             document.updateLiveEdit(base)
             document.endLiveEdit("Cancel Stroke")
         }
-        canvas.onCommitTextOverlay = { [weak self] data, mode, alpha, actionName in
-            guard let self = self, let document = self.document else { return }
-            let idx = document.activeLayerIndex
-            // The session is already torn down; committing onto a hidden
-            // layer would invisibly dirty the document, so refuse.
-            guard document.doc?.layerInfo(idx)?.visible == true else {
-                NSSound.beep()
-                return
-            }
-            document.applyEdit(actionName) { doc in
-                doc.paintingLayer(idx, overlay: data, w: doc.width, h: doc.height,
-                                  mode: mode, alpha: alpha)
-            }
+        canvas.onTextClick = { [weak self] point in self?.textClicked(point) }
+        canvas.onCommitText = { [weak self] payload, origin, wrapWidth, editingLayer in
+            self?.commitTextLayer(payload, origin: origin, wrapWidth: wrapWidth,
+                                  editing: editingLayer)
+        }
+        canvas.onTextSessionEnd = { [weak self] in
+            // Drops the layer-hidden preview a re-edit session put up.
+            self?.canvas.previewImage = nil
         }
         canvas.onToolKey = { [weak self] tool in
             switch tool {
@@ -796,7 +809,7 @@ final class EditorViewController: NSViewController {
         let mask = canvas.selection?.maskBytes()
         let tolerance = tolerance
         let contiguous = contiguous
-        document.applyEdit("Fill") { doc in
+        document.applyRasterizingEdit("Fill", layer: idx) { doc in
             doc.bucketFilled(
                 idx, x: Int(point.x), y: Int(point.y), tolerance: tolerance,
                 rgba: rgba, contiguous: contiguous, mask: mask)
@@ -812,7 +825,7 @@ final class EditorViewController: NSViewController {
             gradientShapePopup.indexOfSelectedItem == 1
             ? RZ_GRADIENT_RADIAL : RZ_GRADIENT_LINEAR
         let mask = canvas.selection?.maskBytes()
-        document.applyEdit("Gradient") { doc in
+        document.applyRasterizingEdit("Gradient", layer: idx) { doc in
             doc.gradiented(idx, from: a, to: b, start: start, end: end, kind: kind, mask: mask)
         }
     }
@@ -820,6 +833,134 @@ final class EditorViewController: NSViewController {
     private func currentFont() -> NSFont {
         NSFontManager.shared.font(withFamily: fontFamily, traits: [], weight: 5, size: fontSize)
             ?? .systemFont(ofSize: fontSize)
+    }
+
+    // MARK: - Text layers
+
+    /// A text-tool click: re-open the topmost VISIBLE text layer under the
+    /// point, or start a new text entry there.
+    private func textClicked(_ point: CGPoint) {
+        guard let document = document, let doc = document.doc,
+              let idx = topmostTextLayer(at: point, in: doc),
+              let info = doc.layerInfo(idx), let payload = doc.textPayload(idx)
+        else {
+            canvas.beginTextSession(at: point)
+            return
+        }
+        // Editing a layer makes it the active one (the commit replaces its
+        // content, and the panel should show what is being edited).
+        if document.activeLayerIndex != idx {
+            document.activeLayerIndex = idx
+            syncPaintTarget()
+            layersPanel.reload()
+            updateStatus()
+            updateActiveLayerRect()
+        }
+        // The options bar reflects what is being edited, and the session
+        // draws with those very parameters.
+        applyTextOptions(payload)
+        // Hide the layer's own raster underneath the session, or the old
+        // glyphs ghost behind every edit to the string.
+        canvas.previewImage = doc.withLayerVisible(idx, false)?.flattened()?.makeCGImage()
+        canvas.beginTextSession(
+            at: TextLayer.editorOrigin(
+                offsetX: info.offsetX, offsetY: info.offsetY, payload: payload),
+            string: payload.string, editingLayer: idx)
+    }
+
+    /// The topmost visible layer that carries a text description and whose
+    /// extent contains `point` (image pixel coordinates). Plain raster layers
+    /// above it do not block the hit.
+    private func topmostTextLayer(at point: CGPoint, in doc: RasterDocument) -> Int? {
+        for idx in stride(from: doc.layerCount - 1, through: 0, by: -1) {
+            guard let info = doc.layerInfo(idx), info.visible else { continue }
+            let rect = CGRect(
+                x: CGFloat(info.offsetX), y: CGFloat(info.offsetY),
+                width: CGFloat(info.width), height: CGFloat(info.height))
+            guard rect.contains(point), doc.textPayload(idx) != nil else { continue }
+            return idx
+        }
+        return nil
+    }
+
+    /// Restores a layer's text parameters into the options bar and the
+    /// canvas. The session deliberately draws with the description's OWN
+    /// face, so a family that is not installed here still previews exactly
+    /// what the re-render will produce.
+    private func applyTextOptions(_ payload: TextLayerPayload) {
+        let font = payload.nsFont
+        if let family = font.familyName, fontPopup.itemTitles.contains(family) {
+            fontFamily = family
+            fontPopup.selectItem(withTitle: family)
+        }
+        fontSize = min(max(font.pointSize, 6), 500)
+        fontSizeField.integerValue = Int(fontSize.rounded())
+        paintColor = payload.nsColor
+        colorWell.color = paintColor
+        canvas.textFont = font
+        canvas.paintColor = paintColor
+    }
+
+    /// Commits a text session: a NEW text layer above the active one, or the
+    /// re-render of the layer the session was editing. Both chain their
+    /// per-layer ops into a single document handle, so each is one undo step.
+    private func commitTextLayer(
+        _ payload: TextLayerPayload, origin: CGPoint, wrapWidth: CGFloat, editing: Int?
+    ) {
+        guard let document = document, let doc = document.doc,
+              let raster = TextLayer.render(payload, origin: origin, wrapWidth: wrapWidth),
+              let meta = payload.json()
+        else {
+            NSSound.beep()
+            return
+        }
+        let name = TextLayer.layerName(for: payload.string)
+
+        if let idx = editing, let info = doc.layerInfo(idx), let old = doc.textPayload(idx) {
+            // Opening a text layer and closing it unchanged (⌘Return, or a
+            // tool switch) must not register an undo step or dirty the file.
+            guard old != payload || info.offsetX != raster.offsetX
+                || info.offsetY != raster.offsetY || info.width != raster.width
+                || info.height != raster.height
+            else { return }
+            // The name follows the text only while it still IS the text: a
+            // name the user typed themselves survives the re-edit.
+            let nameFollowsText = info.name == TextLayer.layerName(for: old.string)
+            document.applyEdit("Edit Text Layer") { doc in
+                guard let filled = doc.withLayerPixels(
+                        idx, rgba: raster.pixels, width: raster.width, height: raster.height),
+                      let moved = filled.withLayerOffset(idx, raster.offsetX, raster.offsetY),
+                      let described = moved.withLayerMeta(idx, meta)
+                else { return nil }
+                guard nameFollowsText else { return described }
+                return described.withLayerName(idx, name) ?? described
+            }
+            // The active layer is unchanged, so the change notification alone
+            // refreshes the panel, the status bar and the layer boundary.
+            return
+        }
+
+        let below = document.activeLayerIndex
+        let before = document.doc
+        document.applyEdit("Add Text Layer") { doc in
+            // The core has no "layer from a buffer" constructor: add an empty
+            // layer, then give it the rendered pixels, its offset and its
+            // description — all pure, all in one handle.
+            let idx = below + 1
+            guard let added = doc.addingLayer(above: below, name: name),
+                  let filled = added.withLayerPixels(
+                    idx, rgba: raster.pixels, width: raster.width, height: raster.height),
+                  let moved = filled.withLayerOffset(idx, raster.offsetX, raster.offsetY)
+            else { return nil }
+            return moved.withLayerMeta(idx, meta)
+        }
+        guard document.doc !== before else { return }
+        document.activeLayerIndex = min(below + 1, document.doc.layerCount - 1)
+        // The active layer moved: any mask paint target goes with it.
+        syncPaintTarget()
+        layersPanel.reload()
+        updateStatus()
+        updateActiveLayerRect()
     }
 
     // MARK: - Options bar actions

@@ -109,6 +109,8 @@ final class AgentServer {
         case "brush_stroke": return try paintStroke(a, erase: false)
         case "eraser_stroke": return try paintStroke(a, erase: true)
         case "add_text": return try addText(a)
+        case "add_text_layer": return try addTextLayer(a)
+        case "edit_text_layer": return try editTextLayer(a)
         case "select_rect": return try selectShape(a) { rect in .rect(rect) }
         case "select_ellipse": return try selectShape(a) { rect in .ellipse(rect) }
         case "select_polygon": return try selectPolygon(a)
@@ -214,7 +216,7 @@ final class AgentServer {
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
         let layers: [[String: Any]] = (0..<doc.layerCount).compactMap { index -> [String: Any]? in
             guard let info = doc.layerInfo(index) else { return nil }
-            return [
+            var layer: [String: Any] = [
                 "index": index,
                 "name": info.name,
                 "width": info.width,
@@ -227,6 +229,18 @@ final class AgentServer {
                 "has_mask": doc.layerHasMask(index),
                 "mask_enabled": doc.layerMaskEnabled(index),
             ]
+            // A TEXT LAYER also carries the description its pixels were
+            // rendered from; only those layers can be re-rendered with
+            // edit_text_layer, and the key's absence says "plain raster".
+            if let payload = doc.textPayload(index) {
+                layer["text"] = [
+                    "string": payload.string,
+                    "font": payload.font,
+                    "size": payload.size,
+                    "color": payload.color,
+                ]
+            }
+            return layer
         }
         var result = summary(document)
         result["layers"] = layers
@@ -329,6 +343,53 @@ final class AgentServer {
         while let manager = manager, manager.groupingLevel > 0 {
             manager.endUndoGrouping()
         }
+    }
+
+    /// performEdit for an edit that REWRITES A LAYER'S PIXELS — a brush or
+    /// eraser stroke on the layer itself, a fill, a gradient, add_text, a
+    /// filter or an adjustment. Those pixels stop being the rendering of a
+    /// text layer's description, so the description is DROPPED inside the
+    /// same edit (one undo step, one handle), and the caller tells the model.
+    ///
+    /// The UI asks the user first (ImageDocument.applyRasterizingEdit), but
+    /// the agent must never: a modal alert on this dispatched-to-main path
+    /// would block the main thread — and with it the MCP connection — until
+    /// somebody clicked it. Rasterizing silently and REPORTING it is the
+    /// recovery-oriented equivalent: undo restores the text layer.
+    ///
+    /// `pixelLayer` is the layer whose own pixels the edit rewrites, or nil
+    /// when it writes somewhere else (a layer MASK), which leaves a text
+    /// description valid. Returns true when a description was dropped.
+    @discardableResult
+    private func performPixelEdit(
+        _ document: ImageDocument, _ actionName: String, pixelLayer: Int?,
+        _ transform: (RasterDocument) -> RasterDocument?
+    ) throws -> Bool {
+        let rasterizesText =
+            pixelLayer.map { document.doc?.textPayload($0) != nil } ?? false
+        try performEdit(document, actionName) { doc in
+            guard let updated = transform(doc) else { return nil }
+            guard rasterizesText, let layer = pixelLayer else { return updated }
+            return updated.withLayerMeta(layer, nil) ?? updated
+        }
+        return rasterizesText
+    }
+
+    /// A pixel-edit result, with the rasterization report appended when the
+    /// edit dropped a text layer's description.
+    private func pixelEditResult(
+        _ fields: [String: Any], layer: Int, rasterizedText: Bool
+    ) throws -> String {
+        var result = fields
+        if rasterizedText {
+            result["rasterized_text"] = true
+            result["note"] =
+                "This edit painted over layer \(layer)'s pixels, so the layer is no longer "
+                + "editable as text: the string, font, size and color it was rendered from "
+                + "were dropped and edit_text_layer no longer works on it. The pixels are "
+                + "intact; undo restores the text layer."
+        }
+        return try jsonResult(result)
     }
 
     private func docEdit(
@@ -514,13 +575,17 @@ final class AgentServer {
             throw ToolError(message: "Layer \(index) is out of range (0..\(count - 1))")
         }
         let filter = try requiredString(a, "filter")
-        try performEdit(document, "Apply \(filter)") { doc in
+        let rasterized = try performPixelEdit(
+            document, "Apply \(filter)", pixelLayer: index
+        ) { doc in
             guard let layer = doc.layerImage(index),
                 let filtered = self.filtered(layer, filter, a)
             else { return nil }
             return doc.withLayerPixels(index, filtered)
         }
-        return try jsonResult(["ok": true, "filter": filter, "layer": index])
+        return try pixelEditResult(
+            ["ok": true, "filter": filter, "layer": index],
+            layer: index, rasterizedText: rasterized)
     }
 
     private func filtered(
@@ -576,16 +641,22 @@ final class AgentServer {
     /// `toMask` the very same overlay is painted into the layer's MASK
     /// instead (white reveals, black hides, the overlay's own alpha is
     /// the blend — `mode` and `alpha` do not apply there).
+    ///
+    /// Returns true when painting the layer's pixels dropped a text
+    /// description (see performPixelEdit); a MASK stroke never does.
+    @discardableResult
     private func paintOverlay(
         _ document: ImageDocument, layer: Int, actionName: String,
         mode: RzCompositeMode, alpha: Double, toMask: Bool = false,
         draw: (CGContext) -> Void
-    ) throws {
+    ) throws -> Bool {
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
         let width = doc.width
         let height = doc.height
         var data = [UInt8](repeating: 0, count: width * height * 4)
-        try performEdit(document, actionName) { current in
+        return try performPixelEdit(
+            document, actionName, pixelLayer: toMask ? nil : layer
+        ) { current in
             data.withUnsafeMutableBufferPointer { buffer -> RasterDocument? in
                 guard let base = buffer.baseAddress,
                     let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
@@ -701,7 +772,7 @@ final class AgentServer {
         } else {
             actionName = erase ? "Eraser Stroke" : "Brush Stroke"
         }
-        try paintOverlay(
+        let rasterized = try paintOverlay(
             document, layer: layer, actionName: actionName,
             mode: erase ? RZ_COMPOSITE_ERASE : RZ_COMPOSITE_OVER, alpha: opacity,
             toMask: toMask
@@ -724,10 +795,11 @@ final class AgentServer {
             }
             context.strokePath()
         }
-        return try jsonResult([
-            "ok": true, "action": actionName, "layer": layer, "points": points.count,
-            "target": toMask ? "mask" : "layer",
-        ])
+        return try pixelEditResult(
+            [
+                "ok": true, "action": actionName, "layer": layer, "points": points.count,
+                "target": toMask ? "mask" : "layer",
+            ], layer: layer, rasterizedText: rasterized)
     }
 
     private func addText(_ a: [String: Any]) throws -> String {
@@ -756,7 +828,7 @@ final class AgentServer {
         let measured = attributed.boundingRect(
             with: NSSize(width: box.width, height: box.height),
             options: .usesLineFragmentOrigin)
-        try paintOverlay(
+        let rasterized = try paintOverlay(
             document, layer: layer, actionName: "Add Text",
             mode: RZ_COMPOSITE_OVER, alpha: 1
         ) { context in
@@ -765,13 +837,192 @@ final class AgentServer {
             attributed.draw(with: box, options: .usesLineFragmentOrigin)
             NSGraphicsContext.restoreGraphicsState()
         }
-        return try jsonResult([
-            "ok": true, "layer": layer,
-            "text_size": [
-                "width": Int(measured.width.rounded(.up)),
-                "height": Int(measured.height.rounded(.up)),
+        return try pixelEditResult(
+            [
+                "ok": true, "layer": layer,
+                "text_size": [
+                    "width": Int(measured.width.rounded(.up)),
+                    "height": Int(measured.height.rounded(.up)),
+                ],
+            ], layer: layer, rasterizedText: rasterized)
+    }
+
+    // MARK: - Text layers
+
+    /// The family a text layer defaults to: the one the text tool's options
+    /// bar starts on, so an agent-made layer looks like a hand-made one.
+    /// Falls back to the system font's family when it is not installed.
+    private static let defaultTextFamily: String = {
+        let preferred = "Helvetica Neue"
+        if NSFontManager.shared.availableFontFamilies.contains(preferred) { return preferred }
+        return NSFont.systemFont(ofSize: 12).familyName ?? preferred
+    }()
+
+    /// The `font` argument of the text-layer tools: an installed font
+    /// FAMILY, since the description stores a family and rebuilds the face
+    /// from it. nil when the caller named none, so the caller can keep what
+    /// the layer already says.
+    private func textFamily(_ a: [String: Any], size: Double) throws -> String? {
+        guard let name = stringArg(a, "font") else { return nil }
+        guard
+            NSFontManager.shared.font(
+                withFamily: name, traits: [], weight: 5, size: CGFloat(size)) != nil
+        else {
+            throw ToolError(
+                message: "No font family named \"\(name)\" is installed. A text layer stores a "
+                    + "font FAMILY (\"Helvetica Neue\", \"Times New Roman\", …), not a "
+                    + "PostScript face name; omit font to keep the current one.")
+        }
+        return name
+    }
+
+    /// The width the text lays out (and wraps) in: `wrap_width`, or from the
+    /// text's left edge to the canvas's right edge — the same default
+    /// add_text uses. The description has no wrap field, so an edit that
+    /// omits it re-wraps at this default rather than at whatever width the
+    /// layer was first laid out in.
+    private func textWrapWidth(
+        _ a: [String: Any], from x: Double, canvasWidth: Int
+    ) throws -> CGFloat {
+        guard let given = doubleArg(a, "wrap_width") else {
+            return CGFloat(max(Double(canvasWidth) - x, 10))
+        }
+        guard given.isFinite, given >= 1 else {
+            throw ToolError(message: "wrap_width must be at least 1 px")
+        }
+        return CGFloat(min(given, 1e6))
+    }
+
+    /// What a text-layer tool reports back: where the layer landed (the ink
+    /// box plus a few px of slack for antialiasing and glyph overhang, so
+    /// these are the layer's real bounds as get_document reports them) and
+    /// the parameters it is now rendered from.
+    private func textLayerResult(
+        layer: Int, name: String, payload: TextLayerPayload, raster: TextLayerRaster,
+        wrapWidth: CGFloat
+    ) throws -> String {
+        try jsonResult([
+            "ok": true,
+            "layer": layer,
+            "name": name,
+            "bounds": [
+                "x": raster.offsetX, "y": raster.offsetY,
+                "width": raster.width, "height": raster.height,
             ],
+            "text": [
+                "string": payload.string, "font": payload.font,
+                "size": payload.size, "color": payload.color,
+            ],
+            "wrap_width": Int(wrapWidth.rounded()),
+            "note": "Re-editable: change it with edit_text_layer. Painting on this layer "
+                + "(brush, eraser, fill, gradient, add_text, apply_filter) drops the text "
+                + "and leaves plain pixels.",
         ])
+    }
+
+    /// Creates a RE-EDITABLE text layer above the active one: the string,
+    /// font, size and color become the layer's description and the pixels
+    /// are only their rendering. Mirrors the text tool's own commit
+    /// (EditorViewController.commitTextLayer) so both paths produce
+    /// identical layers.
+    private func addTextLayer(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
+        let text = try requiredString(a, "text")
+        guard let x = doubleArg(a, "x"), let y = doubleArg(a, "y") else {
+            throw ToolError(
+                message: "add_text_layer requires x and y (the top-left of the text block)")
+        }
+        let size = min(max(doubleArg(a, "size") ?? 48, 4), 1000)
+        let family = try textFamily(a, size: size) ?? Self.defaultTextFamily
+        let color = try parseColor(a, "color", fallback: .black)
+        let payload = TextLayerPayload(string: text, family: family, size: size, color: color)
+        let wrapWidth = try textWrapWidth(a, from: x, canvasWidth: doc.width)
+        guard
+            let raster = TextLayer.render(
+                payload, origin: CGPoint(x: x, y: y), wrapWidth: wrapWidth)
+        else {
+            throw ToolError(
+                message: "Could not lay the text out — check that text is not empty and that "
+                    + "x, y, size and wrap_width are sane numbers.")
+        }
+        let below = document.activeLayerIndex
+        let name = TextLayer.layerName(for: text)
+        // The core has no "layer from a buffer" constructor: add an empty
+        // layer, then give it the pixels, the offset and the description.
+        // Every op is pure, so only the final handle is committed — one
+        // undo step.
+        try performEdit(document, "Add Text Layer") { doc in
+            let idx = below + 1
+            guard let added = doc.addingLayer(above: below, name: name),
+                let filled = added.withLayerPixels(
+                    idx, rgba: raster.pixels, width: raster.width, height: raster.height),
+                let moved = filled.withLayerOffset(idx, raster.offsetX, raster.offsetY)
+            else { return nil }
+            return moved.withTextPayload(idx, payload)
+        }
+        let index = min(below + 1, (document.doc?.layerCount ?? 1) - 1)
+        document.activeLayerIndex = index
+        // The edit's own notification went out before the active layer
+        // moved, so the panel and status bar need this one to catch up.
+        NotificationCenter.default.post(
+            name: .imageDocumentImageDidChange, object: document, userInfo: ["isLive": false])
+        return try textLayerResult(
+            layer: index, name: name, payload: payload, raster: raster, wrapWidth: wrapWidth)
+    }
+
+    /// Re-renders an existing text layer from a changed description: any
+    /// field the call omits keeps the value the layer already carries.
+    /// Pixels, offset and description are replaced in one undo step.
+    private func editTextLayer(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        let index = try paintLayerIndex(a, document)
+        guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
+        guard let info = doc.layerInfo(index) else {
+            throw ToolError(message: "Layer \(index) could not be read")
+        }
+        guard let current = doc.textPayload(index) else {
+            throw ToolError(
+                message: "Layer \(index) (\"\(info.name)\") is not a text layer — it is plain "
+                    + "pixels with no text to re-render (get_document reports a \"text\" "
+                    + "object on the layers that have one). Make re-editable text with "
+                    + "add_text_layer, or paint characters onto this layer with add_text.")
+        }
+        let text = stringArg(a, "text") ?? current.string
+        guard !text.isEmpty else {
+            throw ToolError(
+                message: "text cannot be empty; remove the layer with delete_layer instead.")
+        }
+        let size = doubleArg(a, "size").map { min(max($0, 4), 1000) } ?? current.size
+        let family = try textFamily(a, size: size) ?? current.font
+        let color = try parseColor(a, "color", fallback: current.nsColor)
+        let payload = TextLayerPayload(string: text, family: family, size: size, color: color)
+        // Lay the new description out at the very origin the layer's pixels
+        // were rendered from (the old description's padding is what its
+        // offset includes), exactly as re-opening it with the text tool does.
+        let origin = TextLayer.editorOrigin(
+            offsetX: info.offsetX, offsetY: info.offsetY, payload: current)
+        let wrapWidth = try textWrapWidth(a, from: Double(origin.x), canvasWidth: doc.width)
+        guard let raster = TextLayer.render(payload, origin: origin, wrapWidth: wrapWidth) else {
+            throw ToolError(
+                message: "Could not lay the text out — check size and wrap_width.")
+        }
+        let name = TextLayer.layerName(for: text)
+        // The name follows the text only while it still IS the text: a name
+        // somebody typed themselves survives the re-render.
+        let nameFollowsText = info.name == TextLayer.layerName(for: current.string)
+        try performEdit(document, "Edit Text Layer") { doc in
+            guard let filled = doc.withLayerPixels(
+                    index, rgba: raster.pixels, width: raster.width, height: raster.height),
+                let moved = filled.withLayerOffset(index, raster.offsetX, raster.offsetY),
+                let described = moved.withTextPayload(index, payload)
+            else { return nil }
+            guard nameFollowsText else { return described }
+            return described.withLayerName(index, name) ?? described
+        }
+        return try textLayerResult(
+            layer: index, name: nameFollowsText ? name : info.name, payload: payload,
+            raster: raster, wrapWidth: wrapWidth)
     }
 
     // MARK: - Selection, fill, gradient
@@ -919,12 +1170,13 @@ final class AgentServer {
         let tolerance = intArg(a, "tolerance") ?? 32
         let contiguous = boolArg(a, "contiguous") ?? true
         let mask = selectionMask(document)
-        try performEdit(document, "Fill") { doc in
+        let rasterized = try performPixelEdit(document, "Fill", pixelLayer: index) { doc in
             doc.bucketFilled(
                 index, x: x, y: y, tolerance: tolerance, rgba: rgba,
                 contiguous: contiguous, mask: mask)
         }
-        return try jsonResult(["ok": true, "layer": index])
+        return try pixelEditResult(
+            ["ok": true, "layer": index], layer: index, rasterizedText: rasterized)
     }
 
     private func gradient(_ a: [String: Any]) throws -> String {
@@ -949,12 +1201,13 @@ final class AgentServer {
         default: throw ToolError(message: "shape must be \"linear\" or \"radial\"")
         }
         let mask = selectionMask(document)
-        try performEdit(document, "Gradient") { doc in
+        let rasterized = try performPixelEdit(document, "Gradient", pixelLayer: index) { doc in
             doc.gradiented(
                 index, from: CGPoint(x: x0, y: y0), to: CGPoint(x: x1, y: y1),
                 start: start, end: end, kind: kind, mask: mask)
         }
-        return try jsonResult(["ok": true, "layer": index])
+        return try pixelEditResult(
+            ["ok": true, "layer": index], layer: index, rasterizedText: rasterized)
     }
 
     /// sRGB straight-alpha bytes of a parsed color.
@@ -1182,8 +1435,10 @@ final class AgentServer {
                 "get_document",
                 "Full state of one document: canvas size and every layer's name, size, offset, "
                     + "opacity, blend mode, visibility, and layer mask (has_mask, mask_enabled). "
-                    + "Layer index 0 is the bottom layer; offsets are measured from the canvas "
-                    + "top-left corner, y increasing down.",
+                    + "A re-editable TEXT layer also reports a text object (string, font, size, "
+                    + "color) — those are the layers edit_text_layer can change; a layer without "
+                    + "that key is plain pixels. Layer index 0 is the bottom layer; offsets are "
+                    + "measured from the canvas top-left corner, y increasing down.",
                 ["document_id": docID]),
             tool(
                 "render",
@@ -1388,10 +1643,11 @@ final class AgentServer {
                 ], required: ["points"]),
             tool(
                 "add_text",
-                "Rasterizes text onto a layer's pixels (not editable afterwards). x,y is "
-                    + "the TOP-LEFT corner of the text block; long lines wrap at the canvas "
-                    + "edge and \\n starts a new line. Returns the rendered text size so you "
-                    + "can position follow-ups.",
+                "Rasterizes text onto a layer's pixels — the characters become pixels and "
+                    + "cannot be changed afterwards, so prefer add_text_layer when the text "
+                    + "may need editing. x,y is the TOP-LEFT corner of the text block; long "
+                    + "lines wrap at the canvas edge and \\n starts a new line. Returns the "
+                    + "rendered text size so you can position follow-ups.",
                 [
                     "text": ["type": "string"],
                     "x": ["type": "number"], "y": ["type": "number"],
@@ -1410,6 +1666,74 @@ final class AgentServer {
                     "layer": index,
                     "document_id": docID,
                 ], required: ["text", "x", "y"]),
+            tool(
+                "add_text_layer",
+                "Adds a RE-EDITABLE text layer above the active layer and selects it. The "
+                    + "layer remembers the string, font, size and color it was rendered from "
+                    + "(get_document reports them, edit_text_layer changes them, and they "
+                    + "survive saving to .rz), unlike add_text which just bakes characters "
+                    + "into pixels. x,y is the TOP-LEFT corner of the text block, positioned "
+                    + "exactly like add_text; \\n starts a new line and long lines wrap at "
+                    + "wrap_width. Returns the new layer's index and bounds. NOTE: painting "
+                    + "on the layer afterwards (brush, eraser, fill, gradient, add_text, "
+                    + "apply_filter) drops the text and leaves plain pixels.",
+                [
+                    "text": ["type": "string"],
+                    "x": ["type": "number"], "y": ["type": "number"],
+                    "size": [
+                        "type": "number",
+                        "description": "Font size in px (4-1000, default 48).",
+                    ],
+                    "font": [
+                        "type": "string",
+                        "description": "Installed font FAMILY name, e.g. \"Helvetica Neue\" "
+                            + "or \"Times New Roman\" (not a PostScript face name). "
+                            + "Default: the text tool's own default family.",
+                    ],
+                    "color": [
+                        "type": "string",
+                        "description": "Hex color, #RRGGBB or #RRGGBBAA (default #000000).",
+                    ],
+                    "wrap_width": [
+                        "type": "number",
+                        "description": "Width in px the lines wrap at; default is from x to "
+                            + "the canvas's right edge.",
+                    ],
+                    "document_id": docID,
+                ], required: ["text", "x", "y"]),
+            tool(
+                "edit_text_layer",
+                "Re-renders a text layer made by add_text_layer (or by the app's text tool) "
+                    + "from changed parameters: pass any subset of text, font, size, color "
+                    + "and wrap_width, and everything you omit keeps the layer's current "
+                    + "value. The layer keeps its position (the text block is re-laid-out "
+                    + "from the same top-left corner, so the bounds follow the new text), "
+                    + "its opacity, blend mode and stacking. Errors when the target layer is "
+                    + "not a text layer — add_text_layer makes one. Returns the resulting "
+                    + "bounds. wrap_width is not stored on the layer, so omitting it re-wraps "
+                    + "at the canvas's right edge; pass it to keep a narrower block narrow.",
+                [
+                    "layer": index,
+                    "text": ["type": "string"],
+                    "size": [
+                        "type": "number",
+                        "description": "Font size in px (4-1000).",
+                    ],
+                    "font": [
+                        "type": "string",
+                        "description": "Installed font FAMILY name (not a PostScript face "
+                            + "name).",
+                    ],
+                    "color": [
+                        "type": "string",
+                        "description": "Hex color, #RRGGBB or #RRGGBBAA.",
+                    ],
+                    "wrap_width": [
+                        "type": "number",
+                        "description": "Width in px the lines wrap at.",
+                    ],
+                    "document_id": docID,
+                ]),
             tool(
                 "select_rect",
                 "Selects a rectangle (canvas coordinates). Selections confine "
