@@ -599,6 +599,29 @@ final class RasterDocument {
         return wrap(rz_doc_canvas_resize(ptr, UInt32(w), UInt32(h), Int32(originX), Int32(originY)))
     }
 
+    /// Free transform of ONE layer by an arbitrary affine matrix, resampled
+    /// with `sampler`. The matrix works in CANVAS coordinates — it says where
+    /// the layer's canvas rect lands — and its six elements cross the FFI in
+    /// CGAffineTransform order, [a, b, c, d, tx, ty], so a CGAffineTransform
+    /// passes straight through. The layer's new offset and size are the
+    /// outward-rounded bounding box of the transformed corners; its mask,
+    /// name, opacity, blend mode, visibility and metadata survive (dropping a
+    /// text description is the caller's policy). nil for a singular or
+    /// non-finite matrix, an out-of-range index, or an extent the core caps.
+    func transformingLayer(
+        _ idx: Int, _ transform: CGAffineTransform, sampler: RzResizeFilter
+    ) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        let affine: [Double] = [
+            Double(transform.a), Double(transform.b), Double(transform.c),
+            Double(transform.d), Double(transform.tx), Double(transform.ty),
+        ]
+        guard affine.allSatisfy({ $0.isFinite }) else { return nil }
+        return affine.withUnsafeBufferPointer { buffer in
+            wrap(rz_doc_transform_layer(ptr, idx, buffer.baseAddress, sampler))
+        }
+    }
+
     /// Writes the native RZDC format (all layers preserved).
     func saveNative(to url: URL) throws {
         var err: UnsafeMutablePointer<CChar>? = nil

@@ -351,21 +351,22 @@ final class ImageDocument: NSDocument {
         }
     }
 
-    // MARK: - Text-session safety
+    // MARK: - Canvas-session safety
 
-    /// Commits any in-progress canvas text session so save/close/export
-    /// paths never silently drop text the user can see on the canvas. The
-    /// commit runs through applyEdit, which also dirties the document, so
-    /// close paths then show the standard unsaved-changes prompt.
-    private func commitPendingTextSessions() {
+    /// Commits any in-progress canvas session — text entry, a Free Transform
+    /// — so save/close/export paths never silently drop what the user can see
+    /// on the canvas. The commits run through applyEdit, which also dirties
+    /// the document, so close paths then show the standard unsaved-changes
+    /// prompt.
+    private func commitPendingCanvasSessions() {
         for controller in windowControllers {
             (controller.contentViewController as? EditorViewController)?
-                .commitPendingTextSession()
+                .commitPendingSessions()
         }
     }
 
     override func save(_ sender: Any?) {
-        commitPendingTextSessions()
+        commitPendingCanvasSessions()
         // If the file's current format is not allowed for an in-place Save
         // (flat formats on a multi-layer document, GIF), reroute through the
         // Save As panel explicitly. Relying on NSDocument's own fallback is
@@ -422,7 +423,7 @@ final class ImageDocument: NSDocument {
     }
 
     override func saveAs(_ sender: Any?) {
-        commitPendingTextSessions()
+        commitPendingCanvasSessions()
         super.saveAs(sender)
     }
 
@@ -430,7 +431,7 @@ final class ImageDocument: NSDocument {
         withDelegate delegate: Any, shouldClose shouldCloseSelector: Selector?,
         contextInfo: UnsafeMutableRawPointer?
     ) {
-        commitPendingTextSessions()
+        commitPendingCanvasSessions()
         super.canClose(
             withDelegate: delegate, shouldClose: shouldCloseSelector, contextInfo: contextInfo)
     }
@@ -440,7 +441,7 @@ final class ImageDocument: NSDocument {
     /// "Save a copy" flow: does not change fileURL or clear the dirty state.
     /// Exports the flattened projection.
     @IBAction func exportDocument(_ sender: Any?) {
-        commitPendingTextSessions()
+        commitPendingCanvasSessions()
         guard let image = projection ?? doc?.flattened(), let window = windowForSheet else {
             NSSound.beep()
             return

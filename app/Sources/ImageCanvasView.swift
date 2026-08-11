@@ -60,6 +60,51 @@ final class ImageCanvasView: NSView {
         didSet { needsDisplay = true }
     }
 
+    /// Everything the canvas needs to draw a free-transform session: the rest
+    /// of the layer stack as two cached composites, the transformed layer's
+    /// own pixels, and the box the handles hang off. The document is NOT
+    /// touched during a session — this is a pure CoreGraphics preview of a
+    /// matrix the core only ever runs once, at commit.
+    struct TransformPreview {
+        /// The stack below the transformed layer, canvas-sized.
+        var below: CGImage?
+        /// The stack above it, canvas-sized (transparent where nothing is).
+        var above: CGImage?
+        /// The transformed layer's own pixels, at the layer's size; nil for a
+        /// hidden layer (the box still shows, the pixels don't).
+        var layer: CGImage?
+        /// The layer's enabled mask as a DeviceGray image at the same size,
+        /// or nil. The core resamples a mask with the very same matrix, so
+        /// clipping the preview through it is exactly what commits.
+        var mask: CGImage?
+        /// The layer's untransformed canvas rect — where `layer` starts.
+        var sourceRect: CGRect
+        /// Canvas-space matrix (the very one the commit hands to the core).
+        var matrix: CGAffineTransform
+        var opacity: CGFloat
+        /// `sourceRect`'s four transformed corners: the box to draw.
+        var quad: [CGPoint]
+        /// Where the pivot landed, marked so rotation reads as deliberate.
+        var pivot: CGPoint
+        /// False for the nearest-neighbour sampler, so the preview shows the
+        /// hard pixel edges the commit will produce.
+        var interpolate: Bool
+    }
+
+    /// Non-nil for the duration of a Free Transform session; the canvas then
+    /// draws the preview instead of the projection and routes mouse and key
+    /// events to the session's callbacks.
+    var transformPreview: TransformPreview? {
+        didSet {
+            needsDisplay = true
+            if (transformPreview == nil) != (oldValue == nil) {
+                window?.invalidateCursorRects(for: self)
+            }
+        }
+    }
+
+    var isTransforming: Bool { transformPreview != nil }
+
     /// The active layer's extent in image pixel coordinates, kept current by
     /// the view controller. Paint tools draw its boundary when it differs
     /// from the canvas rect, since paint outside it cannot land.
@@ -149,6 +194,20 @@ final class ImageCanvasView: NSView {
 
     var onToolKey: ((CanvasTool) -> Void)?
     var onBrushSizeKey: ((CGFloat) -> Void)?
+
+    // Free Transform. The canvas owns none of the geometry: it reports the
+    // gesture in image pixel coordinates (unclamped — handles are routinely
+    // dragged off-canvas) and the view controller turns that into the
+    // session's parameters.
+    var onTransformMouseDown: ((CGPoint, NSEvent.ModifierFlags) -> Void)?
+    var onTransformMouseDragged: ((CGPoint, NSEvent.ModifierFlags) -> Void)?
+    var onTransformMouseUp: ((CGPoint, NSEvent.ModifierFlags) -> Void)?
+    /// Return, keypad Enter, or a double-click.
+    var onTransformCommit: (() -> Void)?
+    /// Escape.
+    var onTransformCancel: (() -> Void)?
+    /// Arrow keys (Shift: 10px), in image pixels.
+    var onTransformNudge: ((_ dx: CGFloat, _ dy: CGFloat) -> Void)?
 
     // Move tool: the view only reports gestures; the view controller owns
     // the active layer's offset and the document's live-edit session.
@@ -244,7 +303,10 @@ final class ImageCanvasView: NSView {
         return NSColor(patternImage: tile)
     }()
 
-    private var magnification: CGFloat {
+    /// Current zoom factor: image pixels are drawn this many screen points
+    /// wide, so `1 / magnification` is the image-space size of one screen
+    /// point (what every on-canvas hairline and hit slop is expressed in).
+    var magnification: CGFloat {
         max(enclosingScrollView?.magnification ?? 1, 0.001)
     }
 
@@ -309,7 +371,9 @@ final class ImageCanvasView: NSView {
         // round trip), so the image is always the truth; the overlay is
         // never composited here.
         let context = NSGraphicsContext.current!.cgContext
-        if let cgImage = previewImage ?? image {
+        if let preview = transformPreview {
+            drawTransformPreview(preview, in: context)
+        } else if let cgImage = previewImage ?? image {
             drawFlipped(cgImage, in: context)
         }
 
@@ -320,26 +384,35 @@ final class ImageCanvasView: NSView {
         // Paint can only land inside the active layer's extent; when that is
         // smaller than the canvas, show the boundary so strokes and text
         // outside it don't silently vanish.
-        if tool == .brush || tool == .eraser || tool == .text,
+        if tool == .brush || tool == .eraser || tool == .text, !isTransforming,
            let layerRect = activeLayerRect,
            layerRect != CGRect(origin: .zero, size: bounds.size) {
             drawActiveLayerBounds(layerRect)
         }
 
-        if let selection = selection {
+        // A transform ignores the selection entirely, and its dimming wash
+        // and marquee would fight the box: the selection survives the
+        // session, it just stops drawing for it.
+        if let selection = selection, !isTransforming {
             drawSelection(selection)
         }
 
-        if !lassoPoints.isEmpty {
+        // Both of these belong to a tool gesture the session has suspended;
+        // like the selection, they survive it without drawing over the box.
+        if !lassoPoints.isEmpty, !isTransforming {
             drawLassoPreview()
         }
 
-        if let anchor = gradientAnchor, let current = gradientCurrent {
+        if let anchor = gradientAnchor, let current = gradientCurrent, !isTransforming {
             drawGradientPreview(from: anchor, to: current)
         }
 
         if let textView = activeTextView {
             drawTextSessionBorder(textView.frame)
+        }
+
+        if let preview = transformPreview {
+            drawTransformBox(preview)
         }
     }
 
@@ -376,6 +449,105 @@ final class ImageCanvasView: NSView {
         context.fill(rect)
         context.endTransparencyLayer()
         context.restoreGState()
+    }
+
+    /// A free-transform session's canvas: the stack below the layer, the
+    /// layer's cached pixels pushed through the session's matrix, then the
+    /// stack above it. No core call is involved — this is the cheap preview
+    /// of a resample that happens exactly once, at commit.
+    private func drawTransformPreview(_ preview: TransformPreview, in context: CGContext) {
+        if let below = preview.below {
+            drawFlipped(below, in: context)
+        }
+        if let layer = preview.layer, preview.sourceRect.width > 0, preview.sourceRect.height > 0 {
+            context.saveGState()
+            context.interpolationQuality = preview.interpolate ? .high : .none
+            context.setAlpha(preview.opacity)
+            // The matrix is in CANVAS coordinates, which is this flipped
+            // view's own space, so it concatenates as-is; the image then
+            // needs the usual local un-flip to land right side up in the
+            // layer's rect.
+            context.concatenate(preview.matrix)
+            context.translateBy(x: preview.sourceRect.minX, y: preview.sourceRect.maxY)
+            context.scaleBy(x: 1, y: -1)
+            let local = CGRect(origin: .zero, size: preview.sourceRect.size)
+            // The mask is the layer's own size and rides along with it, so
+            // it clips in this same local space (white shows, black hides).
+            if let mask = preview.mask {
+                context.clip(to: local, mask: mask)
+            }
+            context.draw(layer, in: local)
+            context.restoreGState()
+        }
+        if let above = preview.above {
+            drawFlipped(above, in: context)
+        }
+    }
+
+    /// The transform box: a hairline through the four transformed corners,
+    /// the eight handles that scale it, and a marker on the pivot every
+    /// rotation turns around. Scaled by 1/magnification so it keeps its
+    /// SCREEN size at any zoom, exactly like the marquee.
+    private func drawTransformBox(_ preview: TransformPreview) {
+        let corners = preview.quad
+        guard corners.count == 4 else { return }
+        let scale = magnification
+
+        let path = NSBezierPath()
+        path.move(to: corners[0])
+        for corner in corners.dropFirst() {
+            path.line(to: corner)
+        }
+        path.close()
+        path.lineWidth = 3 / scale
+        NSColor.black.withAlphaComponent(0.45).setStroke()
+        path.stroke()
+        path.lineWidth = 1 / scale
+        NSColor.white.withAlphaComponent(0.95).setStroke()
+        path.stroke()
+
+        // Pivot marker: a small hollow ring, drawn under the handles.
+        let pivotRadius = 4 / scale
+        let pivot = NSBezierPath(
+            ovalIn: CGRect(
+                x: preview.pivot.x - pivotRadius, y: preview.pivot.y - pivotRadius,
+                width: pivotRadius * 2, height: pivotRadius * 2))
+        pivot.lineWidth = 2.5 / scale
+        NSColor.black.withAlphaComponent(0.45).setStroke()
+        pivot.stroke()
+        pivot.lineWidth = 1 / scale
+        NSColor.white.withAlphaComponent(0.95).setStroke()
+        pivot.stroke()
+
+        let size = Self.transformHandleSize / scale
+        for point in Self.transformHandlePoints(corners) {
+            let square = NSBezierPath(
+                rect: CGRect(
+                    x: point.x - size / 2, y: point.y - size / 2, width: size, height: size))
+            NSColor.white.setFill()
+            square.fill()
+            square.lineWidth = 1 / scale
+            NSColor.black.withAlphaComponent(0.65).setStroke()
+            square.stroke()
+        }
+    }
+
+    /// Side of a transform handle in SCREEN points.
+    static let transformHandleSize: CGFloat = 8
+
+    /// The eight handle positions of a transform box, derived from its four
+    /// transformed corners: the corners themselves, then the midpoint of
+    /// each edge (an affine image of a rectangle is a parallelogram, so the
+    /// midpoints are exactly the transformed edge midpoints).
+    static func transformHandlePoints(_ corners: [CGPoint]) -> [CGPoint] {
+        guard corners.count == 4 else { return [] }
+        var points = corners
+        for index in 0..<4 {
+            let a = corners[index]
+            let b = corners[(index + 1) % 4]
+            points.append(CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2))
+        }
+        return points
     }
 
     private func drawSelection(_ selection: CanvasSelection) {
@@ -564,6 +736,17 @@ final class ImageCanvasView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        // A free-transform session is modal over the tools: every click on
+        // the canvas belongs to it until it commits or cancels.
+        if isTransforming {
+            if event.clickCount >= 2 {
+                onTransformCommit?()
+                return
+            }
+            onTransformMouseDown?(
+                convert(event.locationInWindow, from: nil), event.modifierFlags)
+            return
+        }
         if hasActiveTextSession {
             commitTextSession()
             // With the text tool, this click only ends the session; the user
@@ -615,6 +798,12 @@ final class ImageCanvasView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         let raw = convert(event.locationInWindow, from: nil)
+        if isTransforming {
+            // Unclamped: transform handles are routinely dragged past the
+            // canvas edges, and a layer may legitimately land outside it.
+            onTransformMouseDragged?(raw, event.modifierFlags)
+            return
+        }
         switch tool {
         case .select:
             guard let anchor = dragAnchor else { return }
@@ -644,6 +833,11 @@ final class ImageCanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if isTransforming {
+            onTransformMouseUp?(
+                convert(event.locationInWindow, from: nil), event.modifierFlags)
+            return
+        }
         switch tool {
         case .select, .ellipseSelect:
             guard let anchor = dragAnchor else { return }
@@ -960,6 +1154,30 @@ final class ImageCanvasView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        // The transform session swallows the keyboard: Return commits,
+        // Escape cancels, arrows nudge. Everything else is dropped rather
+        // than allowed to switch tools or resize the brush underneath it
+        // (menu key equivalents never reach keyDown, so ⌘-anything still
+        // goes through the usual validation).
+        if isTransforming {
+            switch event.keyCode {
+            case 53: // Escape
+                onTransformCancel?()
+            case 36, 76: // Return, keypad Enter
+                onTransformCommit?()
+            case 123, 124, 125, 126: // arrows
+                let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
+                switch event.keyCode {
+                case 123: onTransformNudge?(-step, 0)
+                case 124: onTransformNudge?(step, 0)
+                case 125: onTransformNudge?(0, step)
+                default: onTransformNudge?(0, -step)
+                }
+            default:
+                NSSound.beep()
+            }
+            return
+        }
         if event.keyCode == 53 { // Escape
             if strokeActive {
                 // Abandon the in-progress stroke; the live edit rolls back.
@@ -1043,6 +1261,12 @@ final class ImageCanvasView: NSView {
     }
 
     override func resetCursorRects() {
+        // The transform box is dragged with the arrow, whatever tool the
+        // session was entered from.
+        guard !isTransforming else {
+            addCursorRect(bounds, cursor: .arrow)
+            return
+        }
         switch tool {
         case .select, .ellipseSelect, .lasso, .wand, .fill, .gradient, .brush, .eraser:
             addCursorRect(bounds, cursor: .crosshair)

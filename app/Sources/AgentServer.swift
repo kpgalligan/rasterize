@@ -102,6 +102,7 @@ final class AgentServer {
         case "flatten_image": return try docEdit(a, "Flatten Image") { $0.flattening() }
         case "reorder_layer": return try reorderLayer(a)
         case "set_layer_properties": return try setLayerProperties(a)
+        case "transform_layer": return try transformLayer(a)
         case "add_layer_mask": return try addLayerMask(a)
         case "remove_layer_mask": return try removeLayerMask(a)
         case "set_layer_mask_enabled": return try setLayerMaskEnabled(a)
@@ -563,6 +564,212 @@ final class AgentServer {
             $0.withLayerMaskEnabled(index, enabled)
         }
         return try jsonResult(["ok": true, "layer": index, "mask_enabled": enabled])
+    }
+
+    // MARK: - Layer transform
+
+    /// transform_layer's samplers, mapped onto the resize filters the Free
+    /// Transform options bar offers ("bicubic" IS Catmull-Rom). image_size's
+    /// spellings are accepted too, so one vocabulary covers both tools; the
+    /// canonical name is what the result echoes back.
+    private static let transformSamplers: [String: (name: String, filter: RzResizeFilter)] = [
+        "nearest": ("nearest", RZ_FILTER_NEAREST),
+        "bilinear": ("bilinear", RZ_FILTER_BILINEAR),
+        "bicubic": ("bicubic", RZ_FILTER_CATMULL_ROM),
+        "catmull-rom": ("bicubic", RZ_FILTER_CATMULL_ROM),
+        "lanczos": ("lanczos", RZ_FILTER_LANCZOS3),
+        "lanczos3": ("lanczos", RZ_FILTER_LANCZOS3),
+    ]
+
+    /// The core's ceiling on one layer's pixels (doc.rs MAX_PIXELS), mirrored
+    /// so an oversized request is refused with a message that names the cap
+    /// instead of a bare NULL from the core.
+    private static let maxLayerPixels = 100_000_000.0
+
+    /// A finite number argument; nil when the caller omitted it.
+    private func finiteArg(_ a: [String: Any], _ key: String) throws -> Double? {
+        guard let value = doubleArg(a, key) else { return nil }
+        guard value.isFinite else {
+            throw ToolError(message: "\(key) must be a finite number")
+        }
+        return value
+    }
+
+    /// A scale multiplier: finite, non-zero (zero is a singular matrix the
+    /// core refuses) and clamped to the same magnitudes the Free Transform
+    /// fields allow, so agent and UI accept exactly the same range.
+    private func scaleArg(_ a: [String: Any], _ key: String) throws -> CGFloat? {
+        guard let value = try finiteArg(a, key) else { return nil }
+        guard value != 0 else {
+            throw ToolError(
+                message: "\(key) must not be 0 — a zero scale collapses the layer to nothing "
+                    + "(a singular matrix the core refuses). 1 keeps the size, 0.5 halves it, "
+                    + "-1 mirrors it.")
+        }
+        return LayerTransform.clampScale(CGFloat(value))
+    }
+
+    /// Two decimals, for the parameters the result echoes back — except when
+    /// that would round a nonzero value away to 0, which would contradict this
+    /// same tool's "a scale of 0 is refused" and misreport a scale clamped to
+    /// the 0.001 floor. Anything smaller than half a hundredth keeps two
+    /// significant digits instead, so the echo stays tidy but never claims a
+    /// value the call would have rejected.
+    private static func transformNumber(_ value: Double) -> Double {
+        guard value.isFinite, value != 0 else { return 0 }
+        let rounded = (value * 100).rounded() / 100
+        if rounded != 0 { return rounded }
+        let unit = pow(10.0, 1 - (log10(abs(value))).rounded(.down))
+        let significant = (value * unit).rounded() / unit
+        return significant.isFinite && significant != 0 ? significant : value
+    }
+
+    /// Rotates / scales / moves ONE layer in a single resample. The named
+    /// parameters are compiled into a LayerTransform and its matrix is what
+    /// goes to the core — the very composition the interactive Free Transform
+    /// session commits, so identical parameters give identical pixels.
+    private func transformLayer(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        let index = try paintLayerIndex(a, document)
+        guard let doc = document.doc, let info = doc.layerInfo(index) else {
+            throw ToolError(message: "Layer \(index) could not be read")
+        }
+        guard info.width > 0, info.height > 0 else {
+            throw ToolError(
+                message: "Layer \(index) (\"\(info.name)\") has no pixels to transform.")
+        }
+        // The layer's rect in CANVAS space — what the matrix maps.
+        let rect = CGRect(
+            x: CGFloat(info.offsetX), y: CGFloat(info.offsetY),
+            width: CGFloat(info.width), height: CGFloat(info.height))
+
+        let samplerName = (stringArg(a, "sampler") ?? "bicubic").lowercased()
+        guard let sampler = Self.transformSamplers[samplerName] else {
+            throw ToolError(
+                message: "sampler must be nearest, bilinear, bicubic or lanczos "
+                    + "(got \"\(samplerName)\")")
+        }
+
+        // The pivot: a named corner of the layer's CURRENT bounds, overridden
+        // per axis by an explicit canvas coordinate.
+        let anchor: CGPoint
+        switch stringArg(a, "around") ?? "center" {
+        case "center": anchor = CGPoint(x: rect.midX, y: rect.midY)
+        case "top_left": anchor = CGPoint(x: rect.minX, y: rect.minY)
+        case let other:
+            throw ToolError(
+                message: "around must be \"center\" or \"top_left\" (got \"\(other)\"); pass "
+                    + "pivot_x / pivot_y for any other point.")
+        }
+        let pivot = CGPoint(
+            x: CGFloat(try finiteArg(a, "pivot_x") ?? Double(anchor.x)),
+            y: CGFloat(try finiteArg(a, "pivot_y") ?? Double(anchor.y)))
+
+        let rotate = try finiteArg(a, "rotate")
+        let uniformScale = try scaleArg(a, "scale")
+        let scaleX = try scaleArg(a, "scale_x")
+        let scaleY = try scaleArg(a, "scale_y")
+        let translateX = try finiteArg(a, "translate_x")
+        let translateY = try finiteArg(a, "translate_y")
+        guard rotate != nil || uniformScale != nil || scaleX != nil || scaleY != nil
+            || translateX != nil || translateY != nil
+        else {
+            throw ToolError(
+                message: "transform_layer: nothing to change — pass at least one of rotate, "
+                    + "scale, scale_x, scale_y, translate_x, translate_y.")
+        }
+
+        var transform = LayerTransform(pivot: pivot)
+        transform.translation = CGVector(
+            dx: CGFloat(translateX ?? 0), dy: CGFloat(translateY ?? 0))
+        // Positive degrees turn CLOCKWISE on the flipped canvas, the same
+        // sign the options bar's Angle field writes.
+        if let rotate = rotate { transform.degrees = rotate }
+        transform.scaleX = scaleX ?? uniformScale ?? 1
+        transform.scaleY = scaleY ?? uniformScale ?? 1
+        guard transform.isFinite else {
+            throw ToolError(
+                message: "Those parameters do not compose a usable transform — every value "
+                    + "must be a finite number.")
+        }
+        guard !transform.isIdentity else {
+            throw ToolError(
+                message: "Those parameters leave the layer exactly where it is (a rotation "
+                    + "that is a multiple of 360°, scales of 1, no translation), so there is "
+                    + "nothing to transform.")
+        }
+        let matrix = transform.matrix
+
+        // The core derives its destination extent exactly this way, so the
+        // cases it would answer with NULL can be named precisely here.
+        let extent = matrix.destinationExtent(of: rect)
+        let int32Min = CGFloat(Int32.min)
+        let int32Max = CGFloat(Int32.max)
+        guard extent.width >= 1, extent.height >= 1,
+            extent.minX >= int32Min, extent.minY >= int32Min,
+            extent.maxX <= int32Max, extent.maxY <= int32Max
+        else {
+            throw ToolError(
+                message: "The transformed layer would collapse to nothing or land outside the "
+                    + "coordinates the core can address. Use a scale away from 0 and a "
+                    + "translation that keeps the layer near the canvas.")
+        }
+        guard Double(extent.width) * Double(extent.height) <= Self.maxLayerPixels else {
+            throw ToolError(
+                message: "The transformed layer would be \(Int(extent.width))×"
+                    + "\(Int(extent.height)) px, past the core's 100 megapixel ceiling for one "
+                    + "layer (it is \(info.width)×\(info.height) px now). Scale down.")
+        }
+        guard abs(matrix.a * matrix.d - matrix.b * matrix.c) >= 1e-9 else {
+            throw ToolError(
+                message: "The composed matrix is degenerate (its determinant is ~0, so the "
+                    + "layer collapses to a line): a scale of 0 or very near it. Use scales "
+                    + "away from 0.")
+        }
+
+        // performPixelEdit is the pixel-rewrite chokepoint: a transform
+        // resamples the pixels a text layer's description was rendered from,
+        // so the description is dropped in the SAME edit (one undo step) and
+        // reported back — the agent must never raise the UI's modal prompt.
+        let rasterized: Bool
+        do {
+            rasterized = try performPixelEdit(
+                document, "Transform Layer", pixelLayer: index
+            ) { doc in
+                doc.transformingLayer(index, matrix, sampler: sampler.filter)
+            }
+        } catch is ToolError {
+            // performEdit's message is generic; everything the core can
+            // refuse here is one of these two, and the checks above already
+            // caught the common shapes.
+            throw ToolError(
+                message: "The core refused this transform: the composed matrix is degenerate "
+                    + "(a zero or near-zero scale) or the resulting layer falls outside the "
+                    + "sizes it allows. Try scales away from 0 and a smaller enlargement.")
+        }
+
+        let after = document.doc?.layerInfo(index)
+        return try pixelEditResult(
+            [
+                "ok": true,
+                "layer": index,
+                // Where the layer landed: the outward-rounded bounding box of
+                // the transformed corners, so a render can be checked against it.
+                "bounds": [
+                    "x": after?.offsetX ?? 0, "y": after?.offsetY ?? 0,
+                    "width": after?.width ?? 0, "height": after?.height ?? 0,
+                ],
+                "applied": [
+                    "rotate": Self.transformNumber(transform.degrees),
+                    "scale_x": Self.transformNumber(Double(transform.scaleX)),
+                    "scale_y": Self.transformNumber(Double(transform.scaleY)),
+                    "translate_x": Self.transformNumber(translateX ?? 0),
+                    "translate_y": Self.transformNumber(translateY ?? 0),
+                    "pivot_x": Self.transformNumber(Double(pivot.x)),
+                    "pivot_y": Self.transformNumber(Double(pivot.y)),
+                    "sampler": sampler.name,
+                ],
+            ], layer: index, rasterizedText: rasterized)
     }
 
     // MARK: - Filters and geometry
@@ -1489,6 +1696,86 @@ final class AgentServer {
                     "visible": ["type": "boolean"],
                     "offset_x": ["type": "integer"],
                     "offset_y": ["type": "integer"],
+                    "document_id": docID,
+                ]),
+            tool(
+                "transform_layer",
+                "Rotates, scales and/or moves ONE layer's pixels in a single resample — the "
+                    + "same pipeline as the app's Free Transform (⌘T). The rotation and the "
+                    + "scales act around a pivot (the centre of the layer's CURRENT bounds by "
+                    + "default), then the translation is added; the layer is resampled once "
+                    + "into the outward-rounded bounding box of its transformed corners, so "
+                    + "its offset AND size both change, and it may end up extending past the "
+                    + "canvas. The canvas and every other layer are untouched, and a layer "
+                    + "mask rides along, resampled identically. Pass at least one of rotate, "
+                    + "scale, scale_x, scale_y, translate_x, translate_y; the result reports "
+                    + "the layer's new bounds so you can verify placement. For whole-document "
+                    + "geometry use rotate / flip / image_size instead. NOTE: this rewrites "
+                    + "the layer's pixels, so on a re-editable TEXT layer it drops the text "
+                    + "description (undo restores it) — to just MOVE such a layer and keep "
+                    + "its text, set offset_x / offset_y with set_layer_properties.",
+                [
+                    "layer": index,
+                    "rotate": [
+                        "type": "number",
+                        "description": "Rotation in degrees around the pivot. POSITIVE IS "
+                            + "CLOCKWISE on screen (canvas y grows downward), matching the "
+                            + "app's Angle field. Default 0.",
+                    ],
+                    "scale": [
+                        "type": "number",
+                        "description": "Uniform scale multiplier for both axes: 1 = unchanged "
+                            + "(default), 0.5 = half size, 2 = double, negative mirrors. "
+                            + "scale_x / scale_y override it per axis. Magnitudes are clamped "
+                            + "to 0.001-100 and 0 is refused.",
+                    ],
+                    "scale_x": [
+                        "type": "number",
+                        "description": "Horizontal scale multiplier, overriding scale "
+                            + "(1 = unchanged, negative mirrors left-right).",
+                    ],
+                    "scale_y": [
+                        "type": "number",
+                        "description": "Vertical scale multiplier, overriding scale "
+                            + "(1 = unchanged, negative mirrors top-bottom).",
+                    ],
+                    "translate_x": [
+                        "type": "number",
+                        "description": "Move right by this many canvas px (negative = left), "
+                            + "applied after the rotation and scale.",
+                    ],
+                    "translate_y": [
+                        "type": "number",
+                        "description": "Move down by this many canvas px (negative = up), "
+                            + "applied after the rotation and scale.",
+                    ],
+                    "around": [
+                        "type": "string",
+                        "enum": ["center", "top_left"],
+                        "description": "The pivot the rotation and scale turn/grow around: "
+                            + "\"center\" (default) or \"top_left\" of the layer's current "
+                            + "bounds. pivot_x / pivot_y override it.",
+                    ],
+                    "pivot_x": [
+                        "type": "number",
+                        "description": "Explicit pivot x in canvas px; overrides around on "
+                            + "this axis.",
+                    ],
+                    "pivot_y": [
+                        "type": "number",
+                        "description": "Explicit pivot y in canvas px; overrides around on "
+                            + "this axis.",
+                    ],
+                    "sampler": [
+                        "type": "string",
+                        "enum": ["nearest", "bilinear", "bicubic", "lanczos"],
+                        "description": "Resampling filter, default bicubic (Catmull-Rom). "
+                            + "nearest keeps hard pixel edges (pixel art), lanczos is "
+                            + "sharpest for big reductions. Whole-pixel moves and mirrors "
+                            + "(scale -1) copy pixels losslessly whatever this says; every "
+                            + "rotation is resampled, so for a lossless quarter turn of the "
+                            + "WHOLE image use the rotate tool instead.",
+                    ],
                     "document_id": docID,
                 ]),
             tool(

@@ -1,5 +1,10 @@
 # High-Leverage Roadmap
 
+**Status: Phases 1–4 have shipped** — selection algebra/feathering/marching
+ants, layer masks, re-editable text layers, and the unified transform pipeline
+(Free Transform, ⌘T) are all in the app, the core, and the MCP catalog, which
+now stands at 38 tools. The deferred items below remain deferred.
+
 Four features chosen from the GIMP architecture study
 (`gimp-image-manipulation-capabilities.md`) as the best
 capability-per-effort fits for Rasterize's current model: they compound

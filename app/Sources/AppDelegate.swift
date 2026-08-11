@@ -223,6 +223,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Duplicate Layer", #selector(EditorViewController.duplicateLayer(_:)), "j"))
         menu.addItem(item("Delete Layer", #selector(EditorViewController.deleteLayer(_:))))
         menu.addItem(.separator())
+        // Modal on-canvas session, not a tool: Return commits, Escape cancels.
+        menu.addItem(item("Free Transform", #selector(EditorViewController.freeTransform(_:)), "t"))
+        menu.addItem(.separator())
         menu.addItem(submenuItem(layerMaskMenu()))
         menu.addItem(.separator())
         menu.addItem(

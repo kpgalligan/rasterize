@@ -557,9 +557,10 @@ fn composite_layer_into(
 
 /// The five exact (lossless, axis-aligned) whole-document transforms. Naming
 /// one lets `geometry` apply the SAME transform to a layer's pixels and to its
-/// mask, which is what keeps the two the same size.
+/// mask, which is what keeps the two the same size. `doc_transform` reuses
+/// them as the exact fast paths of the arbitrary-affine layer transform.
 #[derive(Clone, Copy)]
-enum Geometry {
+pub(crate) enum Geometry {
     Rotate90,
     Rotate180,
     Rotate270,
@@ -568,7 +569,10 @@ enum Geometry {
 }
 
 impl Geometry {
-    fn apply<I>(self, img: &I) -> ImageBuffer<I::Pixel, Vec<<I::Pixel as Pixel>::Subpixel>>
+    pub(crate) fn apply<I>(
+        self,
+        img: &I,
+    ) -> ImageBuffer<I::Pixel, Vec<<I::Pixel as Pixel>::Subpixel>>
     where
         I: GenericImageView,
         I::Pixel: 'static,

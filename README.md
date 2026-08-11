@@ -30,6 +30,20 @@ decoding, encoding, and manipulation.
   failed saves never truncate or delete an existing destination file
 - Smooth zoom (pinch, ⌘+/⌘-, fit, actual size) and pan
 - Rotate 90°/180°, flip horizontal/vertical
+- **Free Transform** (Layer > Free Transform, ⌘T): rotate, scale and move the
+  active layer in one session — drag the eight handles to scale (Shift keeps
+  the proportions, Option grows about the pivot), drag just outside a corner to
+  rotate (Shift snaps to 15°), drag inside to move, arrow keys nudge; Return or
+  a double-click commits, Escape cancels. The options bar shows editable
+  Angle / Scale X / Scale Y, the resulting size, and the resampling filter
+  (nearest, bilinear, bicubic by default, or Lanczos). The drag is a live
+  preview and the whole session commits as **one undo step** — the layer is
+  resampled exactly once, in premultiplied alpha so rotated edges stay clean
+  instead of fringing dark. A layer mask transforms with its layer, and whole-
+  pixel moves and mirrors copy pixels losslessly. Text layers ask to rasterize
+  first (as any destructive edit does). Selections are not transformable yet —
+  a session always transforms the whole layer and hides the marquee while it
+  runs
 - Selection-based crop, Image Size (scale with filter choice, up to 100 MP),
   and Canvas Size with the Photoshop-style 3×3 anchor selector — grow or
   trim the canvas without scaling; layers keep their pixels and can be
@@ -96,11 +110,14 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 37 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 38 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG), layer operations, blend modes, layer masks (add revealing,
-hiding or from the selection; enable, apply, or delete), filters, geometry,
-brush and eraser strokes (polyline points with size/color/opacity, and a
+hiding or from the selection; enable, apply, or delete), filters, geometry —
+including `transform_layer`, the Free Transform pipeline with named parameters
+(rotate in degrees, positive is clockwise; scale, translate, pivot, sampler),
+reporting the layer's new bounds — brush and eraser strokes (polyline points
+with size/color/opacity, and a
 `target` choosing the layer's pixels or its mask), text — `add_text_layer`
 and `edit_text_layer` for re-editable text layers (`get_document` reports
 each layer's text parameters) and `add_text` for the rasterizing variant —

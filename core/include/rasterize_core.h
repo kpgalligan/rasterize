@@ -313,6 +313,60 @@ RzDocument *rz_doc_canvas_resize(const RzDocument *doc, uint32_t w,
                                  uint32_t h, int32_t origin_x,
                                  int32_t origin_y);
 
+/* Free transform of ONE layer by an arbitrary affine matrix.
+ *
+ * `affine` points to exactly six doubles in CGAffineTransform element order,
+ * [a, b, c, d, tx, ty], mapping
+ *     (x, y) -> (a*x + c*y + tx, b*x + d*y + ty)
+ * so a CGAffineTransform's fields can be handed over unchanged.
+ *
+ * The matrix works in CANVAS coordinates: the layer occupies the canvas rect
+ * (offset_x, offset_y, layer_width, layer_height), the matrix says where that
+ * rect lands, and the layer's NEW offset and size are the axis-aligned
+ * bounding box of the four transformed corners, rounded OUTWARD (floor of the
+ * minima, ceil of the maxima) so nothing is clipped — after each corner within
+ * 1e-9 of an integer is snapped onto it, so the floating-point residue of a
+ * composed matrix (cos(PI/2) is 6e-17, not 0) cannot add a phantom transparent
+ * row or column. Corners that are fractional by any user-meaningful amount are
+ * untouched and still round outward. The canvas itself is not touched, and
+ * neither is any other layer; a transformed layer may extend past the canvas,
+ * exactly like any other offset layer.
+ *
+ * Pixels are inverse-mapped: every DESTINATION pixel centre is mapped back
+ * through the inverse matrix and sampled in the source with `sampler` (the
+ * shared RzResizeFilter values: NEAREST point-samples, BILINEAR is a 2x2
+ * triangle filter, CATMULL_ROM a 4x4 bicubic, LANCZOS3 a 6x6 windowed sinc).
+ * Samples landing outside the source pixels are fully transparent, so edges
+ * fade out rather than smear the border. Interpolation runs in PREMULTIPLIED
+ * f32 and is unpremultiplied on the way out, so anti-aliased edges keep their
+ * color instead of fringing toward the (meaningless) color of transparent
+ * neighbours.
+ *
+ * A layer MASK is carried through identically: it is resampled with the same
+ * matrix, the same destination extent and the same sampler, so it lands
+ * pixel-for-pixel on the transformed pixels and stays exactly the layer's
+ * size. Layer `meta` is PRESERVED — the core never interprets it, so deciding
+ * whether a transform invalidates a text description is the host's policy.
+ * Name, opacity, blend mode, visibility and the mask-enabled flag survive too.
+ *
+ * Exact matrices (an integer translation, optionally composed with an
+ * axis-aligned flip or a 90-degree multiple) skip resampling and copy pixels
+ * losslessly, matching rz_doc_rotate90 / rz_doc_flip_* byte for byte. Exact
+ * means "within 1e-9": a caller that composes its quarter turn from an angle
+ * (rotated(by: M_PI_2), whose cosine is 6e-17 rather than 0) gets the same
+ * lossless copy and the same extent as one passing an integer matrix. A
+ * transform that misses by more than that — 89.999 degrees is 1.7e-5 off —
+ * resamples normally. The dedicated whole-document ops above remain the right
+ * call for menu items.
+ *
+ * NULL if doc or affine is NULL, idx is out of range, any matrix element is
+ * not finite, the matrix is singular (|a*d - b*c| < 1e-9), the sampler value
+ * is unknown, or the destination extent is empty, falls outside the int32
+ * offset range, or exceeds 100000000 pixels. */
+RzDocument *rz_doc_transform_layer(const RzDocument *doc, size_t idx,
+                                   const double *affine,
+                                   RzResizeFilter sampler);
+
 /* ------------------------------------------------------------------------ */
 /* Additional filters (pure RzImage operations, NULL on invalid args)       */
 /* ------------------------------------------------------------------------ */

@@ -2,7 +2,7 @@
 //! conventions as `ffi`: catch_unwind everywhere, NULL-tolerant, errors via
 //! heap CStrings released with rz_string_free.
 
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, c_double, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
@@ -11,6 +11,7 @@ use image::imageops::FilterType;
 use image::RgbaImage;
 
 use crate::doc::{BlendMode, MaskKind, RzDocument, MAX_PIXELS, MAX_RZDC_META_LEN};
+use crate::doc_transform::Affine;
 use crate::ops::CompositeMode;
 use crate::RzImage;
 
@@ -757,6 +758,39 @@ pub unsafe extern "C" fn rz_doc_resize(
     filter: c_int,
 ) -> *mut RzDocument {
     unsafe { doc_op(doc, |d| d.resize(w, h, filter_from_c(filter)?)) }
+}
+
+/// Transforms ONE layer by an arbitrary affine matrix given in CANVAS
+/// coordinates. `affine` points to exactly six doubles in `CGAffineTransform`
+/// order — `[a, b, c, d, tx, ty]`, mapping `(x, y)` to
+/// `(a*x + c*y + tx, b*x + d*y + ty)`. The layer's new offset and size are the
+/// outward-rounded bounding box of its transformed rect; pixels are
+/// inverse-mapped and resampled with `filter` (the shared `RzResizeFilter`
+/// values), samples outside the source coming out fully transparent. A layer
+/// mask is carried through identically and `meta` is preserved.
+///
+/// NULL on NULL args, out-of-range idx, a non-finite or singular matrix, an
+/// unknown filter value, or a destination extent that is empty or past the
+/// pixel ceiling.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `affine`
+/// must be NULL or a valid pointer to six readable `double`s.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_transform_layer(
+    doc: *const RzDocument,
+    idx: usize,
+    affine: *const c_double,
+    filter: c_int,
+) -> *mut RzDocument {
+    if affine.is_null() {
+        return ptr::null_mut();
+    }
+    // The element count is fixed by the contract (six), never a caller-
+    // supplied length, so the slice is bounded before anything reads it.
+    let m = unsafe { std::slice::from_raw_parts(affine, 6) };
+    let m = Affine::from_array([m[0], m[1], m[2], m[3], m[4], m[5]]);
+    unsafe { doc_op(doc, |d| d.transform_layer(idx, m, filter_from_c(filter)?)) }
 }
 
 // ------------------------------------------------------- selection & fill --

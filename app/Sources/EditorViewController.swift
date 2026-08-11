@@ -66,6 +66,18 @@ final class EditorViewController: NSViewController {
     private let gradientShapePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let gradientEndLabel = NSTextField(labelWithString: "End")
     private let gradientEndWell = NSColorWell()
+    // Free Transform: numerics bound both ways to the session's parameters,
+    // plus the sampler the single commit-time resample will use.
+    private let transformAngleLabel = NSTextField(labelWithString: "Angle°")
+    private let transformAngleField = NSTextField(string: "0")
+    private let transformScaleXLabel = NSTextField(labelWithString: "Scale X%")
+    private let transformScaleXField = NSTextField(string: "100")
+    private let transformScaleYLabel = NSTextField(labelWithString: "Y%")
+    private let transformScaleYField = NSTextField(string: "100")
+    private let transformSizeLabel = NSTextField(labelWithString: "Size")
+    private let transformSizeValueLabel = NSTextField(labelWithString: "")
+    private let transformSamplerLabel = NSTextField(labelWithString: "Sampler")
+    private let transformSamplerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
 
     /// Magic wand / bucket fill color tolerance (max per-channel diff).
     private var tolerance = 32
@@ -85,6 +97,12 @@ final class EditorViewController: NSViewController {
     // Move-tool drag state: the active layer's offset when the drag began.
     private var moveStartOffset: (x: Int, y: Int)?
 
+    // The open Free Transform session (see TransformSession), and the flag
+    // that marks the document change its own commit causes — every OTHER
+    // change under an open session ends it.
+    private var transformSession: TransformSession?
+    private var isCommittingTransform = false
+
     // Brush/eraser drag state: the document handle when the stroke began.
     // Every stroke tick repaints the whole overlay onto this base, so the
     // live projection always shows the committed result. Mask strokes leave
@@ -103,6 +121,9 @@ final class EditorViewController: NSViewController {
     private var paintColor: NSColor = .black
     private var fontFamily = "Helvetica Neue"
     private var fontSize: CGFloat = 48
+    /// Sampler a Free Transform commit resamples with; remembered between
+    /// sessions, like the paint options above.
+    private var transformSampler = RZ_FILTER_CATMULL_ROM
 
     private static let zoomLadder: [CGFloat] = [
         0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32,
@@ -300,6 +321,18 @@ final class EditorViewController: NSViewController {
                 return doc.withLayerOffset(idx, info.offsetX + dx, info.offsetY + dy)
             }
         }
+        canvas.onTransformMouseDown = { [weak self] point, modifiers in
+            self?.transformMouseDown(point, modifiers)
+        }
+        canvas.onTransformMouseDragged = { [weak self] point, modifiers in
+            self?.transformMouseDragged(point, modifiers)
+        }
+        canvas.onTransformMouseUp = { [weak self] _, _ in
+            self?.transformSession?.drag = nil
+        }
+        canvas.onTransformCommit = { [weak self] in self?.commitTransformSession() }
+        canvas.onTransformCancel = { [weak self] in self?.endTransformSession() }
+        canvas.onTransformNudge = { [weak self] dx, dy in self?.transformNudge(dx, dy) }
 
         buildOptionsBar()
         canvas.brushSize = brushSize
@@ -380,6 +413,9 @@ final class EditorViewController: NSViewController {
         layersPanel = LayersPanelViewController()
         layersPanel.document = document
         layersPanel.onActiveLayerChange = { [weak self] in
+            // Retargeting the panel leaves the transform session: commit it
+            // (it carries its own layer index, so it still lands correctly).
+            self?.commitPendingTransform()
             self?.syncPaintTarget()
             self?.updateStatus()
             self?.updateActiveLayerRect()
@@ -498,7 +534,10 @@ final class EditorViewController: NSViewController {
         optionsBar.spacing = 8
         optionsBar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
 
-        for label in [sizeLabel, opacityLabel, fontLabel] {
+        for label in [
+            sizeLabel, opacityLabel, fontLabel, transformAngleLabel, transformScaleXLabel,
+            transformScaleYLabel, transformSizeLabel, transformSamplerLabel,
+        ] {
             label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
         }
 
@@ -590,6 +629,52 @@ final class EditorViewController: NSViewController {
         gradientEndWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
         gradientEndWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
 
+        // Free Transform numerics: the session's parameters, editable. Angle
+        // in degrees (clockwise), scales in percent; the resulting pixel
+        // size is derived, so it only reads back.
+        let angleFormatter = NumberFormatter()
+        angleFormatter.numberStyle = .decimal
+        angleFormatter.usesGroupingSeparator = false
+        angleFormatter.maximumFractionDigits = 2
+        angleFormatter.minimum = -360
+        angleFormatter.maximum = 360
+        transformAngleField.formatter = angleFormatter
+        transformAngleField.controlSize = .small
+        transformAngleField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        transformAngleField.target = self
+        transformAngleField.action = #selector(transformAngleChanged(_:))
+        transformAngleField.widthAnchor.constraint(equalToConstant: 56).isActive = true
+
+        for field in [transformScaleXField, transformScaleYField] {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            formatter.usesGroupingSeparator = false
+            formatter.maximumFractionDigits = 2
+            formatter.minimum = NSNumber(value: -Self.maxScalePercent)
+            formatter.maximum = NSNumber(value: Self.maxScalePercent)
+            field.formatter = formatter
+            field.controlSize = .small
+            field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            field.target = self
+            field.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        }
+        transformScaleXField.action = #selector(transformScaleXChanged(_:))
+        transformScaleYField.action = #selector(transformScaleYChanged(_:))
+
+        transformSizeValueLabel.font = NSFont.monospacedDigitSystemFont(
+            ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        transformSizeValueLabel.textColor = .secondaryLabelColor
+        // Fixed width so the bar doesn't shuffle as the digits change.
+        transformSizeValueLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
+
+        transformSamplerPopup.controlSize = .small
+        transformSamplerPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        transformSamplerPopup.addItems(withTitles: Self.transformSamplers.map { $0.title })
+        transformSamplerPopup.selectItem(at: Self.transformSamplerIndex(transformSampler))
+        transformSamplerPopup.target = self
+        transformSamplerPopup.action = #selector(transformSamplerChanged(_:))
+        transformSamplerPopup.widthAnchor.constraint(equalToConstant: 170).isActive = true
+
         let controls: [NSView] = [
             sizeLabel, sizeSlider, sizeField,
             opacityLabel, opacitySlider, opacityValueLabel,
@@ -597,6 +682,11 @@ final class EditorViewController: NSViewController {
             toleranceLabel, toleranceSlider, toleranceValueLabel, contiguousCheck,
             gradientShapePopup, gradientEndLabel, gradientEndWell,
             fontLabel, fontPopup, fontSizeField,
+            transformAngleLabel, transformAngleField,
+            transformScaleXLabel, transformScaleXField,
+            transformScaleYLabel, transformScaleYField,
+            transformSizeLabel, transformSizeValueLabel,
+            transformSamplerLabel, transformSamplerPopup,
         ]
         for control in controls {
             optionsBar.addArrangedSubview(control)
@@ -643,6 +733,9 @@ final class EditorViewController: NSViewController {
     // MARK: - Tools
 
     func selectTool(_ tool: EditorTool) {
+        // Switching tools leaves the transform session, which commits it
+        // rather than silently dropping the drag.
+        commitPendingTransform()
         if currentTool == .text, tool != .text {
             canvas.commitTextSession()
         }
@@ -728,30 +821,42 @@ final class EditorViewController: NSViewController {
     @objc func selectTextTool(_ sender: Any?) { selectTool(.text) }
 
     private func updateOptionsBar() {
+        // A Free Transform session takes the whole bar over: it is modal on
+        // the canvas, so the active tool's own options cannot be used.
+        let transforming = isTransforming
         let tool = currentTool
-        let paintTool = tool == .brush || tool == .eraser
-        let toleranceTool = tool == .wand || tool == .fill
+        let paintTool = !transforming && (tool == .brush || tool == .eraser)
+        let toleranceTool = !transforming && (tool == .wand || tool == .fill)
         for control in [sizeLabel, sizeSlider, sizeField] as [NSView] {
             control.isHidden = !paintTool
         }
         for control in [opacityLabel, opacitySlider, opacityValueLabel] as [NSView] {
             control.isHidden = !paintTool
         }
-        colorWell.isHidden = !(tool == .brush || tool == .text || tool == .fill
-            || tool == .gradient)
-        fontLabel.isHidden = tool != .text
-        fontPopup.isHidden = tool != .text
-        fontSizeField.isHidden = tool != .text
+        colorWell.isHidden = transforming
+            || !(tool == .brush || tool == .text || tool == .fill || tool == .gradient)
+        let textTool = !transforming && tool == .text
+        fontLabel.isHidden = !textTool
+        fontPopup.isHidden = !textTool
+        fontSizeField.isHidden = !textTool
         for control in [toleranceLabel, toleranceSlider, toleranceValueLabel] as [NSView] {
             control.isHidden = !toleranceTool
         }
         contiguousCheck.isHidden = !toleranceTool
-        gradientShapePopup.isHidden = tool != .gradient
-        gradientEndLabel.isHidden = tool != .gradient
-        gradientEndWell.isHidden = tool != .gradient
+        let gradientTool = !transforming && tool == .gradient
+        gradientShapePopup.isHidden = !gradientTool
+        gradientEndLabel.isHidden = !gradientTool
+        gradientEndWell.isHidden = !gradientTool
+        for control in [
+            transformAngleLabel, transformAngleField, transformScaleXLabel, transformScaleXField,
+            transformScaleYLabel, transformScaleYField, transformSizeLabel,
+            transformSizeValueLabel, transformSamplerLabel, transformSamplerPopup,
+        ] as [NSView] {
+            control.isHidden = !transforming
+        }
 
-        let barHidden =
-            tool == .select || tool == .ellipseSelect || tool == .lasso || tool == .move
+        let barHidden = !transforming
+            && (tool == .select || tool == .ellipseSelect || tool == .lasso || tool == .move)
         optionsBar.isHidden = barHidden
         scrollTopToRoot.isActive = false
         scrollTopToOptions.isActive = false
@@ -963,6 +1068,358 @@ final class EditorViewController: NSViewController {
         updateActiveLayerRect()
     }
 
+    // MARK: - Free Transform
+
+    /// A modal free-transform session on ONE layer. The document is NOT
+    /// touched while it runs: the canvas draws the layer's cached pixels
+    /// through the composed matrix, and the core resamples exactly once, at
+    /// commit. The parameters (see LayerTransform) are the source of truth —
+    /// handle drags and the options-bar numerics are two ways of writing
+    /// them, and the matrix is always composed, never decomposed.
+    private struct TransformSession {
+        /// The layer being transformed; the session outlives changes to the
+        /// document's active layer, so it carries its own index.
+        let layer: Int
+        /// The layer's canvas rect when the session opened.
+        let sourceRect: CGRect
+        let layerImage: CGImage?
+        let maskImage: CGImage?
+        let below: CGImage?
+        let above: CGImage?
+        let opacity: CGFloat
+        var transform: LayerTransform
+        var sampler: RzResizeFilter
+        var drag: TransformDrag?
+    }
+
+    /// What the current mouse drag does, captured at mouse-down together
+    /// with the parameters it started from: every tick recomputes from that
+    /// snapshot, so a drag never accumulates rounding error.
+    private enum TransformDrag {
+        case move(start: LayerTransform, grab: CGPoint)
+        case scale(handle: TransformHandle, start: LayerTransform)
+        case rotate(start: LayerTransform, grab: CGPoint)
+    }
+
+    /// Samplers offered for the commit-time resample, in popup order.
+    private static let transformSamplers: [(title: String, value: RzResizeFilter)] = [
+        ("Nearest", RZ_FILTER_NEAREST),
+        ("Bilinear", RZ_FILTER_BILINEAR),
+        ("Bicubic (Catmull-Rom)", RZ_FILTER_CATMULL_ROM),
+        ("Lanczos", RZ_FILTER_LANCZOS3),
+    ]
+
+    /// Widest scale the numeric fields accept, mirroring
+    /// LayerTransform.maxScaleMagnitude.
+    private static let maxScalePercent = Double(LayerTransform.maxScaleMagnitude) * 100
+
+    /// How far from a corner (SCREEN points) the rotation ring reaches. The
+    /// handles are tested first, so the ring is what is left of this radius
+    /// outside the box.
+    private static let transformRotateBand: CGFloat = 36
+
+    private static func transformSamplerIndex(_ sampler: RzResizeFilter) -> Int {
+        transformSamplers.firstIndex { $0.value == sampler } ?? 0
+    }
+
+    var isTransforming: Bool { transformSession != nil }
+
+    /// Layer > Free Transform (⌘T). Opens the session on the active layer;
+    /// Return commits it, Escape restores the untouched layer.
+    @objc func freeTransform(_ sender: Any?) {
+        guard transformSession == nil, let document = document else {
+            NSSound.beep()
+            return
+        }
+        // Never leave a text session hanging underneath the box.
+        canvas.commitTextSession()
+        let idx = document.activeLayerIndex
+        guard let doc = document.doc, let info = doc.layerInfo(idx),
+              info.width > 0, info.height > 0
+        else {
+            NSSound.beep()
+            return
+        }
+        let rect = CGRect(
+            x: CGFloat(info.offsetX), y: CGFloat(info.offsetY),
+            width: CGFloat(info.width), height: CGFloat(info.height))
+        let stack = transformStackComposites(doc, around: idx)
+        transformSession = TransformSession(
+            layer: idx,
+            sourceRect: rect,
+            // A hidden layer still transforms; there are simply no pixels to
+            // preview, only the box.
+            layerImage: info.visible ? doc.layerImage(idx)?.makeCGImage() : nil,
+            // Layer pixels come back UNMASKED, so an enabled mask has to
+            // clip the preview the way the projection would.
+            maskImage: doc.layerMaskEnabled(idx)
+                ? doc.layerMaskImage(idx).flatMap(Self.grayMaskImage) : nil,
+            below: stack.below,
+            above: stack.above,
+            opacity: CGFloat(info.opacity),
+            transform: LayerTransform(pivot: CGPoint(x: rect.midX, y: rect.midY)),
+            sampler: transformSampler,
+            drag: nil)
+        updateOptionsBar()
+        refreshTransformPreview()
+        updateTransformFields()
+        updateStatus()
+        view.window?.makeFirstResponder(canvas)
+    }
+
+    /// A mask image (opaque RGBA grayscale, the layer's size) redrawn into a
+    /// DeviceGray bitmap, which is the only form CGContext.clip(to:mask:)
+    /// accepts. White shows and black hides, matching the core's coverage.
+    private static func grayMaskImage(_ mask: RasterImage) -> CGImage? {
+        guard let source = mask.makeCGImage(), source.width > 0, source.height > 0,
+              let context = CGContext(
+                data: nil, width: source.width, height: source.height,
+                bitsPerComponent: 8, bytesPerRow: source.width,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue)
+        else { return nil }
+        context.draw(
+            source, in: CGRect(x: 0, y: 0, width: source.width, height: source.height))
+        return context.makeImage()
+    }
+
+    /// The two composites the preview draws the transformed layer between:
+    /// the stack below it and the stack above it. Built once per session, so
+    /// the drag itself never calls the core.
+    private func transformStackComposites(_ doc: RasterDocument, around idx: Int)
+        -> (below: CGImage?, above: CGImage?)
+    {
+        var belowDoc: RasterDocument? = doc
+        for layer in idx..<doc.layerCount {
+            belowDoc = belowDoc?.withLayerVisible(layer, false)
+        }
+        var aboveDoc: RasterDocument? = doc
+        for layer in 0...idx {
+            aboveDoc = aboveDoc?.withLayerVisible(layer, false)
+        }
+        return (
+            belowDoc?.flattened()?.makeCGImage(),
+            idx >= doc.layerCount - 1 ? nil : aboveDoc?.flattened()?.makeCGImage())
+    }
+
+    /// Pushes the session's current matrix (and the box derived from it) to
+    /// the canvas. Cheap enough to run on every drag tick.
+    private func refreshTransformPreview() {
+        guard let session = transformSession else {
+            canvas.transformPreview = nil
+            return
+        }
+        let matrix = session.transform.matrix
+        canvas.transformPreview = ImageCanvasView.TransformPreview(
+            below: session.below,
+            above: session.above,
+            layer: session.layerImage,
+            mask: session.maskImage,
+            sourceRect: session.sourceRect,
+            matrix: matrix,
+            opacity: session.opacity,
+            quad: matrix.quad(of: session.sourceRect),
+            pivot: session.transform.pivotInCanvas,
+            interpolate: session.sampler != RZ_FILTER_NEAREST)
+    }
+
+    /// The parameters → fields half of the binding (the fields' actions are
+    /// the other half). The resulting pixel size is derived the same way the
+    /// core derives it, so it needs no core call either.
+    private func updateTransformFields() {
+        guard let session = transformSession else { return }
+        transformAngleField.stringValue = Self.transformNumber(session.transform.degrees)
+        transformScaleXField.stringValue = Self.transformNumber(
+            Double(session.transform.scaleX) * 100)
+        transformScaleYField.stringValue = Self.transformNumber(
+            Double(session.transform.scaleY) * 100)
+        let extent = session.transform.matrix.destinationExtent(of: session.sourceRect)
+        transformSizeValueLabel.stringValue =
+            "\(Int(extent.width)) × \(Int(extent.height)) px"
+        transformSamplerPopup.selectItem(at: Self.transformSamplerIndex(session.sampler))
+    }
+
+    /// Two decimals with trailing zeros dropped: "45", "-12.5", "133.33".
+    private static func transformNumber(_ value: Double) -> String {
+        let rounded = (value * 100).rounded() / 100
+        guard rounded != rounded.rounded() else { return String(Int(rounded)) }
+        return String(format: "%.2f", rounded)
+    }
+
+    // MARK: Free Transform gestures
+
+    /// What a press at `point` grabs: a handle (scale), the ring just
+    /// outside a corner (rotate), or the body (move). A press beyond all of
+    /// them does nothing — clicking away must not silently commit.
+    private func transformDrag(at point: CGPoint, session: TransformSession) -> TransformDrag? {
+        let scale = canvas.magnification
+        let matrix = session.transform.matrix
+        let slop = ImageCanvasView.transformHandleSize / scale
+        for handle in TransformHandle.allCases {
+            let world = handle.point(in: session.sourceRect).applying(matrix)
+            if abs(point.x - world.x) <= slop, abs(point.y - world.y) <= slop {
+                return .scale(handle: handle, start: session.transform)
+            }
+        }
+        let corners = matrix.quad(of: session.sourceRect)
+        guard corners.count == 4 else { return nil }
+        let box = NSBezierPath()
+        box.move(to: corners[0])
+        for corner in corners.dropFirst() {
+            box.line(to: corner)
+        }
+        box.close()
+        if box.contains(point) {
+            return .move(start: session.transform, grab: point)
+        }
+        let band = Self.transformRotateBand / scale
+        for corner in corners where hypot(point.x - corner.x, point.y - corner.y) <= band {
+            return .rotate(start: session.transform, grab: point)
+        }
+        return nil
+    }
+
+    private func transformMouseDown(_ point: CGPoint, _ modifiers: NSEvent.ModifierFlags) {
+        guard let session = transformSession else { return }
+        transformSession?.drag = transformDrag(at: point, session: session)
+    }
+
+    private func transformMouseDragged(_ point: CGPoint, _ modifiers: NSEvent.ModifierFlags) {
+        guard let session = transformSession, let drag = session.drag else { return }
+        let proportional = modifiers.contains(.shift)
+        let aboutPivot = modifiers.contains(.option)
+        let updated: LayerTransform
+        switch drag {
+        case let .move(start, grab):
+            updated = LayerTransform.moving(
+                start, by: CGVector(dx: point.x - grab.x, dy: point.y - grab.y),
+                constrained: proportional)
+        case let .scale(handle, start):
+            updated = LayerTransform.scaling(
+                start, in: session.sourceRect, handle: handle, to: point,
+                proportional: proportional, aboutPivot: aboutPivot)
+        case let .rotate(start, grab):
+            updated = LayerTransform.rotating(
+                start, from: grab, to: point, snap: proportional)
+        }
+        guard updated.isFinite else { return }
+        transformSession?.transform = updated
+        refreshTransformPreview()
+        updateTransformFields()
+    }
+
+    /// Arrow-key nudge of the whole box (Shift: 10px).
+    private func transformNudge(_ dx: CGFloat, _ dy: CGFloat) {
+        guard let session = transformSession else { return }
+        transformSession?.transform = LayerTransform.moving(
+            session.transform, by: CGVector(dx: dx, dy: dy), constrained: false)
+        refreshTransformPreview()
+        updateTransformFields()
+    }
+
+    // MARK: Free Transform options bar
+
+    @objc private func transformAngleChanged(_ sender: Any?) {
+        guard transformSession != nil else { return }
+        transformSession?.transform.degrees = min(
+            max(transformAngleField.doubleValue, -360), 360)
+        refreshTransformPreview()
+        updateTransformFields()
+    }
+
+    @objc private func transformScaleXChanged(_ sender: Any?) {
+        guard transformSession != nil else { return }
+        transformSession?.transform.scaleX = LayerTransform.clampScale(
+            CGFloat(transformScaleXField.doubleValue / 100))
+        refreshTransformPreview()
+        updateTransformFields()
+    }
+
+    @objc private func transformScaleYChanged(_ sender: Any?) {
+        guard transformSession != nil else { return }
+        transformSession?.transform.scaleY = LayerTransform.clampScale(
+            CGFloat(transformScaleYField.doubleValue / 100))
+        refreshTransformPreview()
+        updateTransformFields()
+    }
+
+    @objc private func transformSamplerChanged(_ sender: Any?) {
+        let index = min(
+            max(transformSamplerPopup.indexOfSelectedItem, 0), Self.transformSamplers.count - 1)
+        transformSampler = Self.transformSamplers[index].value
+        transformSession?.sampler = transformSampler
+        // Nearest previews without smoothing, so the box shows the hard
+        // pixel edges the commit will produce.
+        refreshTransformPreview()
+    }
+
+    // MARK: Free Transform commit / cancel
+
+    /// Runs the session's matrix through the core as ONE undo step named
+    /// "Transform Layer". Returns false when the commit did NOT happen and
+    /// the session must stay open: the core refused the matrix, or the user
+    /// cancelled the rasterize prompt.
+    @discardableResult
+    private func commitTransformSession() -> Bool {
+        guard let session = transformSession, let document = document, let doc = document.doc
+        else {
+            endTransformSession()
+            return true
+        }
+        // Nothing actually moved (or the layer is gone): no edit, no undo
+        // step, no dirty flag — just close the session.
+        guard !session.transform.isIdentity, session.layer < doc.layerCount else {
+            endTransformSession()
+            return true
+        }
+        let idx = session.layer
+        // A free transform rewrites the pixels a text layer's description was
+        // rendered from. Same prompt as every other rasterizing edit, but
+        // taken here rather than through applyRasterizingEdit: Cancel has to
+        // keep the session open instead of abandoning the whole gesture.
+        let describesText = doc.textPayload(idx) != nil
+        if describesText, !document.confirmTextRasterize(layer: idx) { return false }
+        let matrix = session.transform.matrix
+        let sampler = session.sampler
+        let before = document.doc
+        isCommittingTransform = true
+        document.applyEdit("Transform Layer") { doc in
+            guard let transformed = doc.transformingLayer(idx, matrix, sampler: sampler) else {
+                return nil
+            }
+            guard describesText else { return transformed }
+            return transformed.withLayerMeta(idx, nil) ?? transformed
+        }
+        isCommittingTransform = false
+        // applyEdit already beeped if the core refused (a degenerate scale, an
+        // extent past its cap): keep the session up so the drag can be pulled
+        // back, rather than losing it.
+        guard document.doc !== before else { return false }
+        endTransformSession()
+        return true
+    }
+
+    /// Escape, and the teardown every other exit funnels through. The
+    /// document was never touched during the session, so cancelling is
+    /// nothing more than dropping the preview.
+    private func endTransformSession() {
+        guard transformSession != nil else { return }
+        transformSession = nil
+        canvas.transformPreview = nil
+        updateOptionsBar()
+        updateStatus()
+        updateActiveLayerRect()
+    }
+
+    /// Closes an open session by COMMITTING it — the rule for every way of
+    /// leaving one except Escape (tool switches, a new active layer, save,
+    /// close). A commit the core or the user refuses leaves the session open,
+    /// which is the safe direction.
+    func commitPendingTransform() {
+        guard transformSession != nil else { return }
+        commitTransformSession()
+    }
+
     // MARK: - Options bar actions
 
     @objc private func sizeSliderChanged(_ sender: Any?) {
@@ -1059,6 +1516,15 @@ final class EditorViewController: NSViewController {
               (note.object as? ImageDocument) === document,
               let doc = document.doc
         else { return }
+        // The document moved underneath an open transform session — only an
+        // agent edit can do this, since every user-driven edit is blocked
+        // while the session runs. Its matrix describes the layer rect the
+        // session opened on, so replaying it against a changed stack would be
+        // wrong: drop the session instead. The session's own commit sets the
+        // flag and is exempt.
+        if transformSession != nil, !isCommittingTransform {
+            endTransformSession()
+        }
         let newSize = doc.canvasSize
         let dimensionsChanged = canvas.frame.size != newSize
         canvas.image = document.projection?.makeCGImage()
@@ -1104,7 +1570,7 @@ final class EditorViewController: NSViewController {
             statusLayer.text = ""
             statusBlend.text = ""
         }
-        statusTool.text = toolDisplayName(currentTool)
+        statusTool.text = isTransforming ? "Free Transform" : toolDisplayName(currentTool)
         updateZoomLabel()
     }
 
@@ -1595,10 +2061,12 @@ extension EditorViewController {
         view.window?.firstResponder?.undoManager ?? document?.undoManager
     }
 
-    /// Called by ImageDocument on save/close/export so an in-progress text
-    /// session is never silently dropped from the written file.
-    func commitPendingTextSession() {
+    /// Called by ImageDocument on save/close/export so an in-progress canvas
+    /// session — text entry, or a Free Transform — is never silently dropped
+    /// from the written file.
+    func commitPendingSessions() {
         canvas.commitTextSession()
+        commitPendingTransform()
     }
 }
 
@@ -1638,10 +2106,11 @@ extension EditorViewController: NSUserInterfaceValidations {
             return true
         }
 
-        // While a text session is active, only tool switching (which commits
-        // the session) and zooming are safe; edit/filter/clipboard actions
-        // must not mutate the image underneath the session.
-        if canvas.hasActiveTextSession {
+        // While a text session or a Free Transform is active, only tool
+        // switching (handled above — it commits the session) and zooming are
+        // safe; edit/filter/clipboard actions must not mutate the image
+        // underneath the session, and Free Transform must not re-enter.
+        if canvas.hasActiveTextSession || isTransforming {
             if let action = item.action, Self.zoomActions.contains(action) {
                 return true
             }
@@ -1649,6 +2118,11 @@ extension EditorViewController: NSUserInterfaceValidations {
         }
 
         switch item.action {
+        case #selector(freeTransform(_:)):
+            // Needs a layer with pixels to transform.
+            let active = document?.activeLayerIndex ?? 0
+            guard let info = document?.doc?.layerInfo(active) else { return false }
+            return info.width > 0 && info.height > 0
         case #selector(cropToSelection(_:)), #selector(deselect(_:)),
             #selector(invertSelection(_:)), #selector(featherSelection(_:)):
             return canvas.selectionRect != nil
