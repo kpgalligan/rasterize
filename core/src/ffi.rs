@@ -5,49 +5,12 @@
 //! returns (with an error message where the contract provides `err_out`).
 //! NULL handles are always tolerated.
 
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, c_int, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use image::imageops::FilterType;
-
+use crate::ffi_util::{boxed, fallible_op, filter_from_c, pure_op, read_cstr};
 use crate::{ops, Format, RzImage};
-
-/// Stores a heap-allocated copy of `msg` through `err_out` (if non-NULL).
-/// Interior NUL bytes are replaced so the `CString` conversion cannot fail.
-///
-/// # Safety
-/// `err_out` must be NULL or a valid pointer to writable `*mut c_char`.
-unsafe fn set_err(err_out: *mut *mut c_char, msg: &str) {
-    if err_out.is_null() {
-        return;
-    }
-    let sanitized = msg.replace('\0', " ");
-    let cstring = CString::new(sanitized)
-        .unwrap_or_else(|_| CString::new("rasterize-core error").expect("static string"));
-    unsafe {
-        *err_out = cstring.into_raw();
-    }
-}
-
-/// Runs a pure operation against `img`, boxing the produced image.
-/// NULL input, `None`, or a panic all yield NULL.
-///
-/// # Safety
-/// `img` must be NULL or a valid pointer to a live `RzImage`.
-unsafe fn pure_op<F>(img: *const RzImage, op: F) -> *mut RzImage
-where
-    F: FnOnce(&RzImage) -> Option<RzImage>,
-{
-    if img.is_null() {
-        return ptr::null_mut();
-    }
-    let image = unsafe { &*img };
-    match catch_unwind(AssertUnwindSafe(|| op(image))) {
-        Ok(Some(result)) => Box::into_raw(Box::new(result)),
-        _ => ptr::null_mut(),
-    }
-}
 
 /// Opens the image file at `path` (UTF-8), sniffing the container format;
 /// `8BPS` files decode as flattened Photoshop composites. Returns NULL on
@@ -62,25 +25,18 @@ pub unsafe extern "C" fn rz_image_open(
     path: *const c_char,
     err_out: *mut *mut c_char,
 ) -> *mut RzImage {
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        if path.is_null() {
-            return Err("path is NULL".to_string());
-        }
-        let path = unsafe { CStr::from_ptr(path) }
-            .to_str()
-            .map_err(|_| "path is not valid UTF-8".to_string())?;
-        RzImage::open(path)
-    }));
-    match outcome {
-        Ok(Ok(img)) => Box::into_raw(Box::new(img)),
-        Ok(Err(msg)) => {
-            unsafe { set_err(err_out, &msg) };
-            ptr::null_mut()
-        }
-        Err(_) => {
-            unsafe { set_err(err_out, "internal error: panic while opening image") };
-            ptr::null_mut()
-        }
+    let body = || {
+        let path = unsafe { read_cstr(path, "path") }?;
+        RzImage::open(&path)
+    };
+    unsafe {
+        fallible_op(
+            err_out,
+            "panic while opening image",
+            ptr::null_mut(),
+            body,
+            boxed,
+        )
     }
 }
 
@@ -260,14 +216,7 @@ pub unsafe extern "C" fn rz_image_resize(
 ) -> *mut RzImage {
     unsafe {
         pure_op(img, |i| {
-            let filter = match filter {
-                0 => FilterType::Nearest,
-                1 => FilterType::Triangle,
-                2 => FilterType::CatmullRom,
-                3 => FilterType::Lanczos3,
-                _ => return None,
-            };
-            ops::resize(&i.pixels, w, h, filter).map(|pixels| RzImage { pixels })
+            ops::resize(&i.pixels, w, h, filter_from_c(filter)?).map(|pixels| RzImage { pixels })
         })
     }
 }
@@ -421,32 +370,17 @@ pub unsafe extern "C" fn rz_image_save(
     jpeg_quality: u8,
     err_out: *mut *mut c_char,
 ) -> bool {
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
+    let body = || {
         if img.is_null() {
             return Err("image is NULL".to_string());
         }
-        if path.is_null() {
-            return Err("path is NULL".to_string());
-        }
         let image = unsafe { &*img };
-        let path = unsafe { CStr::from_ptr(path) }
-            .to_str()
-            .map_err(|_| "path is not valid UTF-8".to_string())?;
+        let path = unsafe { read_cstr(path, "path") }?;
         let format =
             Format::from_c(format).ok_or_else(|| format!("unknown format value {format}"))?;
-        image.save(path, format, jpeg_quality)
-    }));
-    match outcome {
-        Ok(Ok(())) => true,
-        Ok(Err(msg)) => {
-            unsafe { set_err(err_out, &msg) };
-            false
-        }
-        Err(_) => {
-            unsafe { set_err(err_out, "internal error: panic while saving image") };
-            false
-        }
-    }
+        image.save(&path, format, jpeg_quality)
+    };
+    unsafe { fallible_op(err_out, "panic while saving image", false, body, |()| true) }
 }
 
 /// Frees strings returned via `err_out` parameters. NULL is a safe no-op.

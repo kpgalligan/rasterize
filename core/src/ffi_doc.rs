@@ -7,32 +7,15 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use image::imageops::FilterType;
-
 use image::RgbaImage;
 
 use crate::adjust::Adjustment;
-use crate::doc::{BlendMode, MaskKind, RzDocument, MAX_PIXELS, MAX_RZDC_META_LEN};
+use crate::doc::{BlendMode, MaskKind, RzDocument, MAX_PIXELS};
 use crate::doc_transform::Affine;
+use crate::ffi_util::{boxed, fallible_op, filter_from_c, read_cstr};
 use crate::ops::CompositeMode;
+use crate::rzdc::MAX_RZDC_META_LEN;
 use crate::RzImage;
-
-/// Stores a heap-allocated copy of `msg` through `err_out` (if non-NULL).
-/// Interior NUL bytes are replaced so the `CString` conversion cannot fail.
-/// (Local copy of the private helper in `ffi`.)
-///
-/// # Safety
-/// `err_out` must be NULL or a valid pointer to writable `*mut c_char`.
-unsafe fn set_err(err_out: *mut *mut c_char, msg: &str) {
-    if err_out.is_null() {
-        return;
-    }
-    let sanitized = msg.replace('\0', " ");
-    let cstring = CString::new(sanitized)
-        .unwrap_or_else(|_| CString::new("rasterize-core error").expect("static string"));
-    unsafe {
-        *err_out = cstring.into_raw();
-    }
-}
 
 /// Runs a pure operation against `doc`, boxing the produced document.
 /// NULL input, `None`, or a panic all yield NULL.
@@ -72,17 +55,6 @@ where
     }
 }
 
-/// Maps a raw `RzResizeFilter` value (same mapping as `rz_image_resize`).
-fn filter_from_c(value: c_int) -> Option<FilterType> {
-    match value {
-        0 => Some(FilterType::Nearest),
-        1 => Some(FilterType::Triangle),
-        2 => Some(FilterType::CatmullRom),
-        3 => Some(FilterType::Lanczos3),
-        _ => None,
-    }
-}
-
 /// Opens a document: "RZDC" files load the native layered format, "8BPS"
 /// files import Photoshop layers (falling back to the flattened composite on
 /// per-layer failures), anything else decodes as a single-layer image.
@@ -97,25 +69,18 @@ pub unsafe extern "C" fn rz_doc_open(
     path: *const c_char,
     err_out: *mut *mut c_char,
 ) -> *mut RzDocument {
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        if path.is_null() {
-            return Err("path is NULL".to_string());
-        }
-        let path = unsafe { CStr::from_ptr(path) }
-            .to_str()
-            .map_err(|_| "path is not valid UTF-8".to_string())?;
-        RzDocument::open(path)
-    }));
-    match outcome {
-        Ok(Ok(doc)) => Box::into_raw(Box::new(doc)),
-        Ok(Err(msg)) => {
-            unsafe { set_err(err_out, &msg) };
-            ptr::null_mut()
-        }
-        Err(_) => {
-            unsafe { set_err(err_out, "internal error: panic while opening document") };
-            ptr::null_mut()
-        }
+    let body = || {
+        let path = unsafe { read_cstr(path, "path") }?;
+        RzDocument::open(&path)
+    };
+    unsafe {
+        fallible_op(
+            err_out,
+            "panic while opening document",
+            ptr::null_mut(),
+            body,
+            boxed,
+        )
     }
 }
 
@@ -174,29 +139,18 @@ pub unsafe extern "C" fn rz_doc_save_native(
     path: *const c_char,
     err_out: *mut *mut c_char,
 ) -> bool {
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
+    let body = || {
         if doc.is_null() {
             return Err("document is NULL".to_string());
         }
-        if path.is_null() {
-            return Err("path is NULL".to_string());
-        }
         let document = unsafe { &*doc };
-        let path = unsafe { CStr::from_ptr(path) }
-            .to_str()
-            .map_err(|_| "path is not valid UTF-8".to_string())?;
-        document.save_native(path)
-    }));
-    match outcome {
-        Ok(Ok(())) => true,
-        Ok(Err(msg)) => {
-            unsafe { set_err(err_out, &msg) };
-            false
-        }
-        Err(_) => {
-            unsafe { set_err(err_out, "internal error: panic while saving document") };
-            false
-        }
+        let path = unsafe { read_cstr(path, "path") }?;
+        document.save_native(&path)
+    };
+    unsafe {
+        fallible_op(err_out, "panic while saving document", false, body, |()| {
+            true
+        })
     }
 }
 

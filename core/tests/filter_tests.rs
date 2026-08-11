@@ -2,86 +2,14 @@
 //! `include/rasterize_core.h`, exercised through the C ABI like
 //! `tests/integration.rs`.
 
-use std::ffi::{c_char, CStr, CString};
-use std::path::Path;
 use std::ptr;
 
 use image::{Rgba, RgbaImage};
-use rasterize_core::ffi::*;
 use rasterize_core::ffi_filters::*;
 use rasterize_core::RzImage;
-use tempfile::TempDir;
 
-// ---------------------------------------------------------------- helpers --
-
-fn cpath(p: &Path) -> CString {
-    CString::new(p.to_str().expect("utf-8 path")).expect("no interior NUL")
-}
-
-/// Gradient with an alpha ramp (fully opaque top row, transparent bottom).
-fn test_pattern(w: u32, h: u32) -> RgbaImage {
-    RgbaImage::from_fn(w, h, |x, y| {
-        let r = (x * 255 / (w - 1).max(1)) as u8;
-        let g = (y * 255 / (h - 1).max(1)) as u8;
-        let b = ((x + y) % 256) as u8;
-        let a = 255 - (y * 255 / (h - 1).max(1)) as u8;
-        Rgba([r, g, b, a])
-    })
-}
-
-fn take_err_string(err: *mut c_char) -> String {
-    if err.is_null() {
-        return "<no error message>".into();
-    }
-    let s = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { rz_string_free(err) };
-    s
-}
-
-fn open_ok(path: &Path) -> *mut RzImage {
-    let c = cpath(path);
-    let mut err: *mut c_char = ptr::null_mut();
-    let img = unsafe { rz_image_open(c.as_ptr(), &mut err) };
-    assert!(
-        !img.is_null(),
-        "open of {path:?} failed: {}",
-        take_err_string(err)
-    );
-    img
-}
-
-/// Writes `img` as a PNG (via the image crate) and opens it back through the
-/// FFI; the only way to materialize an RzImage from synthesized pixels.
-fn open_pattern(dir: &TempDir, name: &str, img: &RgbaImage) -> *mut RzImage {
-    let path = dir.path().join(name);
-    img.save(&path).expect("save pattern png");
-    open_ok(&path)
-}
-
-fn dims(img: *const RzImage) -> (u32, u32) {
-    unsafe { (rz_image_width(img), rz_image_height(img)) }
-}
-
-fn pixels(img: *const RzImage) -> Vec<u8> {
-    let (w, h) = dims(img);
-    let p = unsafe { rz_image_pixels_rgba(img) };
-    assert!(!p.is_null(), "pixels pointer NULL for valid image");
-    unsafe { std::slice::from_raw_parts(p, (w * h * 4) as usize) }.to_vec()
-}
-
-fn pixel_at(img: *const RzImage, x: u32, y: u32) -> [u8; 4] {
-    let (w, h) = dims(img);
-    assert!(x < w && y < h);
-    let v = pixels(img);
-    let i = ((y * w + x) * 4) as usize;
-    [v[i], v[i + 1], v[i + 2], v[i + 3]]
-}
-
-fn free(img: *mut RzImage) {
-    unsafe { rz_image_free(img) }
-}
+mod common;
+use common::*;
 
 // ------------------------------------------------------------------ tests --
 

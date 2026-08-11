@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use crate::assistant::{Assistant, AssistantConfig};
 use crate::ffi_agent::{HostHandler, RzAgentToolHandler};
+use crate::ffi_util::{boxed, fallible_op, read_cstr};
 
 /// C signature of the event sink: receives each event as a JSON string.
 /// Called from the assistant's worker thread; the string is only valid
@@ -37,18 +38,6 @@ impl HostEvents {
     }
 }
 
-unsafe fn set_err(err_out: *mut *mut c_char, msg: &str) {
-    if err_out.is_null() {
-        return;
-    }
-    let sanitized = msg.replace('\0', " ");
-    let cstring = CString::new(sanitized)
-        .unwrap_or_else(|_| CString::new("rasterize-core error").expect("static string"));
-    unsafe {
-        *err_out = cstring.into_raw();
-    }
-}
-
 /// Creates an assistant conversation. `config_json` is an object with
 /// api_key, model, system (all strings; required), and optional api_base
 /// and max_tokens. `tools_json` is the MCP-format catalog array (same
@@ -70,19 +59,11 @@ pub unsafe extern "C" fn rz_assistant_new(
     event_context: *mut c_void,
     err_out: *mut *mut c_char,
 ) -> *mut Assistant {
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        let read = |ptr: *const c_char, what: &str| -> Result<String, String> {
-            if ptr.is_null() {
-                return Err(format!("{what} is NULL"));
-            }
-            unsafe { CStr::from_ptr(ptr) }
-                .to_str()
-                .map(str::to_owned)
-                .map_err(|_| format!("{what} is not valid UTF-8"))
-        };
-        let config: Value = serde_json::from_str(&read(config_json, "config_json")?)
-            .map_err(|e| format!("config_json is not valid JSON: {e}"))?;
-        let tools: Value = serde_json::from_str(&read(tools_json, "tools_json")?)
+    let body = || {
+        let config: Value =
+            serde_json::from_str(&unsafe { read_cstr(config_json, "config_json") }?)
+                .map_err(|e| format!("config_json is not valid JSON: {e}"))?;
+        let tools: Value = serde_json::from_str(&unsafe { read_cstr(tools_json, "tools_json") }?)
             .map_err(|e| format!("tools_json is not valid JSON: {e}"))?;
         let field = |key: &str| -> Result<String, String> {
             config
@@ -119,17 +100,15 @@ pub unsafe extern "C" fn rz_assistant_new(
             Box::new(move |name, arguments| tools_host.call(name, arguments)),
             Box::new(move |event| events_host.call(event)),
         )
-    }));
-    match outcome {
-        Ok(Ok(assistant)) => Box::into_raw(Box::new(assistant)),
-        Ok(Err(msg)) => {
-            unsafe { set_err(err_out, &msg) };
-            ptr::null_mut()
-        }
-        Err(_) => {
-            unsafe { set_err(err_out, "internal panic") };
-            ptr::null_mut()
-        }
+    };
+    unsafe {
+        fallible_op(
+            err_out,
+            "panic while creating assistant",
+            ptr::null_mut(),
+            body,
+            boxed,
+        )
     }
 }
 

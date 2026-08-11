@@ -8,10 +8,7 @@
 
 use image::{Rgba, RgbaImage};
 
-/// Rec. 709 luma coefficients (private copy; `ops` keeps its own).
-const LUMA_R: f32 = 0.2126;
-const LUMA_G: f32 = 0.7152;
-const LUMA_B: f32 = 0.0722;
+use crate::blend::{LUMA_B, LUMA_G, LUMA_R};
 
 /// The hueRotate matrix from the SVG filter effects specification, built
 /// from cos/sin of `degrees` (no HSL round-trip). Shared with the

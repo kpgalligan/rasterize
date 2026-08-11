@@ -4,13 +4,8 @@
 use image::imageops::{self, FilterType};
 use image::RgbaImage;
 
-/// Rec. 709 luma coefficients, used for grayscale and saturation.
-const LUMA_R: f32 = 0.2126;
-const LUMA_G: f32 = 0.7152;
-const LUMA_B: f32 = 0.0722;
-
-/// Largest permitted resize target, in total pixels.
-const MAX_RESIZE_PIXELS: u64 = 100_000_000;
+use crate::blend::{paint_pixel, LUMA_B, LUMA_G, LUMA_R};
+use crate::doc::MAX_PIXELS;
 
 pub(crate) fn rotate90(img: &RgbaImage) -> RgbaImage {
     imageops::rotate90(img)
@@ -48,9 +43,9 @@ pub(crate) fn crop(img: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> Option<Rg
 }
 
 /// Returns `None` if either dimension is zero or the target exceeds
-/// [`MAX_RESIZE_PIXELS`].
+/// [`MAX_PIXELS`].
 pub(crate) fn resize(img: &RgbaImage, w: u32, h: u32, filter: FilterType) -> Option<RgbaImage> {
-    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_RESIZE_PIXELS {
+    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
         return None;
     }
     Some(imageops::resize(img, w, h, filter))
@@ -171,43 +166,11 @@ pub(crate) fn composite(
     }
     let a = alpha.clamp(0.0, 1.0);
     let mut out = dst.clone();
+    // Same-size frames, so this is exactly the shared per-pixel kernel run
+    // over the zipped buffers (the offset-mapped variant is
+    // `RzDocument::painting_layer`).
     for (op, sp) in out.pixels_mut().zip(src.chunks_exact(4)) {
-        // Fast path: a fully transparent overlay pixel passes the destination
-        // bytes through exactly (no float round-trip). For OVER the color
-        // bytes must also be zero — they always are in well-formed
-        // premultiplied data; malformed pixels fall through to the math.
-        let src_transparent = sp[3] == 0
-            && match mode {
-                CompositeMode::Over => sp[0] == 0 && sp[1] == 0 && sp[2] == 0,
-                CompositeMode::Erase => true,
-            };
-        if src_transparent {
-            continue;
-        }
-        let sa = (f32::from(sp[3]) / 255.0) * a;
-        let da = f32::from(op[3]) / 255.0;
-        match mode {
-            CompositeMode::Over => {
-                let out_a = sa + da * (1.0 - sa);
-                if out_a < 1e-6 {
-                    // Keep the destination color bytes so fully transparent
-                    // regions do not invent color fringes.
-                    op[3] = 0;
-                } else {
-                    for c in 0..3 {
-                        let scp = (f32::from(sp[c]) / 255.0) * a;
-                        let dc = f32::from(op[c]) / 255.0;
-                        let v = (scp + dc * da * (1.0 - sa)) / out_a;
-                        op[c] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                    }
-                    op[3] = (out_a.clamp(0.0, 1.0) * 255.0).round() as u8;
-                }
-            }
-            CompositeMode::Erase => {
-                let out_a = da * (1.0 - sa);
-                op[3] = (out_a.clamp(0.0, 1.0) * 255.0).round() as u8;
-            }
-        }
+        paint_pixel(&mut op.0, [sp[0], sp[1], sp[2], sp[3]], mode, a);
     }
     Some(out)
 }
