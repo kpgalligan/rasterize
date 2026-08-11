@@ -1,22 +1,5 @@
 import AppKit
 
-/// Editing tools the canvas understands. Mirrors EditorTool; the view
-/// controller keeps the two in sync.
-enum CanvasTool {
-    case select
-    case ellipseSelect
-    case lasso
-    case wand
-    case move
-    case brush
-    case eraser
-    case fill
-    case gradient
-    case text
-    case eyedropper
-    case crop
-}
-
 /// Text view used for in-canvas text sessions: ⌘Return commits the session.
 final class CanvasTextView: NSTextView {
     var onCommandReturn: (() -> Void)?
@@ -139,7 +122,7 @@ final class ImageCanvasView: NSView {
 
     /// The active tool. The view controller commits any pending text session
     /// before flipping this; the setter only abandons stroke/drag state.
-    var tool: CanvasTool = .select {
+    var tool: EditorTool = .select {
         didSet {
             cancelStroke()
             cancelLasso()
@@ -227,7 +210,7 @@ final class ImageCanvasView: NSView {
     /// receiver drops any preview it put up for the session).
     var onTextSessionEnd: (() -> Void)?
 
-    var onToolKey: ((CanvasTool) -> Void)?
+    var onToolKey: ((EditorTool) -> Void)?
     var onBrushSizeKey: ((CGFloat) -> Void)?
     /// Bare Q, handled with the tool keys (deliberately not a menu key
     /// equivalent): toggles Quick Mask mode.
@@ -1811,43 +1794,11 @@ final class ImageCanvasView: NSView {
         if !hasActiveTextSession,
            event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
            let characters = event.charactersIgnoringModifiers?.lowercased() {
+            if let keyTool = EditorTool(keyCharacter: characters) {
+                onToolKey?(keyTool)
+                return
+            }
             switch characters {
-            case "m":
-                onToolKey?(.select)
-                return
-            case "v":
-                onToolKey?(.move)
-                return
-            case "b":
-                onToolKey?(.brush)
-                return
-            case "e":
-                onToolKey?(.eraser)
-                return
-            case "t":
-                onToolKey?(.text)
-                return
-            case "o":
-                onToolKey?(.ellipseSelect)
-                return
-            case "l":
-                onToolKey?(.lasso)
-                return
-            case "w":
-                onToolKey?(.wand)
-                return
-            case "k":
-                onToolKey?(.fill)
-                return
-            case "g":
-                onToolKey?(.gradient)
-                return
-            case "i":
-                onToolKey?(.eyedropper)
-                return
-            case "c":
-                onToolKey?(.crop)
-                return
             case "q":
                 // Quick Mask toggle rides with the tool keys for the same
                 // reason they live here: a menu key equivalent would steal
@@ -1874,15 +1825,10 @@ final class ImageCanvasView: NSView {
             addCursorRect(bounds, cursor: .arrow)
             return
         }
-        switch tool {
-        case .select, .ellipseSelect, .lasso, .wand, .fill, .gradient, .brush, .eraser,
-            .eyedropper, .crop:
-            addCursorRect(bounds, cursor: .crosshair)
-        case .move:
-            addCursorRect(bounds, cursor: moveDragOrigin == nil ? .openHand : .closedHand)
-        case .text:
-            addCursorRect(bounds, cursor: .iBeam)
-        }
+        // The enum knows each tool's resting cursor; the move tool's hand
+        // closes while a drag is in flight.
+        let dragging = tool == .move && moveDragOrigin != nil
+        addCursorRect(bounds, cursor: dragging ? .closedHand : tool.cursor)
     }
 }
 

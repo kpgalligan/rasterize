@@ -1,22 +1,5 @@
 import AppKit
 
-/// Tools offered by the editor UI. Raw values are the toolbar group's
-/// segment indices.
-enum EditorTool: Int {
-    case select = 0
-    case ellipseSelect
-    case lasso
-    case wand
-    case move
-    case brush
-    case eraser
-    case fill
-    case gradient
-    case text
-    case eyedropper
-    case crop
-}
-
 /// What brush and eraser edit on the active layer: its pixels, or its layer
 /// mask. Pure UI state owned by EditorViewController — not undoable, not
 /// persisted, and reset to `.layer` whenever the active layer changes, its
@@ -296,22 +279,7 @@ final class EditorViewController: NSViewController {
             // Drops the layer-hidden preview a re-edit session put up.
             self?.canvas.previewImage = nil
         }
-        canvas.onToolKey = { [weak self] tool in
-            switch tool {
-            case .select: self?.selectTool(.select)
-            case .ellipseSelect: self?.selectTool(.ellipseSelect)
-            case .lasso: self?.selectTool(.lasso)
-            case .wand: self?.selectTool(.wand)
-            case .move: self?.selectTool(.move)
-            case .brush: self?.selectTool(.brush)
-            case .eraser: self?.selectTool(.eraser)
-            case .fill: self?.selectTool(.fill)
-            case .gradient: self?.selectTool(.gradient)
-            case .text: self?.selectTool(.text)
-            case .eyedropper: self?.selectTool(.eyedropper)
-            case .crop: self?.selectTool(.crop)
-            }
-        }
+        canvas.onToolKey = { [weak self] tool in self?.selectTool(tool) }
         canvas.onQuickMaskKey = { [weak self] in self?.toggleQuickMask(nil) }
         canvas.onWandClick = { [weak self] point, mode in self?.wandClicked(point, mode: mode) }
         canvas.onFillClick = { [weak self] point in self?.fillClicked(point) }
@@ -862,20 +830,7 @@ final class EditorViewController: NSViewController {
             canvas.commitTextSession()
         }
         currentTool = tool
-        switch tool {
-        case .select: canvas.tool = .select
-        case .ellipseSelect: canvas.tool = .ellipseSelect
-        case .lasso: canvas.tool = .lasso
-        case .wand: canvas.tool = .wand
-        case .move: canvas.tool = .move
-        case .brush: canvas.tool = .brush
-        case .eraser: canvas.tool = .eraser
-        case .fill: canvas.tool = .fill
-        case .gradient: canvas.tool = .gradient
-        case .text: canvas.tool = .text
-        case .eyedropper: canvas.tool = .eyedropper
-        case .crop: canvas.tool = .crop
-        }
+        canvas.tool = tool
         // Entering the crop tool: hand the canvas the popup's constraint
         // and blank the W/H fields (the tool switch cleared any old rect).
         if tool == .crop {
@@ -1910,25 +1865,8 @@ final class EditorViewController: NSViewController {
             statusLayer.text = ""
             statusBlend.text = ""
         }
-        statusTool.text = isTransforming ? "Free Transform" : toolDisplayName(currentTool)
+        statusTool.text = isTransforming ? "Free Transform" : currentTool.displayName
         updateZoomLabel()
-    }
-
-    private func toolDisplayName(_ tool: EditorTool) -> String {
-        switch tool {
-        case .select: return "Select"
-        case .ellipseSelect: return "Ellipse Select"
-        case .lasso: return "Lasso"
-        case .wand: return "Magic Wand"
-        case .move: return "Move"
-        case .brush: return "Brush"
-        case .eraser: return "Eraser"
-        case .fill: return "Fill"
-        case .gradient: return "Gradient"
-        case .text: return "Text"
-        case .eyedropper: return "Eyedropper"
-        case .crop: return "Crop"
-        }
     }
 
     /// Pushes the active layer's extent (image-pixel coordinates) to the
@@ -2812,31 +2750,5 @@ extension EditorViewController: NSUserInterfaceValidations {
         default:
             return true
         }
-    }
-}
-
-// MARK: - Composite pixel sampling (eyedropper)
-
-extension RasterImage {
-    /// The straight (non-premultiplied) RGBA of one pixel, read in place
-    /// from the handle's pixel buffer (row 0 = top, matching the FFI
-    /// convention); nil outside the image. The buffer behind a handle never
-    /// changes, so this is safe and O(1) — used by the editor's eyedropper
-    /// and the agent's sample_color, both against the flattened composite.
-    func pixelRGBA(x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
-        let w = width
-        guard x >= 0, y >= 0, x < w, y < height,
-              let pixels = rz_image_pixels_rgba(ptr)
-        else { return nil }
-        let offset = (y * w + x) * 4
-        return (pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3])
-    }
-
-    /// Canonical hex form of a sampled pixel: #RRGGBB, with the alpha byte
-    /// appended (#RRGGBBAA) only when the pixel is not fully opaque —
-    /// matching the color syntax the paint tools accept.
-    static func hexString(_ rgba: (r: UInt8, g: UInt8, b: UInt8, a: UInt8)) -> String {
-        let base = String(format: "#%02X%02X%02X", rgba.r, rgba.g, rgba.b)
-        return rgba.a == 255 ? base : base + String(format: "%02X", rgba.a)
     }
 }
