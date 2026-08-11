@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use image::{GrayImage, Luma, Rgba, RgbaImage};
 use rasterize_core::doc::{BlendMode, MaskKind, RzDocument};
-use rasterize_core::doc_select::feather_mask;
+use rasterize_core::doc_select::{feather_mask, grow_mask, smooth_mask};
 use rasterize_core::ffi::*;
 use rasterize_core::ffi_doc::*;
+use rasterize_core::ffi_filters::*;
 use rasterize_core::RzImage;
 use tempfile::TempDir;
 
@@ -2576,6 +2577,214 @@ fn feather_rejects_null_zero_size_and_non_finite() {
     assert_eq!(mask, vec![0u8; 4]);
 }
 
+// ------------------------------------------------- selection morphology --
+
+#[test]
+fn grow_extends_edges_by_radius_and_rounds_corners() {
+    let (w, h) = (40u32, 40u32);
+    let mut mask = rect_mask(w, h, 10, 10, 30, 30);
+    assert!(unsafe { rz_selection_grow(mask.as_mut_ptr(), w, h, 5.0) });
+    let at = |x: u32, y: u32| mask[(y * w + x) as usize];
+
+    // Mid-edge: the contour (between pixels 9 and 10) moves outward by
+    // exactly 5px on all four sides, to between pixels 4 and 5.
+    assert_eq!(at(5, 20), 255, "left edge midpoint at distance r is in");
+    assert_eq!(at(4, 20), 0, "one past the grown left edge is out");
+    assert_eq!(at(34, 20), 255);
+    assert_eq!(at(35, 20), 0);
+    assert_eq!(at(20, 5), 255);
+    assert_eq!(at(20, 4), 0);
+    assert_eq!(at(20, 34), 255);
+    assert_eq!(at(20, 35), 0);
+    assert_eq!(at(20, 20), 255, "interior untouched");
+
+    // Corners are circular, not square: the diagonal pixel at Euclidean
+    // distance sqrt(50) > 5 from the nearest original pixel stays out even
+    // though a Chebyshev (square) dilation would take it, while the
+    // axis-aligned pixel at exactly 5 is in.
+    assert_eq!(at(5, 5), 0, "diagonal corner pixel beyond r stays out");
+    assert_eq!(at(5, 10), 255, "axis-aligned pixel at distance r is in");
+    // Partway around the arc the fresh edge is anti-aliased.
+    let arc = at(6, 6);
+    assert!(arc > 0 && arc < 255, "corner arc pixel anti-aliases: {arc}");
+}
+
+#[test]
+fn shrink_then_grow_restores_edges_away_from_corners() {
+    let (w, h) = (40u32, 40u32);
+    let original = rect_mask(w, h, 8, 8, 32, 32);
+    let mut mask = original.clone();
+    let at = |m: &[u8], x: u32, y: u32| m[(y * w + x) as usize];
+
+    assert!(unsafe { rz_selection_shrink(mask.as_mut_ptr(), w, h, 4.0) });
+    // The mid-edge contour (between pixels 7 and 8) moved inward by
+    // exactly 4px, to between pixels 11 and 12.
+    assert_eq!(at(&mask, 12, 20), 255);
+    assert_eq!(at(&mask, 11, 20), 0);
+
+    assert!(unsafe { rz_selection_grow(mask.as_mut_ptr(), w, h, 4.0) });
+    // Growing back by the same radius restores the edges: identity along
+    // the mid row and column (only the corners, now filleted at radius 4,
+    // may differ).
+    for i in 0..w {
+        assert_eq!(at(&mask, i, 20), at(&original, i, 20), "row 20, x={i}");
+        assert_eq!(at(&mask, 20, i), at(&original, 20, i), "col 20, y={i}");
+    }
+}
+
+#[test]
+fn border_bands_straddle_the_contour() {
+    let (w, h) = (40u32, 40u32);
+    let mut mask = rect_mask(w, h, 10, 10, 30, 30);
+    assert!(unsafe { rz_selection_border(mask.as_mut_ptr(), w, h, 3.0) });
+    let at = |x: u32, y: u32| mask[(y * w + x) as usize];
+
+    // Left edge, mid row: the contour runs between pixels 9 and 10, so
+    // |s| = 0.5 for the pixel on each side (fully in the 3px band),
+    // 1.5 one step further (the band's half-covered AA edge), and 2.5
+    // beyond it (out).
+    assert_eq!(at(9, 20), 255);
+    assert_eq!(at(10, 20), 255);
+    assert_eq!(at(8, 20), 128, "AA edge outside the contour");
+    assert_eq!(at(11, 20), 128, "AA edge inside the contour");
+    assert_eq!(at(7, 20), 0);
+    assert_eq!(at(12, 20), 0);
+
+    // The band REPLACES the selection: deep inside is no longer selected.
+    assert_eq!(at(20, 20), 0);
+    assert_eq!(at(0, 0), 0);
+}
+
+#[test]
+fn morphology_full_and_empty_masks() {
+    let (w, h) = (12u32, 9u32);
+    let len = (w * h) as usize;
+
+    // The canvas boundary is not a contour: a full mask has no outside
+    // pixels, so there is nothing to grow into or shrink from...
+    let mut full = vec![255u8; len];
+    assert!(unsafe { rz_selection_grow(full.as_mut_ptr(), w, h, 3.0) });
+    assert!(full.iter().all(|&v| v == 255), "grow of full stays full");
+    assert!(unsafe { rz_selection_shrink(full.as_mut_ptr(), w, h, 3.0) });
+    assert!(full.iter().all(|&v| v == 255), "shrink of full stays full");
+
+    // ...and an empty mask has no inside pixels, hence no contour either.
+    let mut empty = vec![0u8; len];
+    assert!(unsafe { rz_selection_grow(empty.as_mut_ptr(), w, h, 3.0) });
+    assert!(empty.iter().all(|&v| v == 0), "grow of empty stays empty");
+    assert!(unsafe { rz_selection_shrink(empty.as_mut_ptr(), w, h, 3.0) });
+    assert!(empty.iter().all(|&v| v == 0), "shrink of empty stays empty");
+
+    // Border of either is empty: no contour, no band.
+    let mut full = vec![255u8; len];
+    assert!(unsafe { rz_selection_border(full.as_mut_ptr(), w, h, 4.0) });
+    assert!(full.iter().all(|&v| v == 0), "border of full is empty");
+    let mut empty = vec![0u8; len];
+    assert!(unsafe { rz_selection_border(empty.as_mut_ptr(), w, h, 4.0) });
+    assert!(empty.iter().all(|&v| v == 0), "border of empty is empty");
+}
+
+#[test]
+fn smooth_keeps_straight_edges_and_rounds_corners() {
+    // A vertical edge whose 50% contour runs through pixel centers:
+    // columns left of 15 fully selected, column 15 at exactly 128, the
+    // rest empty.
+    let (w, h) = (30u32, 30u32);
+    let mut mask = vec![0u8; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..15 {
+            mask[(y * w + x) as usize] = 255;
+        }
+        mask[(y * w + 15) as usize] = 128;
+    }
+    assert!(unsafe { rz_selection_smooth(mask.as_mut_ptr(), w, h, 3.0) });
+    let at = |x: u32, y: u32| mask[(y * w + x) as usize];
+    // The blur is symmetric across a straight edge and smoothstep fixes
+    // 1/2, so the midline does not move.
+    let mid = at(15, 15);
+    assert!((127..=129).contains(&mid), "midline moved: {mid}");
+    assert_eq!(at(5, 15), 255, "deep inside untouched");
+    assert_eq!(at(28, 15), 0, "deep outside untouched");
+    assert!(at(13, 15) > 128, "inside of the edge keeps its side");
+    assert!(at(17, 15) < 128, "outside of the edge keeps its side");
+
+    // A right-angle corner is rounded: the corner pixel of a square drops
+    // below 50% while the mid-edge pixels keep their sides.
+    let mut sq = rect_mask(w, h, 10, 10, 26, 26);
+    smooth_mask(&mut sq, w, h, 3.0);
+    let at = |x: u32, y: u32| sq[(y * w + x) as usize];
+    assert!(at(10, 10) < 128, "corner pixel rounded off: {}", at(10, 10));
+    assert!(at(10, 18) >= 128, "mid-edge pixel keeps its side");
+    assert!(at(9, 18) < 128, "outside mid-edge pixel keeps its side");
+    assert_eq!(at(18, 18), 255, "interior saturates back to full");
+}
+
+#[test]
+fn grow_binarizes_soft_input_at_the_50_percent_contour() {
+    // Feathering first must not change what grow produces away from the
+    // corners: the soft ramp resolves back to the original 50% contour,
+    // which for a hard-edged rect sits exactly at the old edge.
+    let (w, h) = (40u32, 40u32);
+    let mut hard = rect_mask(w, h, 10, 10, 30, 30);
+    let mut soft = hard.clone();
+    feather_mask(&mut soft, w, h, 2.0);
+    let edge = soft[(20 * w + 9) as usize];
+    assert!(edge > 0 && edge < 128, "feather softened pixel 9: {edge}");
+    grow_mask(&mut hard, w, h, 4.0);
+    grow_mask(&mut soft, w, h, 4.0);
+    for x in 0..w {
+        assert_eq!(
+            soft[(20 * w + x) as usize],
+            hard[(20 * w + x) as usize],
+            "row 20, x={x}"
+        );
+    }
+
+    // The threshold is coverage >= 128: a 128 pixel seeds the distance
+    // field, 127 does not.
+    let mut seed = vec![0u8; 81];
+    seed[4 * 9 + 4] = 128;
+    grow_mask(&mut seed, 9, 9, 2.0);
+    assert_eq!(seed[4 * 9 + 4], 255, "the seed resolves to full");
+    assert_eq!(seed[4 * 9 + 6], 255, "axis pixel at distance 2 is in");
+    assert_eq!(seed[4 * 9 + 7], 0, "axis pixel at distance 3 is out");
+    let diag = seed[6 * 9 + 6];
+    assert!(
+        diag > 0 && diag < 255,
+        "diagonal at sqrt(8) anti-aliases: {diag}"
+    );
+
+    let mut faint = vec![127u8; 81];
+    grow_mask(&mut faint, 9, 9, 2.0);
+    assert!(faint.iter().all(|&v| v == 0), "sub-50% coverage is no seed");
+}
+
+#[test]
+fn morphology_rejects_null_zero_size_and_non_finite() {
+    type MaskFn = unsafe extern "C" fn(*mut u8, u32, u32, f32) -> bool;
+    let fns: [MaskFn; 4] = [
+        rz_selection_grow,
+        rz_selection_shrink,
+        rz_selection_border,
+        rz_selection_smooth,
+    ];
+    let original = rect_mask(4, 4, 1, 1, 3, 3);
+    for f in fns {
+        let mut mask = original.clone();
+        assert!(!unsafe { f(ptr::null_mut(), 2, 2, 1.0) });
+        assert!(!unsafe { f(mask.as_mut_ptr(), 0, 4, 1.0) });
+        assert!(!unsafe { f(mask.as_mut_ptr(), 4, 0, 1.0) });
+        assert!(!unsafe { f(mask.as_mut_ptr(), 4, 4, f32::NAN) });
+        assert!(!unsafe { f(mask.as_mut_ptr(), 4, 4, f32::INFINITY) });
+        assert_eq!(mask, original, "a refused call leaves the mask alone");
+        // Zero and negative parameters succeed as no-ops, exactly like
+        // rz_selection_feather's radius.
+        assert!(unsafe { f(mask.as_mut_ptr(), 4, 4, 0.0) });
+        assert!(unsafe { f(mask.as_mut_ptr(), 4, 4, -2.0) });
+        assert_eq!(mask, original, "non-positive parameters are no-ops");
+    }
+}
+
 // -------------------------------------------------------------- layer masks --
 //
 // The model's own semantics, driven through the safe Rust API on
@@ -2986,8 +3195,8 @@ fn rzdc_round_trips_masks_and_meta() {
     assert_eq!(&bytes[..4], b"RZDC");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        2,
-        "masks and layer meta bump the format to version 2"
+        3,
+        "the writer always writes the current version"
     );
 
     let back = RzDocument::open(&spath).expect("reopen");
@@ -3061,14 +3270,14 @@ fn rzdc_version_1_files_still_load_without_masks() {
     assert_eq!(doc.layers[0].meta, None, "version 1 has no meta");
 
     // A future version is refused by number.
-    let mut v3 = v1.clone();
-    v3[4..8].copy_from_slice(&3u32.to_le_bytes());
-    let future = dir.path().join("v3.rzdc");
-    std::fs::write(&future, &v3).unwrap();
+    let mut v4 = v1.clone();
+    v4[4..8].copy_from_slice(&4u32.to_le_bytes());
+    let future = dir.path().join("v4.rzdc");
+    std::fs::write(&future, &v4).unwrap();
     let err = RzDocument::open(future.to_str().unwrap())
         .err()
         .expect("a future version must be refused");
-    assert!(err.contains("unsupported RZDC version 3"), "got: {err}");
+    assert!(err.contains("unsupported RZDC version 4"), "got: {err}");
 
     // A version-2 file whose mask length disagrees with the layer's pixel
     // count is rejected instead of trusted.
@@ -4901,5 +5110,1150 @@ fn transform_layer_extent_snapping_leaves_fractional_transforms_alone() {
             .pixels
             .as_raw(),
         "the tolerance must not swallow a genuinely different transform"
+    );
+}
+
+// --------------------------------------------------- adjustment layers --
+//
+// A layer whose meta parses as `{"type":"adjust", ...}` (core/src/adjust.rs)
+// is composited as a color adjustment of the accumulated backdrop: its own
+// pixels are ignored, alpha is never touched, and opacity/mask/blend gate the
+// strength. Anything that does not parse falls back to a plain raster layer.
+
+const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+
+/// Meta blob for adjustment op `op` with a `params` JSON object literal.
+fn adjust_meta(op: &str, params: &str) -> String {
+    format!("{{\"type\":\"adjust\",\"op\":\"{op}\",\"params\":{params}}}")
+}
+
+/// A 6x4 opaque-pattern background under a garish 2x2 MAGENTA layer at
+/// (1, 1) named "Adjust" (index 1) carrying `meta`. The magenta pixels are
+/// the canary: an adjustment layer must ignore them, so any leak into the
+/// projection fails the comparisons below.
+fn adjustment_fixture(dir: &TempDir, tag: &str, meta: &str) -> *mut RzDocument {
+    let doc = doc_from(dir, &format!("{tag}-bg.png"), &opaque_pattern(6, 4));
+    let doc = add_layer(
+        dir,
+        &format!("{tag}-top.png"),
+        doc,
+        0,
+        &solid(2, 2, MAGENTA),
+        "Adjust",
+    );
+    let doc = apply(doc, |d| unsafe { rz_doc_with_layer_offset(d, 1, 1, 1) });
+    set_meta(doc, 1, meta)
+}
+
+/// Asserts two RGBA buffers match within one 8-bit step per color channel
+/// (the compositor quantizes once at the end, the destructive filters per
+/// pixel), with alpha byte-exact — no adjustment may touch it.
+fn assert_close(actual: &[u8], expected: &[u8], what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what}: buffer sizes differ");
+    for (i, (&a, &e)) in actual.iter().zip(expected).enumerate() {
+        let tol = if i % 4 == 3 { 0 } else { 1 };
+        assert!(
+            (i32::from(a) - i32::from(e)).abs() <= tol,
+            "{what}: byte {i} is {a}, expected {e} (±{tol})"
+        );
+    }
+}
+
+#[test]
+fn adjustment_layer_matches_destructive_filter_for_every_op() {
+    let dir = TempDir::new().unwrap();
+    type Filter = Box<dyn Fn(*const RzImage) -> *mut RzImage>;
+    let cases: Vec<(&str, String, Filter)> = vec![
+        (
+            "bcs",
+            adjust_meta(
+                "bcs",
+                "{\"brightness\":0.15,\"contrast\":-0.3,\"saturation\":0.4}",
+            ),
+            Box::new(|i| unsafe { rz_image_adjust(i, 0.15, -0.3, 0.4) }),
+        ),
+        (
+            "levels",
+            adjust_meta("levels", "{\"black\":0.1,\"white\":0.9,\"gamma\":1.8}"),
+            Box::new(|i| unsafe { rz_image_levels(i, 0.1, 0.9, 1.8) }),
+        ),
+        (
+            "hue_rotate",
+            adjust_meta("hue_rotate", "{\"degrees\":135.0}"),
+            Box::new(|i| unsafe { rz_image_hue_rotate(i, 135.0) }),
+        ),
+        (
+            "threshold",
+            adjust_meta("threshold", "{\"level\":0.45}"),
+            Box::new(|i| unsafe { rz_image_threshold(i, 0.45) }),
+        ),
+        (
+            "posterize",
+            adjust_meta("posterize", "{\"levels\":5}"),
+            Box::new(|i| unsafe { rz_image_posterize(i, 5) }),
+        ),
+        (
+            "invert",
+            adjust_meta("invert", "{}"),
+            Box::new(|i| unsafe { rz_image_invert(i) }),
+        ),
+        (
+            // `params` may be omitted entirely when every param has a default.
+            "invert-no-params",
+            "{\"type\":\"adjust\",\"op\":\"invert\"}".to_string(),
+            Box::new(|i| unsafe { rz_image_invert(i) }),
+        ),
+        (
+            "grayscale",
+            adjust_meta("grayscale", "{}"),
+            Box::new(|i| unsafe { rz_image_grayscale(i) }),
+        ),
+        (
+            "sepia",
+            adjust_meta("sepia", "{}"),
+            Box::new(|i| unsafe { rz_image_sepia(i) }),
+        ),
+    ];
+    for (tag, meta, destructive) in cases {
+        let doc = adjustment_fixture(&dir, tag, &meta);
+        assert!(
+            unsafe { rz_doc_layer_is_adjustment(doc, 1) },
+            "{tag}: valid adjustment meta must be recognized"
+        );
+        assert!(
+            !unsafe { rz_doc_layer_is_adjustment(doc, 0) },
+            "{tag}: a layer without meta is not an adjustment"
+        );
+
+        // The reference: the destructive filter applied to the backdrop
+        // (which IS the flattened background layer — it is opaque).
+        let backdrop = open_image(&dir, &format!("{tag}-ref.png"), &opaque_pattern(6, 4));
+        let filtered = destructive(backdrop);
+        assert!(!filtered.is_null(), "{tag}: destructive filter failed");
+        let expected = img_pixels(filtered);
+
+        // The 2x2 magenta pixels must NOT appear: the whole canvas gets the
+        // adjustment, nothing gets the layer's pixels.
+        assert_close(&flat_pixels(doc), &expected, tag);
+
+        unsafe { rz_image_free(filtered) };
+        unsafe { rz_image_free(backdrop) };
+        unsafe { rz_doc_free(doc) };
+    }
+}
+
+#[test]
+fn adjustment_layer_opacity_lerps_toward_the_adjusted_color() {
+    let dir = TempDir::new().unwrap();
+    let doc = adjustment_fixture(&dir, "lerp", &adjust_meta("invert", "{}"));
+    let doc = apply(doc, |d| unsafe { rz_doc_with_layer_opacity(d, 1, 0.5) });
+    let flat = flat_pixels(doc);
+    let backdrop = opaque_pattern(6, 4);
+    for (i, px) in backdrop.pixels().enumerate() {
+        for c in 0..3 {
+            let bg = f32::from(px[c]) / 255.0;
+            let half = bg + ((1.0 - bg) - bg) * 0.5;
+            let expected = (half.clamp(0.0, 1.0) * 255.0).round();
+            let got = f32::from(flat[i * 4 + c]);
+            assert!(
+                (got - expected).abs() <= 1.0,
+                "pixel {i} channel {c}: {got} vs half-strength {expected}"
+            );
+        }
+        assert_eq!(flat[i * 4 + 3], 255, "alpha untouched at half opacity");
+    }
+    unsafe { rz_doc_free(doc) };
+}
+
+#[test]
+fn adjustment_layer_mask_gates_interpolates_and_honors_offset() {
+    let dir = TempDir::new().unwrap();
+    let backdrop = opaque_pattern(6, 4);
+    let backdrop_bytes = backdrop.as_raw().clone();
+
+    // Canvas-sized invert adjustment; mask columns 0-1 hidden, 2-3 mid-gray,
+    // 4-5 revealed.
+    let doc = doc_from(&dir, "gate-bg.png", &backdrop);
+    let doc = add_layer(
+        &dir,
+        "gate-top.png",
+        doc,
+        0,
+        &solid(6, 4, MAGENTA),
+        "Adjust",
+    );
+    let doc = set_meta(doc, 1, &adjust_meta("invert", "{}"));
+    let sel = selection(6, 4, |x, _| match x {
+        0 | 1 => 0,
+        2 | 3 => 128,
+        _ => 255,
+    });
+    let masked = apply(doc, |d| unsafe {
+        rz_doc_adding_layer_mask(d, 1, MASK_FROM_SELECTION, sel.as_ptr(), 6, 4)
+    });
+    let flat = flat_pixels(masked);
+    for (x, y, px) in backdrop.enumerate_pixels() {
+        let i = ((y * 6 + x) * 4) as usize;
+        if x < 2 {
+            assert_eq!(
+                &flat[i..i + 4],
+                &px.0,
+                "({x},{y}): outside the mask the backdrop is untouched"
+            );
+            continue;
+        }
+        let k = if x < 4 { 128.0 / 255.0 } else { 1.0 };
+        for c in 0..3 {
+            let bg = f32::from(px[c]) / 255.0;
+            let expected = ((bg + ((1.0 - bg) - bg) * k) * 255.0).round();
+            let got = f32::from(flat[i + c]);
+            assert!(
+                (got - expected).abs() <= 1.0,
+                "({x},{y}) channel {c}: {got} vs {expected} at coverage {k}"
+            );
+        }
+        assert_eq!(flat[i + 3], 255);
+    }
+
+    // Disabling the mask makes the adjustment canvas-wide again.
+    let unmasked = apply(unsafe { rz_doc_clone(masked) }, |d| unsafe {
+        rz_doc_with_layer_mask_enabled(d, 1, false)
+    });
+    let flat = flat_pixels(unmasked);
+    for (i, &b) in backdrop_bytes.iter().enumerate() {
+        let expected = if i % 4 == 3 { b } else { 255 - b };
+        assert!(
+            (i32::from(flat[i]) - i32::from(expected)).abs() <= 1,
+            "byte {i}: a disabled mask must mean full coverage"
+        );
+    }
+    unsafe { rz_doc_free(unmasked) };
+    unsafe { rz_doc_free(masked) };
+
+    // A 2x2 adjustment layer at (1, 1) with a reveal-all mask: the mask's
+    // extent (which rides the layer's offset) confines the adjustment to
+    // that window; everywhere else is untouched.
+    let doc = adjustment_fixture(&dir, "window", &adjust_meta("invert", "{}"));
+    let windowed = apply(doc, |d| unsafe {
+        rz_doc_adding_layer_mask(d, 1, MASK_REVEAL_ALL, ptr::null(), 0, 0)
+    });
+    let flat = flat_pixels(windowed);
+    for (x, y, px) in backdrop.enumerate_pixels() {
+        let i = ((y * 6 + x) * 4) as usize;
+        if (1..3).contains(&x) && (1..3).contains(&y) {
+            for c in 0..3 {
+                let expected = 255 - px[c];
+                assert!(
+                    (i32::from(flat[i + c]) - i32::from(expected)).abs() <= 1,
+                    "({x},{y}): inside the masked window the backdrop inverts"
+                );
+            }
+        } else {
+            assert_eq!(
+                &flat[i..i + 4],
+                &px.0,
+                "({x},{y}): outside the mask's extent nothing changes"
+            );
+        }
+    }
+    unsafe { rz_doc_free(windowed) };
+}
+
+#[test]
+fn adjustment_layer_never_touches_alpha() {
+    let dir = TempDir::new().unwrap();
+    // Columns: fully transparent, semi-transparent, opaque.
+    let backdrop = RgbaImage::from_fn(6, 2, |x, _| match x {
+        0 | 1 => Rgba([0, 0, 0, 0]),
+        2 | 3 => Rgba([200, 40, 90, 100]),
+        _ => Rgba([10, 220, 130, 255]),
+    });
+    let doc = doc_from(&dir, "alpha-bg.png", &backdrop);
+    let doc = add_layer(
+        &dir,
+        "alpha-top.png",
+        doc,
+        0,
+        &solid(2, 2, MAGENTA),
+        "Adjust",
+    );
+    let doc = set_meta(doc, 1, &adjust_meta("invert", "{}"));
+    let flat = flat_pixels(doc);
+    for x in 0..6u32 {
+        for y in 0..2u32 {
+            let px = pixel(&flat, 6, x, y);
+            match x {
+                0 | 1 => assert_eq!(
+                    px,
+                    [0, 0, 0, 0],
+                    "({x},{y}): a fully transparent pixel is entirely untouched"
+                ),
+                2 | 3 => assert_eq!(
+                    px,
+                    [55, 215, 165, 100],
+                    "({x},{y}): straight color inverts, alpha kept exactly"
+                ),
+                _ => assert_eq!(px, [245, 35, 125, 255], "({x},{y}): opaque inverts"),
+            }
+        }
+    }
+    unsafe { rz_doc_free(doc) };
+}
+
+#[test]
+fn malformed_or_foreign_meta_composites_as_plain_raster() {
+    let dir = TempDir::new().unwrap();
+    // The projection of the SAME stack with no meta at all: magenta showing.
+    let plain = adjustment_fixture(&dir, "plain", "");
+    let plain = apply(plain, |d| unsafe {
+        rz_doc_with_layer_meta(d, 1, ptr::null())
+    });
+    let plain_flat = flat_pixels(plain);
+    assert_eq!(pixel(&plain_flat, 6, 1, 1), MAGENTA, "raster pixels show");
+
+    let seventeen = (0..17)
+        .map(|i| format!("[{},{}]", i, i))
+        .collect::<Vec<_>>()
+        .join(",");
+    let rejects: Vec<String> = vec![
+        "not json at all".into(),
+        "[1,2,3]".into(),
+        "{\"op\":\"invert\"}".into(),
+        "{\"type\":\"text\",\"string\":\"hi\"}".into(),
+        adjust_meta("unknown_op", "{}"),
+        "{\"type\":\"adjust\",\"op\":\"invert\",\"params\":7}".into(),
+        adjust_meta("posterize", "{}"),
+        adjust_meta("posterize", "{\"levels\":1}"),
+        adjust_meta("posterize", "{\"levels\":65}"),
+        adjust_meta("posterize", "{\"levels\":5.5}"),
+        adjust_meta("levels", "{\"black\":0.9,\"white\":0.1}"),
+        adjust_meta("levels", "{\"gamma\":11.0}"),
+        adjust_meta("threshold", "{\"level\":1.5}"),
+        adjust_meta("bcs", "{\"brightness\":\"dark\"}"),
+        adjust_meta("curves", "{\"rgb\":[[0,0]]}"),
+        adjust_meta("curves", &format!("{{\"rgb\":[{seventeen}]}}")),
+        adjust_meta("curves", "{\"rgb\":[[0,0],[0,255]]}"),
+        adjust_meta("curves", "{\"rgb\":[[0,0],[255]]}"),
+        adjust_meta("curves", "{\"rgb\":\"steep\"}"),
+    ];
+    for (n, meta) in rejects.iter().enumerate() {
+        let doc = adjustment_fixture(&dir, &format!("reject{n}"), meta);
+        assert!(
+            !unsafe { rz_doc_layer_is_adjustment(doc, 1) },
+            "case {n} ({meta}) must not parse as an adjustment"
+        );
+        assert_eq!(
+            flat_pixels(doc),
+            plain_flat,
+            "case {n} ({meta}) must composite as a plain raster layer"
+        );
+        assert_eq!(
+            ffi_meta(doc, 1).as_deref(),
+            Some(meta.as_str()),
+            "case {n}: the blob itself still round-trips verbatim"
+        );
+        unsafe { rz_doc_free(doc) };
+    }
+
+    // Every valid op IS an adjustment (the compositing math has its own
+    // tests; this pins the recognizer the host's layers panel keys off).
+    let accepts: Vec<String> = vec![
+        adjust_meta("bcs", "{}"),
+        adjust_meta("levels", "{}"),
+        adjust_meta("hue_rotate", "{}"),
+        adjust_meta("threshold", "{}"),
+        adjust_meta("posterize", "{\"levels\":2}"),
+        adjust_meta("curves", "{}"),
+        adjust_meta(
+            "curves",
+            "{\"rgb\":[[0,0],[255,255]],\"r\":[[0,10],[255,240]]}",
+        ),
+        adjust_meta("invert", "{}"),
+        adjust_meta("grayscale", "{}"),
+        adjust_meta("sepia", "{}"),
+    ];
+    for (n, meta) in accepts.iter().enumerate() {
+        let doc = adjustment_fixture(&dir, &format!("accept{n}"), meta);
+        assert!(
+            unsafe { rz_doc_layer_is_adjustment(doc, 1) },
+            "case {n} ({meta}) must parse as an adjustment"
+        );
+        unsafe { rz_doc_free(doc) };
+    }
+
+    // Guards, like every other layer query.
+    unsafe {
+        assert!(!rz_doc_layer_is_adjustment(ptr::null(), 0));
+        assert!(!rz_doc_layer_is_adjustment(plain, 0), "no meta at all");
+        assert!(!rz_doc_layer_is_adjustment(plain, 9), "out of range");
+    }
+    unsafe { rz_doc_free(plain) };
+}
+
+#[test]
+fn curves_identity_monotonicity_endpoints_and_order() {
+    let dir = TempDir::new().unwrap();
+    let ramp = RgbaImage::from_fn(256, 1, |x, _| {
+        let v = x as u8;
+        Rgba([v, v, v, 255])
+    });
+    let fixture = |tag: &str, meta: &str| {
+        let doc = doc_from(&dir, &format!("{tag}-bg.png"), &ramp);
+        let doc = add_layer(
+            &dir,
+            &format!("{tag}-top.png"),
+            doc,
+            0,
+            &solid(1, 1, MAGENTA),
+            "Adjust",
+        );
+        set_meta(doc, 1, meta)
+    };
+
+    // The identity point list is the identity LUT: byte-for-byte no-op.
+    let id = fixture(
+        "curves-id",
+        &adjust_meta("curves", "{\"rgb\":[[0,0],[255,255]]}"),
+    );
+    assert_eq!(
+        flat_pixels(id),
+        ramp.as_raw().clone(),
+        "identity curves must be exactly the identity"
+    );
+    unsafe { rz_doc_free(id) };
+
+    // A monotone S-curve: monotone output, endpoints and every control point
+    // map exactly (the interpolant passes through its knots).
+    let s = fixture(
+        "curves-s",
+        &adjust_meta("curves", "{\"rgb\":[[0,0],[64,32],[192,224],[255,255]]}"),
+    );
+    let flat = flat_pixels(s);
+    let lut: Vec<u8> = (0..256).map(|x| flat[x * 4]).collect();
+    for x in 0..256 {
+        let i = x * 4;
+        assert_eq!(
+            (flat[i + 1], flat[i + 2], flat[i + 3]),
+            (lut[x], lut[x], 255),
+            "gray in, gray out, alpha kept"
+        );
+        if x > 0 {
+            assert!(
+                lut[x] >= lut[x - 1],
+                "monotone points must give a monotone LUT ({} < {} at {x})",
+                lut[x],
+                lut[x - 1]
+            );
+        }
+    }
+    for (input, output) in [(0usize, 0u8), (64, 32), (192, 224), (255, 255)] {
+        assert_eq!(lut[input], output, "control point ({input}, {output})");
+    }
+    unsafe { rz_doc_free(s) };
+
+    // Per-channel before master: red halved then everything inverted, so
+    // red = 255 - x/2 while green/blue = 255 - x (identity per-channel LUT).
+    let composed = fixture(
+        "curves-order",
+        &adjust_meta(
+            "curves",
+            "{\"r\":[[0,0],[255,128]],\"rgb\":[[0,255],[255,0]]}",
+        ),
+    );
+    let flat = flat_pixels(composed);
+    for x in 0..256usize {
+        let i = x * 4;
+        let halved = (x as f64 * 128.0 / 255.0).round();
+        assert!(
+            (f64::from(flat[i]) - (255.0 - halved)).abs() <= 1.0,
+            "red at {x}: {} vs rgb_lut[r_lut[v]] = {}",
+            flat[i],
+            255.0 - halved
+        );
+        assert_eq!(
+            (flat[i + 1], flat[i + 2]),
+            (255 - x as u8, 255 - x as u8),
+            "green/blue at {x} see only the master curve"
+        );
+    }
+    unsafe { rz_doc_free(composed) };
+}
+
+#[test]
+fn adjustment_layers_stack_and_skip_invisible() {
+    let dir = TempDir::new().unwrap();
+    let backdrop = opaque_pattern(6, 4);
+
+    // invert over invert cancels exactly; hiding one leaves one inversion.
+    let doc = adjustment_fixture(&dir, "stack", &adjust_meta("invert", "{}"));
+    let doc = add_layer(
+        &dir,
+        "stack-top2.png",
+        doc,
+        1,
+        &solid(1, 1, MAGENTA),
+        "Adjust2",
+    );
+    let doc = set_meta(doc, 2, &adjust_meta("invert", "{}"));
+    assert_eq!(
+        flat_pixels(doc),
+        backdrop.as_raw().clone(),
+        "two stacked inversions must cancel"
+    );
+    let one = apply(unsafe { rz_doc_clone(doc) }, |d| unsafe {
+        rz_doc_with_layer_visible(d, 2, false)
+    });
+    let flat = flat_pixels(one);
+    for (i, &b) in backdrop.as_raw().iter().enumerate() {
+        let expected = if i % 4 == 3 { b } else { 255 - b };
+        assert_eq!(
+            flat[i], expected,
+            "an invisible adjustment layer is skipped"
+        );
+    }
+    unsafe { rz_doc_free(one) };
+    unsafe { rz_doc_free(doc) };
+
+    // A raster layer ABOVE an adjustment layer composites over the adjusted
+    // backdrop: its own pixels are untouched by the adjustment below.
+    let doc = adjustment_fixture(&dir, "above", &adjust_meta("invert", "{}"));
+    let doc = add_layer(&dir, "above-top.png", doc, 1, &solid(2, 2, GREEN), "Top");
+    let doc = apply(doc, |d| unsafe { rz_doc_with_layer_offset(d, 2, 3, 1) });
+    let flat = flat_pixels(doc);
+    for (x, y, px) in backdrop.enumerate_pixels() {
+        let got = pixel(&flat, 6, x, y);
+        if (3..5).contains(&x) && (1..3).contains(&y) {
+            assert_eq!(got, GREEN, "({x},{y}): the raster layer wins on top");
+        } else {
+            for c in 0..3 {
+                assert_eq!(got[c], 255 - px[c], "({x},{y}): inverted below");
+            }
+        }
+    }
+    unsafe { rz_doc_free(doc) };
+}
+
+#[test]
+fn merge_down_bakes_adjustment_masked_and_unmasked() {
+    let dir = TempDir::new().unwrap();
+    let backdrop = opaque_pattern(6, 4);
+
+    // Masked case: canvas-sized invert revealed on the left half only.
+    let doc = doc_from(&dir, "bake-bg.png", &backdrop);
+    let doc = add_layer(
+        &dir,
+        "bake-top.png",
+        doc,
+        0,
+        &solid(6, 4, MAGENTA),
+        "Adjust",
+    );
+    let doc = set_meta(doc, 1, &adjust_meta("invert", "{}"));
+    let sel = selection(6, 4, |x, _| if x < 3 { 255 } else { 0 });
+    let doc = apply(doc, |d| unsafe {
+        rz_doc_adding_layer_mask(d, 1, MASK_FROM_SELECTION, sel.as_ptr(), 6, 4)
+    });
+    let before = flat_pixels(doc);
+    let merged = apply(doc, |d| unsafe { rz_doc_merging_down(d, 1) });
+    assert_eq!(unsafe { rz_doc_layer_count(merged) }, 1);
+    assert!(
+        !unsafe { rz_doc_layer_is_adjustment(merged, 0) },
+        "the baked layer is plain raster (meta cleared)"
+    );
+    assert_eq!(ffi_meta(merged, 0), None);
+    assert_eq!(
+        flat_pixels(merged),
+        before,
+        "merging an adjustment down must not change the projection"
+    );
+    // ... and the bake is real: left half inverted, right half untouched.
+    for (x, y, px) in backdrop.enumerate_pixels() {
+        let got = pixel(&before, 6, x, y);
+        if x < 3 {
+            for c in 0..3 {
+                assert_eq!(got[c], 255 - px[c], "({x},{y}): inside the mask");
+            }
+        } else {
+            assert_eq!(got, px.0, "({x},{y}): outside the mask");
+        }
+    }
+    unsafe { rz_doc_free(merged) };
+
+    // Unmasked, half opacity: the bake keeps the half-strength lerp.
+    let doc = adjustment_fixture(&dir, "bake-op", &adjust_meta("invert", "{}"));
+    let doc = apply(doc, |d| unsafe { rz_doc_with_layer_opacity(d, 1, 0.5) });
+    let before = flat_pixels(doc);
+    let merged = apply(doc, |d| unsafe { rz_doc_merging_down(d, 1) });
+    assert_eq!(unsafe { rz_doc_layer_count(merged) }, 1);
+    assert_eq!(flat_pixels(merged), before, "opacity-gated bake");
+    assert_ne!(
+        before,
+        backdrop.as_raw().clone(),
+        "the half-strength adjustment did change the projection"
+    );
+    unsafe { rz_doc_free(merged) };
+}
+
+#[test]
+fn rzdc_round_trip_preserves_a_masked_adjustment_layer() {
+    let dir = TempDir::new().unwrap();
+    let meta = adjust_meta("hue_rotate", "{\"degrees\":120.0}");
+    let doc = doc_from(&dir, "rt-bg.png", &opaque_pattern(6, 4));
+    let doc = add_layer(&dir, "rt-top.png", doc, 0, &solid(6, 4, MAGENTA), "Adjust");
+    let doc = set_meta(doc, 1, &meta);
+    let sel = selection(6, 4, |x, y| if (x + y) % 2 == 0 { 255 } else { 64 });
+    let doc = apply(doc, |d| unsafe {
+        rz_doc_adding_layer_mask(d, 1, MASK_FROM_SELECTION, sel.as_ptr(), 6, 4)
+    });
+    let before = flat_pixels(doc);
+
+    let path = dir.path().join("adjust.rzdc");
+    let c = cpath(&path);
+    let mut err: *mut c_char = ptr::null_mut();
+    assert!(
+        unsafe { rz_doc_save_native(doc, c.as_ptr(), &mut err) },
+        "save failed: {}",
+        take_err_string(err)
+    );
+    let mut err: *mut c_char = ptr::null_mut();
+    let back = unsafe { rz_doc_open(c.as_ptr(), &mut err) };
+    assert!(!back.is_null(), "reopen failed: {}", take_err_string(err));
+
+    assert!(
+        unsafe { rz_doc_layer_is_adjustment(back, 1) },
+        "the reopened layer is still an adjustment layer"
+    );
+    assert_eq!(ffi_meta(back, 1).as_deref(), Some(meta.as_str()));
+    assert_eq!(
+        flat_pixels(back),
+        before,
+        "the reopened document composites byte-identically"
+    );
+
+    unsafe { rz_doc_free(back) };
+    unsafe { rz_doc_free(doc) };
+}
+
+// ------------------------------------------------------------ clipping masks --
+//
+// A layer flagged CLIPPED is confined to the alpha footprint of the first
+// unclipped layer beneath it — its BASE — and the base plus its consecutive
+// run of clipped layers blend as one group, which then reaches the backdrop
+// through the base's blend mode and opacity. Group structure is positional
+// and re-derived at every composite; a clipped layer at the bottom of the
+// stack has no base and composites as if unclipped.
+
+#[test]
+fn clipped_flag_ffi_default_purity_and_duplicate() {
+    let dir = TempDir::new().unwrap();
+    let doc = doc_from(&dir, "cf-bg.png", &solid(3, 3, RED));
+    let doc = add_layer(&dir, "cf-top.png", doc, 0, &solid(2, 2, BLUE), "Top");
+    unsafe {
+        assert!(!rz_doc_layer_clipped(doc, 0), "default is unclipped");
+        assert!(!rz_doc_layer_clipped(doc, 1), "default is unclipped");
+
+        let flagged = rz_doc_with_layer_clipped(doc, 1, true);
+        assert!(!flagged.is_null());
+        assert!(rz_doc_layer_clipped(flagged, 1));
+        assert!(!rz_doc_layer_clipped(doc, 1), "the setter is pure");
+
+        // Duplicating copies the flag like every other property.
+        let dup = rz_doc_duplicating_layer(flagged, 1);
+        assert!(!dup.is_null());
+        assert!(rz_doc_layer_clipped(dup, 2), "duplicate keeps the flag");
+
+        let cleared = rz_doc_with_layer_clipped(flagged, 1, false);
+        assert!(!cleared.is_null());
+        assert!(!rz_doc_layer_clipped(cleared, 1));
+
+        // NULL and out-of-range guards.
+        let null_doc: *const RzDocument = ptr::null();
+        assert!(!rz_doc_layer_clipped(null_doc, 0));
+        assert!(rz_doc_with_layer_clipped(null_doc, 0, true).is_null());
+        assert!(!rz_doc_layer_clipped(doc, 9));
+        assert!(rz_doc_with_layer_clipped(doc, 9, true).is_null());
+
+        rz_doc_free(cleared);
+        rz_doc_free(dup);
+        rz_doc_free(flagged);
+        rz_doc_free(doc);
+    }
+}
+
+/// A layered fixture exercising opacity, blend mode, offset, a mask and an
+/// adjustment layer — everything the plain (unclipped) walk composites.
+fn clip_regression_doc() -> RzDocument {
+    let doc = RzDocument::from_pixels(opaque_pattern(6, 4));
+    let doc = doc
+        .adding_image_layer(0, solid(4, 3, [30, 200, 120, 180]), "Mid")
+        .unwrap()
+        .with_layer_offset(1, 1, 1)
+        .unwrap()
+        .with_layer_opacity(1, 0.7)
+        .unwrap()
+        .with_layer_blend_mode(1, BlendMode::Multiply)
+        .unwrap();
+    let sel = selection(6, 4, |x, y| if (x + y) % 2 == 0 { 255 } else { 90 });
+    let doc = doc.add_mask(1, MaskKind::FromSelection(&sel)).unwrap();
+    let mut doc = doc
+        .adding_image_layer(1, solid(1, 1, MAGENTA), "Adjust")
+        .unwrap()
+        .with_layer_opacity(2, 0.5)
+        .unwrap();
+    doc.layers[2].meta = Some(adjust_meta("invert", "{}"));
+    doc
+}
+
+#[test]
+fn unflagged_documents_composite_byte_identically() {
+    // The reference: a document that never saw a clipped flag.
+    let reference = clip_regression_doc().flattened().into_raw();
+
+    // The same document with flags set and cleared again must not differ by
+    // a single byte: with every group empty, the group machinery never
+    // engages and the plain walk composites exactly as before.
+    let mut toggled = clip_regression_doc();
+    for idx in 0..toggled.layers.len() {
+        toggled = toggled.with_layer_clipped(idx, true).unwrap();
+    }
+    for idx in 0..toggled.layers.len() {
+        toggled = toggled.with_layer_clipped(idx, false).unwrap();
+    }
+    assert!(toggled.layers.iter().all(|l| !l.clipped));
+    assert_eq!(
+        toggled.flattened().into_raw(),
+        reference,
+        "an unflagged stack must composite exactly as before clipping existed"
+    );
+}
+
+#[test]
+fn clipped_layer_confined_to_base_footprint() {
+    // Opaque red canvas; base (idx 1): 3x2 at (1, 0) with columns at alpha
+    // 255 / 128 / 0; canvas-wide clipped green (idx 2) above it.
+    let base = RgbaImage::from_fn(3, 2, |x, _| Rgba([0, 0, 255, [255u8, 128, 0][x as usize]]));
+    let doc = RzDocument::from_pixels(solid(6, 2, RED));
+    let doc = doc
+        .adding_image_layer(0, base, "Base")
+        .unwrap()
+        .with_layer_offset(1, 1, 0)
+        .unwrap()
+        .adding_image_layer(1, solid(6, 2, GREEN), "Clip")
+        .unwrap()
+        .with_layer_clipped(2, true)
+        .unwrap();
+
+    for y in 0..2 {
+        assert_eq!(flat(&doc, 0, y), RED, "left of the base: backdrop only");
+        assert_eq!(flat(&doc, 1, y), GREEN, "opaque base: the clip in full");
+        assert_eq!(
+            flat(&doc, 2, y),
+            over_opaque(RED, GREEN, 128.0 / 255.0),
+            "semi-transparent base edge scales the clipped contribution"
+        );
+        for x in 3..6 {
+            assert_eq!(
+                flat(&doc, x, y),
+                RED,
+                "({x},{y}): base alpha 0 confines the clip"
+            );
+        }
+    }
+
+    // Flatten walks the same grouped path: one layer, same projection.
+    let flattened = doc.flattening();
+    assert_eq!(flattened.layers.len(), 1);
+    assert_eq!(
+        flattened.flattened().into_raw(),
+        doc.flattened().into_raw(),
+        "rz_doc_flattening needs no clipping code of its own"
+    );
+}
+
+#[test]
+fn group_alpha_equals_base_alpha_even_under_an_opaque_clip() {
+    // No backdrop: the base's own alpha pattern IS the projection's alpha,
+    // even though the clipped layer above it is opaque everywhere.
+    let base = RgbaImage::from_fn(3, 2, |x, _| {
+        Rgba([255, 255, 0, [0u8, 128, 255][x as usize]])
+    });
+    let doc = RzDocument::from_pixels(base);
+    let doc = doc
+        .adding_image_layer(0, solid(3, 2, GREEN), "Clip")
+        .unwrap()
+        .with_layer_clipped(1, true)
+        .unwrap();
+    let flat_img = doc.flattened();
+    for y in 0..2 {
+        assert_eq!(
+            flat_img.get_pixel(0, y).0,
+            [0, 0, 0, 0],
+            "a transparent base pixel stays fully transparent"
+        );
+        assert_eq!(
+            flat_img.get_pixel(1, y).0,
+            [GREEN[0], GREEN[1], GREEN[2], 128],
+            "alpha follows the base, color the clip"
+        );
+        assert_eq!(flat_img.get_pixel(2, y).0, GREEN, "opaque base pixel");
+    }
+}
+
+#[test]
+fn clipped_blend_mode_blends_against_the_base_content() {
+    // Multiply blends against the BASE's color — the red backdrop below the
+    // group must never enter the product.
+    let base_px = [200u8, 100, 50, 255];
+    let clip_px = [100u8, 150, 200, 255];
+    let doc = RzDocument::from_pixels(solid(2, 2, RED));
+    let doc = doc
+        .adding_image_layer(0, solid(2, 2, base_px), "Base")
+        .unwrap()
+        .adding_image_layer(1, solid(2, 2, clip_px), "Clip")
+        .unwrap()
+        .with_layer_blend_mode(2, BlendMode::Multiply)
+        .unwrap()
+        .with_layer_clipped(2, true)
+        .unwrap();
+    let mut expected = [0u8; 4];
+    for c in 0..3 {
+        let v = f32::from(base_px[c]) / 255.0 * (f32::from(clip_px[c]) / 255.0);
+        expected[c] = (v * 255.0).round() as u8;
+    }
+    expected[3] = 255;
+    assert_eq!(
+        flat(&doc, 0, 0),
+        expected,
+        "multiply of clip over base; red never enters"
+    );
+}
+
+#[test]
+fn group_composites_with_the_base_mode_and_opacity() {
+    // The base is fully covered by an opaque Normal clip, so the GROUP's
+    // content is the clip's color — but it must reach the backdrop through
+    // the BASE's Multiply at 0.6.
+    let clip_px = [220u8, 180, 40, 255];
+    let backdrop = opaque_pattern(4, 3);
+    let doc = RzDocument::from_pixels(backdrop.clone());
+    let doc = doc
+        .adding_image_layer(0, solid(4, 3, [50, 100, 150, 255]), "Base")
+        .unwrap()
+        .with_layer_blend_mode(1, BlendMode::Multiply)
+        .unwrap()
+        .with_layer_opacity(1, 0.6)
+        .unwrap()
+        .adding_image_layer(1, solid(4, 3, clip_px), "Clip")
+        .unwrap()
+        .with_layer_clipped(2, true)
+        .unwrap();
+    let flat_img = doc.flattened();
+    for (x, y, px) in backdrop.enumerate_pixels() {
+        let expected = ref_composite(to_unit(px.0), to_unit(clip_px), 0.6, BLEND_MULTIPLY);
+        let got = flat_img.get_pixel(x, y).0;
+        for c in 0..4 {
+            let want = (expected[c].clamp(0.0, 1.0) * 255.0).round() as u8;
+            assert!(
+                (i32::from(got[c]) - i32::from(want)).abs() <= 1,
+                "({x},{y}) channel {c}: {} vs {want}",
+                got[c]
+            );
+        }
+    }
+}
+
+#[test]
+fn solo_clipped_layer_over_an_opaque_base_matches_unclipped() {
+    // The pinned equivalence: one clipped layer whose base is fully opaque
+    // everywhere the clipped layer has pixels must composite exactly like
+    // the unclipped stack of the same two layers.
+    let build = || {
+        let doc = RzDocument::from_pixels(opaque_pattern(6, 4));
+        doc.adding_image_layer(0, solid(3, 2, [30, 200, 120, 140]), "Top")
+            .unwrap()
+            .with_layer_offset(1, 2, 1)
+            .unwrap()
+            .with_layer_opacity(1, 0.7)
+            .unwrap()
+            .with_layer_blend_mode(1, BlendMode::Screen)
+            .unwrap()
+    };
+    let unclipped = build().flattened().into_raw();
+    let clipped = build()
+        .with_layer_clipped(1, true)
+        .unwrap()
+        .flattened()
+        .into_raw();
+    assert_eq!(
+        clipped, unclipped,
+        "solo equivalence over an opaque base must be byte-identical"
+    );
+}
+
+#[test]
+fn clipped_adjustment_layer_reaches_only_the_base_footprint() {
+    // Red backdrop, blue base over the left half, a clipped UNMASKED invert
+    // adjustment above: unmasked adjustments normally reach the whole
+    // canvas, but clipped one may only invert the base's footprint.
+    let build = || {
+        let doc = RzDocument::from_pixels(solid(6, 4, RED));
+        let mut doc = doc
+            .adding_image_layer(0, solid(3, 4, BLUE), "Base")
+            .unwrap()
+            .adding_image_layer(1, solid(1, 1, MAGENTA), "Adjust")
+            .unwrap();
+        doc.layers[2].meta = Some(adjust_meta("invert", "{}"));
+        doc
+    };
+    let doc = build().with_layer_clipped(2, true).unwrap();
+    let yellow = [255, 255, 0, 255]; // invert(BLUE)
+    for y in 0..4 {
+        for x in 0..3 {
+            assert_eq!(flat(&doc, x, y), yellow, "({x},{y}): base content inverted");
+        }
+        for x in 3..6 {
+            assert_eq!(
+                flat(&doc, x, y),
+                RED,
+                "({x},{y}): backdrop untouched outside the base"
+            );
+        }
+    }
+    // Sanity: unclipped, the same adjustment inverts the backdrop too.
+    let unclipped = build();
+    assert_eq!(
+        flat(&unclipped, 4, 0),
+        [0, 255, 255, 255],
+        "unclipped, the adjustment reaches the red backdrop"
+    );
+}
+
+#[test]
+fn bottom_of_stack_clipped_layers_composite_as_unclipped() {
+    // No unclipped layer below: the flag is ignored, even for a run of
+    // clipped layers at the bottom of the stack.
+    let build = || {
+        let doc = RzDocument::from_pixels(solid(4, 3, [0, 0, 255, 128]));
+        doc.adding_image_layer(0, solid(2, 2, GREEN), "Second")
+            .unwrap()
+            .with_layer_offset(1, 1, 1)
+            .unwrap()
+    };
+    let reference = build().flattened().into_raw();
+    let flagged = build()
+        .with_layer_clipped(0, true)
+        .unwrap()
+        .with_layer_clipped(1, true)
+        .unwrap()
+        .flattened()
+        .into_raw();
+    assert_eq!(
+        flagged, reference,
+        "baseless clipped layers composite as if unclipped"
+    );
+}
+
+#[test]
+fn invisible_base_hides_its_clipped_layers() {
+    let build = || {
+        let doc = RzDocument::from_pixels(solid(4, 3, RED));
+        doc.adding_image_layer(0, solid(4, 3, BLUE), "Base")
+            .unwrap()
+            .adding_image_layer(1, solid(4, 3, GREEN), "Clip")
+            .unwrap()
+            .with_layer_clipped(2, true)
+            .unwrap()
+    };
+    // Sanity: with the base visible the clip shows.
+    assert_eq!(flat(&build(), 0, 0), GREEN);
+    // Hiding the BASE hides the whole group: not just the base's pixels but
+    // its clipped layer too.
+    let hidden = build().with_layer_visible(1, false).unwrap();
+    let flat_img = hidden.flattened();
+    for (_, _, px) in flat_img.enumerate_pixels() {
+        assert_eq!(px.0, RED, "the clipped layer must vanish with its base");
+    }
+    // An invisible clipped layer is skipped without taking the group down.
+    let clip_hidden = build().with_layer_visible(2, false).unwrap();
+    assert_eq!(flat(&clip_hidden, 0, 0), BLUE, "the base still shows");
+}
+
+#[test]
+fn merge_down_bakes_the_clipping_and_keeps_the_lower_flag() {
+    // Red backdrop, opaque blue base 3x2 at (1, 1), canvas-wide clipped
+    // green above it.
+    let doc = RzDocument::from_pixels(solid(6, 4, RED));
+    let doc = doc
+        .adding_image_layer(0, solid(3, 2, BLUE), "Base")
+        .unwrap()
+        .with_layer_offset(1, 1, 1)
+        .unwrap()
+        .adding_image_layer(1, solid(6, 4, GREEN), "Clip")
+        .unwrap()
+        .with_layer_clipped(2, true)
+        .unwrap();
+    let before = doc.flattened().into_raw();
+    let merged = doc.merging_down(2).expect("merge");
+    assert_eq!(merged.layers.len(), 2);
+    assert!(
+        !merged.layers[1].clipped,
+        "the merged layer keeps the LOWER layer's flag"
+    );
+    assert_eq!(
+        merged.flattened().into_raw(),
+        before,
+        "the projection must not change when a clipped layer merges down"
+    );
+    // The bake is alpha-limited to the base's footprint: green exactly where
+    // the base was, transparent everywhere else in the union extent.
+    assert_eq!(merged.layers[1].offset, (0, 0), "union origin");
+    assert_eq!(merged.layers[1].pixels.dimensions(), (6, 4), "union extent");
+    for (x, y, px) in merged.layers[1].pixels.enumerate_pixels() {
+        if (1..4).contains(&x) && (1..3).contains(&y) {
+            assert_eq!(px.0, GREEN, "({x},{y}): clipped green baked over the base");
+        } else {
+            assert_eq!(px.0, [0, 0, 0, 0], "({x},{y}): outside the base footprint");
+        }
+    }
+
+    // Merging INSIDE a group: the merged layer keeps the lower layer's
+    // CLIPPED flag, so the shrunk group stays intact and the projection is
+    // preserved.
+    let doc = RzDocument::from_pixels(solid(6, 4, RED));
+    let doc = doc
+        .adding_image_layer(0, solid(3, 2, BLUE), "Base")
+        .unwrap()
+        .with_layer_offset(1, 1, 1)
+        .unwrap()
+        .adding_image_layer(1, solid(6, 4, GREEN), "ClipA")
+        .unwrap()
+        .with_layer_clipped(2, true)
+        .unwrap()
+        .adding_image_layer(2, solid(2, 2, [255, 255, 0, 255]), "ClipB")
+        .unwrap()
+        .with_layer_clipped(3, true)
+        .unwrap();
+    let before = doc.flattened().into_raw();
+    let merged = doc.merging_down(3).expect("merge inside the group");
+    assert_eq!(merged.layers.len(), 3);
+    assert!(merged.layers[2].clipped, "the merged layer stays clipped");
+    assert_eq!(
+        merged.flattened().into_raw(),
+        before,
+        "merging inside a clip group preserves the projection"
+    );
+}
+
+#[test]
+fn rzdc_v3_round_trips_clipped_flags() {
+    let dir = TempDir::new().unwrap();
+    let doc = RzDocument::from_pixels(solid(4, 3, RED));
+    let doc = doc
+        .adding_image_layer(0, solid(2, 2, BLUE), "Base")
+        .unwrap()
+        .adding_image_layer(1, solid(4, 3, GREEN), "Clip")
+        .unwrap()
+        .with_layer_clipped(2, true)
+        .unwrap();
+    let path = dir.path().join("clipped.rzdc");
+    let spath = path.to_str().unwrap().to_string();
+    doc.save_native(&spath).expect("save");
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[..4], b"RZDC");
+    assert_eq!(
+        u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+        3,
+        "the clipped flag bumped the format to version 3"
+    );
+
+    let back = RzDocument::open(&spath).expect("reopen");
+    assert_eq!(back.layers.len(), 3);
+    assert!(!back.layers[0].clipped);
+    assert!(!back.layers[1].clipped);
+    assert!(
+        back.layers[2].clipped,
+        "clipped flag survives the round trip"
+    );
+    assert_eq!(
+        back.flattened().into_raw(),
+        doc.flattened().into_raw(),
+        "projection survives the round trip"
+    );
+
+    // Saving the reopened document reproduces the file byte for byte.
+    let again = dir.path().join("again.rzdc");
+    back.save_native(again.to_str().unwrap()).expect("resave");
+    assert_eq!(std::fs::read(&again).unwrap(), bytes);
+}
+
+#[test]
+fn rzdc_version_1_and_2_records_load_with_clipped_false() {
+    let dir = TempDir::new().unwrap();
+    let mut png = Vec::new();
+    solid(2, 2, [1, 2, 3, 255])
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    // A version-1 record stops after the pixel PNG; the version-2 fields
+    // (mask, meta) and the version-3 field (clipped) are appended after it,
+    // each older record a strict prefix of the next.
+    let record_v1 = |version: u32| {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"RZDC");
+        buf.extend_from_slice(&version.to_le_bytes());
+        buf.extend_from_slice(&2u32.to_le_bytes()); // width
+        buf.extend_from_slice(&2u32.to_le_bytes()); // height
+        buf.extend_from_slice(&1u32.to_le_bytes()); // layer count
+        buf.extend_from_slice(&3u32.to_le_bytes()); // name len
+        buf.extend_from_slice(b"Old");
+        buf.extend_from_slice(&0i32.to_le_bytes()); // offset x
+        buf.extend_from_slice(&0i32.to_le_bytes()); // offset y
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // opacity
+        buf.extend_from_slice(&0u32.to_le_bytes()); // blend
+        buf.push(1); // visible
+        buf.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&png);
+        buf
+    };
+
+    let v1_path = dir.path().join("v1.rzdc");
+    std::fs::write(&v1_path, record_v1(1)).unwrap();
+    let v1 = RzDocument::open(v1_path.to_str().unwrap()).expect("v1 must load");
+    assert!(!v1.layers[0].clipped, "v1 defaults to unclipped");
+
+    // The same record with the version-2 fields appended (no mask, mask
+    // enabled, no meta) — still no clipped byte.
+    let mut v2 = record_v1(2);
+    v2.push(0); // mask present
+    v2.push(1); // mask enabled
+    v2.push(0); // meta present
+    let v2_path = dir.path().join("v2.rzdc");
+    std::fs::write(&v2_path, &v2).unwrap();
+    let v2 = RzDocument::open(v2_path.to_str().unwrap()).expect("v2 must load");
+    assert!(!v2.layers[0].clipped, "v2 defaults to unclipped");
+
+    // The same record with the clipped byte appended parses as version 3.
+    let mut v3 = record_v1(3);
+    v3.push(0); // mask present
+    v3.push(1); // mask enabled
+    v3.push(0); // meta present
+    v3.push(1); // clipped
+    let v3_path = dir.path().join("v3.rzdc");
+    std::fs::write(&v3_path, &v3).unwrap();
+    let v3 = RzDocument::open(v3_path.to_str().unwrap()).expect("v3 must load");
+    assert!(
+        v3.layers[0].clipped,
+        "the appended v3 byte is the clipped flag"
+    );
+
+    // A version-3 record missing the clipped byte is truncated, not lenient.
+    let mut short = record_v1(3);
+    short.push(0);
+    short.push(1);
+    short.push(0);
+    let short_path = dir.path().join("short.rzdc");
+    std::fs::write(&short_path, &short).unwrap();
+    assert!(
+        RzDocument::open(short_path.to_str().unwrap()).is_err(),
+        "a v3 record without the clipped byte must be refused"
     );
 }

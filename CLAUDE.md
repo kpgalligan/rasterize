@@ -31,7 +31,7 @@ Swift/AppKit UI (programmatic, no storyboards) over a Rust staticlib core. All p
 
 ### Rust core (`core/src/`)
 
-- `doc.rs` / `doc_select.rs` / `ops.rs` / `ops_filters.rs` — document model, selections/fill/gradient, image ops, filters. `ffi*.rs` files are thin FFI shims over these.
+- `doc.rs` / `doc_select.rs` / `ops.rs` / `ops_filters.rs` — document model, selections/fill/gradient, image ops, filters. `ffi*.rs` files are thin FFI shims over these. Layer `meta` is an opaque blob the core stores/copies/serializes without interpreting, EXCEPT that the compositor recognizes `{"type":"adjust", …}` (`core/src/adjust.rs`) as an adjustment layer at composite time.
 - `agent.rs` — embedded MCP server (streamable HTTP, tools-only, stateless, single JSON responses). It is **generic**: the host registers a JSON tool catalog and a C callback; the protocol layer knows nothing about images.
 - `assistant.rs` — the built-in chat agent: a tool-use loop over the Anthropic Messages API (`ureq`, non-streaming; `api_base` is the provider seam) emitting JSON events per turn, with cancellation at tool/API boundaries and pruning of old canvas renders from history.
 

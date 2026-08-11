@@ -327,6 +327,209 @@ pub fn feather_mask(mask: &mut [u8], width: u32, height: u32, radius: f32) {
     }
 }
 
+// -------------------------------------------------- selection morphology --
+//
+// Grow, shrink and border are defined on the signed Euclidean distance to
+// the mask's 50% contour: coverage is binarized at >= 128 (deliberately
+// resolving any feathered softness to its 50% contour), the exact squared
+// Euclidean distance transform is taken both ways with the two-pass O(n)
+// Felzenszwalb–Huttenlocher algorithm, and each pixel gets
+//
+//     s = (distance to nearest OUTSIDE pixel) - 0.5   if it is inside,
+//     s = -((distance to nearest INSIDE pixel) - 0.5) if it is outside,
+//
+// so the contour sits at s = 0, halfway between an inside pixel and its
+// outside neighbor. The canvas boundary is NOT a contour: the transform
+// only sees the inside/outside pixels actually present in the buffer, so a
+// full mask (no outside pixels, s = +inf everywhere) stays full under both
+// grow and shrink, and an empty mask (no inside pixels, s = -inf) stays
+// empty; border maps both to empty. New edges come back with a fresh ~1px
+// anti-aliased ramp.
+
+/// Grows (dilates) a selection mask in place by `radius` pixels of true
+/// Euclidean distance: `coverage' = clamp(s + radius + 0.5, 0, 1) * 255`,
+/// so edges move outward by `radius` and corners round into circular arcs.
+///
+/// `radius <= 0` (or NaN/inf), a zero dimension, or a mask length that
+/// does not match `width * height` is a no-op, as in [`feather_mask`].
+pub fn grow_mask(mask: &mut [u8], width: u32, height: u32, radius: f32) {
+    let (w, h) = (width as usize, height as usize);
+    if !radius.is_finite() || radius <= 0.0 || w == 0 || h == 0 || mask.len() != w * h {
+        return;
+    }
+    offset_contour(mask, w, h, radius);
+}
+
+/// Shrinks (erodes) a selection mask in place by `radius` pixels:
+/// [`grow_mask`] with `-radius`, so edges move inward and outside corners
+/// round the same way. Same no-op conditions as [`grow_mask`].
+pub fn shrink_mask(mask: &mut [u8], width: u32, height: u32, radius: f32) {
+    let (w, h) = (width as usize, height as usize);
+    if !radius.is_finite() || radius <= 0.0 || w == 0 || h == 0 || mask.len() != w * h {
+        return;
+    }
+    offset_contour(mask, w, h, -radius);
+}
+
+/// Replaces a selection mask in place with an anti-aliased band `width_px`
+/// wide straddling its 50% contour:
+/// `coverage' = clamp(width_px/2 - |s| + 0.5, 0, 1) * 255`. A full or
+/// empty mask has no contour and comes back empty.
+///
+/// `width_px <= 0` (or NaN/inf), a zero dimension, or a mask length that
+/// does not match `width * height` is a no-op, as in [`feather_mask`].
+pub fn border_mask(mask: &mut [u8], width: u32, height: u32, width_px: f32) {
+    let (w, h) = (width as usize, height as usize);
+    if !width_px.is_finite() || width_px <= 0.0 || w == 0 || h == 0 || mask.len() != w * h {
+        return;
+    }
+    let sdf = signed_distance_field(mask, w, h);
+    for (v, s) in mask.iter_mut().zip(sdf) {
+        *v = coverage_byte(width_px * 0.5 - s.abs());
+    }
+}
+
+/// Smooths a selection mask in place: a Gaussian blur with exactly
+/// [`feather_mask`]'s sigma mapping, then a smoothstep contrast remap
+/// (`t = v/255`, `v' = round(255 * t^2 * (3 - 2t))`). Corners round and
+/// jagged edges reconcile, while a long straight edge stays put — the
+/// blur is symmetric across it and smoothstep fixes 1/2. Unlike
+/// grow/shrink/border this never binarizes: soft coverage stays soft.
+/// Same no-op conditions as [`feather_mask`].
+pub fn smooth_mask(mask: &mut [u8], width: u32, height: u32, radius: f32) {
+    let (w, h) = (width as usize, height as usize);
+    if !radius.is_finite() || radius <= 0.0 || w == 0 || h == 0 || mask.len() != w * h {
+        return;
+    }
+    feather_mask(mask, width, height, radius);
+    for v in mask.iter_mut() {
+        let t = f32::from(*v) / 255.0;
+        *v = (255.0 * t * t * (3.0 - 2.0 * t)).round() as u8;
+    }
+}
+
+/// Rewrites `mask` as its 50% contour offset outward by `offset` pixels
+/// (inward when negative): `coverage' = clamp(s + offset + 0.5, 0, 1) * 255`.
+fn offset_contour(mask: &mut [u8], w: usize, h: usize, offset: f32) {
+    let sdf = signed_distance_field(mask, w, h);
+    for (v, s) in mask.iter_mut().zip(sdf) {
+        *v = coverage_byte(s + offset);
+    }
+}
+
+/// `clamp(x + 0.5, 0, 1) * 255`: a signed pixel distance inside the target
+/// region mapped onto a coverage byte with a ~1px anti-aliased ramp.
+/// Infinities clamp like any other out-of-range value.
+fn coverage_byte(x: f32) -> u8 {
+    ((x + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// The signed Euclidean distance from every pixel center to the mask's 50%
+/// contour (see the section comment above): positive inside (coverage
+/// >= 128), negative outside, `+inf`/`-inf` when the binarized mask has no
+/// outside (resp. inside) pixels at all.
+fn signed_distance_field(mask: &[u8], w: usize, h: usize) -> Vec<f32> {
+    let len = w * h;
+    let mut to_outside = vec![0f32; len];
+    let mut to_inside = vec![0f32; len];
+    for i in 0..len {
+        if mask[i] >= 128 {
+            to_outside[i] = f32::INFINITY;
+        } else {
+            to_inside[i] = f32::INFINITY;
+        }
+    }
+    edt_squared(&mut to_outside, w, h);
+    edt_squared(&mut to_inside, w, h);
+    for i in 0..len {
+        to_outside[i] = if mask[i] >= 128 {
+            to_outside[i].sqrt() - 0.5
+        } else {
+            0.5 - to_inside[i].sqrt()
+        };
+    }
+    to_outside
+}
+
+/// Exact squared Euclidean distance transform, columns then rows through
+/// the 1-D lower-envelope pass (Felzenszwalb–Huttenlocher). On input,
+/// `grid` holds 0 at site pixels and `+inf` elsewhere; on output, each
+/// cell is the squared distance to its nearest site (`+inf` when the grid
+/// has no sites at all).
+fn edt_squared(grid: &mut [f32], w: usize, h: usize) {
+    let n = w.max(h);
+    let mut f = vec![0f32; n];
+    let mut d = vec![0f32; n];
+    let mut v = vec![0usize; n];
+    let mut z = vec![0f32; n + 1];
+    for x in 0..w {
+        for y in 0..h {
+            f[y] = grid[y * w + x];
+        }
+        edt_1d(&f[..h], &mut d[..h], &mut v, &mut z);
+        for y in 0..h {
+            grid[y * w + x] = d[y];
+        }
+    }
+    for y in 0..h {
+        f[..w].copy_from_slice(&grid[y * w..(y + 1) * w]);
+        edt_1d(&f[..w], &mut d[..w], &mut v, &mut z);
+        grid[y * w..(y + 1) * w].copy_from_slice(&d[..w]);
+    }
+}
+
+/// One 1-D pass of the Felzenszwalb–Huttenlocher transform:
+/// `d[q] = min_p (q - p)^2 + f[p]`. `+inf` entries in `f` never seed a
+/// parabola (a line with no finite entry comes back all `+inf`), which is
+/// what makes a site-free grid legal. `v` and `z` are scratch for the
+/// lower envelope: parabola vertices and the boundaries between them.
+fn edt_1d(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f32]) {
+    let n = f.len();
+    let mut k = 0usize;
+    let mut seeded = false;
+    for q in 0..n {
+        if f[q] == f32::INFINITY {
+            continue;
+        }
+        if !seeded {
+            seeded = true;
+            v[0] = q;
+            z[0] = f32::NEG_INFINITY;
+            z[1] = f32::INFINITY;
+            continue;
+        }
+        // Intersection of q's parabola with the rightmost one kept; pop
+        // envelopes it fully covers. `s` is finite (finite f, q > p), so
+        // the loop stops at z[0] = -inf at the latest and k never wraps.
+        let mut s;
+        loop {
+            let p = v[k];
+            s = ((f[q] + (q * q) as f32) - (f[p] + (p * p) as f32))
+                / ((2 * q) as f32 - (2 * p) as f32);
+            if s > z[k] {
+                break;
+            }
+            k -= 1;
+        }
+        k += 1;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = f32::INFINITY;
+    }
+    if !seeded {
+        d[..n].fill(f32::INFINITY);
+        return;
+    }
+    let mut k = 0usize;
+    for q in 0..n {
+        while z[k + 1] < q as f32 {
+            k += 1;
+        }
+        let p = v[k];
+        d[q] = (q as f32 - p as f32).powi(2) + f[p];
+    }
+}
+
 /// Nearest odd integer to `x` (ties resolve to the lower odd value),
 /// mirroring the image crate's kernel-size rounding. `x` must be >= 1.
 fn nearest_odd(x: f32) -> u32 {

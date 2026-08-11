@@ -1,5 +1,12 @@
 # What Popular Editors Have That We Don't
 
+**Status: the suggested next phase (bottom of this file) has shipped** —
+adjustment layers (all nine ops, Curves included), clipping masks, the
+eyedropper and crop tools, and selection morphology + Quick Mask are in the
+app, the core, and the MCP catalog, which now stands at 43 tools. The
+follow-ons — layer groups, shape layers, layer styles, retouch brushes —
+remain open.
+
 A survey against Photoshop / Photopea / GIMP / Affinity, ranked by value
 per unit of effort **given this codebase's architecture** — pure ops over
 `Arc`-shared layers, canvas-sized coverage masks, an f32 compositor, and

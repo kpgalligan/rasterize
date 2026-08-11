@@ -10,6 +10,7 @@ use image::imageops::FilterType;
 
 use image::RgbaImage;
 
+use crate::adjust::Adjustment;
 use crate::doc::{BlendMode, MaskKind, RzDocument, MAX_PIXELS, MAX_RZDC_META_LEN};
 use crate::doc_transform::Affine;
 use crate::ops::CompositeMode;
@@ -990,6 +991,113 @@ pub unsafe extern "C" fn rz_selection_feather(
     .is_ok()
 }
 
+/// Grows (dilates) a selection mask in place by `radius` pixels of true
+/// Euclidean distance, working on the signed distance field of the mask's
+/// 50% contour (coverage binarized at >= 128 — any feathered softness
+/// deliberately resolves to its 50% contour): edges move outward by
+/// `radius`, corners round into circular arcs, and the new edge carries a
+/// fresh ~1px anti-aliased ramp. The canvas boundary is not a contour, so
+/// full and empty masks are fixed points. Returns false on NULL mask, zero
+/// dimensions, or a non-finite radius; `radius <= 0` returns true and
+/// leaves the mask untouched, exactly like `rz_selection_feather`.
+///
+/// # Safety
+/// `mask` must be NULL or valid and writable for width*height bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_selection_grow(
+    mask: *mut u8,
+    width: u32,
+    height: u32,
+    radius: f32,
+) -> bool {
+    if mask.is_null() || width == 0 || height == 0 || !radius.is_finite() {
+        return false;
+    }
+    let len = width as usize * height as usize;
+    let slice = unsafe { std::slice::from_raw_parts_mut(mask, len) };
+    catch_unwind(AssertUnwindSafe(|| {
+        crate::doc_select::grow_mask(slice, width, height, radius);
+    }))
+    .is_ok()
+}
+
+/// Shrinks (erodes) a selection mask in place by `radius` pixels: grow with
+/// `-radius`, with the same 50%-contour binarization, fixed points, and
+/// error/no-op conventions as `rz_selection_grow`.
+///
+/// # Safety
+/// `mask` must be NULL or valid and writable for width*height bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_selection_shrink(
+    mask: *mut u8,
+    width: u32,
+    height: u32,
+    radius: f32,
+) -> bool {
+    if mask.is_null() || width == 0 || height == 0 || !radius.is_finite() {
+        return false;
+    }
+    let len = width as usize * height as usize;
+    let slice = unsafe { std::slice::from_raw_parts_mut(mask, len) };
+    catch_unwind(AssertUnwindSafe(|| {
+        crate::doc_select::shrink_mask(slice, width, height, radius);
+    }))
+    .is_ok()
+}
+
+/// Replaces a selection mask in place with an anti-aliased band `width_px`
+/// wide straddling its 50% contour (coverage binarized at >= 128, as in
+/// `rz_selection_grow`). A full or empty mask has no contour and comes back
+/// empty. Returns false on NULL mask, zero dimensions, or a non-finite
+/// width; `width_px <= 0` returns true and leaves the mask untouched.
+///
+/// # Safety
+/// `mask` must be NULL or valid and writable for width*height bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_selection_border(
+    mask: *mut u8,
+    width: u32,
+    height: u32,
+    width_px: f32,
+) -> bool {
+    if mask.is_null() || width == 0 || height == 0 || !width_px.is_finite() {
+        return false;
+    }
+    let len = width as usize * height as usize;
+    let slice = unsafe { std::slice::from_raw_parts_mut(mask, len) };
+    catch_unwind(AssertUnwindSafe(|| {
+        crate::doc_select::border_mask(slice, width, height, width_px);
+    }))
+    .is_ok()
+}
+
+/// Smooths a selection mask in place: a Gaussian blur with exactly
+/// `rz_selection_feather`'s sigma mapping followed by a smoothstep contrast
+/// remap (`t = v/255`, `v' = round(255 * t^2 * (3 - 2t))`) — corners round
+/// and jagged edges reconcile while a long straight edge stays put. Never
+/// binarizes. Returns false on NULL mask, zero dimensions, or a non-finite
+/// radius; `radius <= 0` returns true and leaves the mask untouched.
+///
+/// # Safety
+/// `mask` must be NULL or valid and writable for width*height bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_selection_smooth(
+    mask: *mut u8,
+    width: u32,
+    height: u32,
+    radius: f32,
+) -> bool {
+    if mask.is_null() || width == 0 || height == 0 || !radius.is_finite() {
+        return false;
+    }
+    let len = width as usize * height as usize;
+    let slice = unsafe { std::slice::from_raw_parts_mut(mask, len) };
+    catch_unwind(AssertUnwindSafe(|| {
+        crate::doc_select::smooth_mask(slice, width, height, radius);
+    }))
+    .is_ok()
+}
+
 // ------------------------------------------------------------ layer masks --
 
 /// Maps a raw `RzMaskKind` value onto a `MaskKind`. `selection` is read only
@@ -1152,6 +1260,34 @@ pub unsafe extern "C" fn rz_doc_layer_mask_enabled(doc: *const RzDocument, idx: 
     }
 }
 
+// ---------------------------------------------------------- clipping masks --
+
+/// Pure setter: returns a new document with layer `idx`'s clipped flag
+/// replaced. A clipped layer is confined to the alpha footprint of the first
+/// unclipped layer beneath it (its base); groups are positional and re-derived
+/// at every composite, so the flag is all there is to set. NULL on NULL doc or
+/// out-of-range idx.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_with_layer_clipped(
+    doc: *const RzDocument,
+    idx: usize,
+    clipped: bool,
+) -> *mut RzDocument {
+    unsafe { doc_op(doc, |d| d.with_layer_clipped(idx, clipped)) }
+}
+
+/// The layer's clipped flag; false on NULL doc or out-of-range idx.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_layer_clipped(doc: *const RzDocument, idx: usize) -> bool {
+    unsafe { doc_get(doc, false, |d| Some(d.layers.get(idx)?.clipped)) }
+}
+
 // --------------------------------------------------------- layer metadata --
 
 /// Heap copy of layer `idx`'s metadata blob (free with `rz_string_free`);
@@ -1207,6 +1343,24 @@ pub unsafe extern "C" fn rz_doc_with_layer_meta(
             let mut out = d.clone();
             out.layers[idx].meta = value;
             Some(out)
+        })
+    }
+}
+
+/// Whether layer `idx`'s metadata parses as a color-adjustment description
+/// (`{"type":"adjust", ...}` — the one meta shape the compositor interprets;
+/// see `adjust` for the schema), i.e. whether the compositor treats the layer
+/// as an adjustment layer. False on NULL doc, out-of-range idx, absent meta,
+/// or meta that does not parse as an adjustment.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_layer_is_adjustment(doc: *const RzDocument, idx: usize) -> bool {
+    unsafe {
+        doc_get(doc, false, |d| {
+            let meta = d.layers.get(idx)?.meta.as_deref()?;
+            Some(Adjustment::from_meta(meta).is_some())
         })
     }
 }

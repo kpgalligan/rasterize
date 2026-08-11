@@ -761,6 +761,102 @@ final class FeatherSheetController: NSViewController {
     }
 }
 
+// MARK: - SelectionMorphSheetController
+
+/// Select > Grow/Shrink/Border/Smooth Selection…: FeatherSheetController's
+/// numeric dialog, parameterized over the selection-morphology op Apply
+/// runs. Selections are not undoable and no pixels change, so there is no
+/// live preview — the marquee and dimming update on Apply.
+final class SelectionMorphSheetController: NSViewController {
+    private weak var canvas: ImageCanvasView?
+    private let sheetTitle: String
+    private let valueLabel: String
+    private let hint: String
+    private let transform: (CanvasSelection, Double) -> CanvasSelection?
+
+    // The same log-feel travel as Feather: log10(0.5)…log10(250), so the
+    // useful small values get most of the slider.
+    private let valueSlider = NSSlider(
+        value: log10(4.0), minValue: log10(0.5), maxValue: log10(250.0),
+        target: nil, action: nil)
+    private let valueField = NSTextField(labelWithString: "4.0 px")
+
+    /// `label` is the parameter's row label ("Radius:", or Border's
+    /// "Width:"); `transform` maps the current selection and the chosen
+    /// value to the new selection (nil deselects).
+    init(
+        canvas: ImageCanvasView, title: String, label: String, hint: String,
+        transform: @escaping (CanvasSelection, Double) -> CanvasSelection?
+    ) {
+        self.canvas = canvas
+        self.sheetTitle = title
+        self.valueLabel = label
+        self.hint = hint
+        self.transform = transform
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("SelectionMorphSheetController does not support NSCoder")
+    }
+
+    override func loadView() {
+        valueSlider.isContinuous = true
+        valueSlider.target = self
+        valueSlider.action = #selector(sliderChanged(_:))
+        valueSlider.widthAnchor.constraint(equalToConstant: 180).isActive = true
+
+        valueField.font = DS.mono(12)
+        valueField.textColor = DS.textMuted
+        valueField.alignment = .right
+        valueField.widthAnchor.constraint(equalToConstant: 52).isActive = true
+
+        let grid = NSGridView(views: [
+            [fieldLabel(valueLabel), valueSlider, valueField]
+        ])
+        grid.rowSpacing = 10
+        grid.columnSpacing = 12
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = 106
+
+        let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
+        let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
+        view = makeSheetView(
+            title: sheetTitle,
+            hint: hint,
+            content: grid,
+            buttonRow: makeButtonRow(
+                cancel: cancelButton, apply: applyButton,
+                leading: [sheetFootnote("0.5 – 250 px")]))
+    }
+
+    private var value: Double {
+        pow(10, valueSlider.doubleValue)
+    }
+
+    @objc private func sliderChanged(_ sender: Any?) {
+        valueField.stringValue = String(format: "%.1f px", value)
+    }
+
+    @objc private func applyClicked(_ sender: Any?) {
+        let value = value
+        dismiss(self)
+        guard let canvas = canvas, let selection = canvas.selection else {
+            NSSound.beep()
+            return
+        }
+        // An op that leaves no coverage (a shrink past the middle, a border
+        // of an empty contour) comes back nil and deselects — the same
+        // all-empty rule as Feather and the combine modes.
+        canvas.setSelection(transform(selection, value))
+    }
+
+    @objc private func cancelClicked(_ sender: Any?) {
+        dismiss(self)
+    }
+}
+
 // MARK: - SliderSheetController
 
 /// One slider row of a SliderSheetController: label, slider-space range, an
@@ -934,6 +1030,598 @@ final class SliderSheetController: NSViewController {
         canvas?.previewImage = nil
         dismiss(self)
         document.applyToActiveLayer(actionName) { compute($0, values) }
+    }
+
+    @objc private func cancelClicked(_ sender: Any?) {
+        renderer.cancel()
+        canvas?.previewImage = nil
+        dismiss(self)
+    }
+}
+
+// MARK: - AdjustmentLayerSheetController
+
+/// Live-preview sheet for a PARAMETERIZED adjustment-layer op, in either of
+/// two modes: creating a NEW adjustment layer above the active one, or
+/// re-editing an existing adjustment layer's meta. The slider rows reuse the
+/// destructive dialogs' exact labels, ranges and mappings
+/// (AdjustSheetController, the SliderSheetController factories) so the
+/// destructive and non-destructive variants feel identical; only the commit
+/// target differs. The preview chains the same PURE ops the commit will run,
+/// on a doc handle captured at init — the document itself is untouched until
+/// Apply (one undo step), so Cancel is nothing more than dropping the
+/// preview: no undo registration, no edit count.
+///
+/// This class is also the dialog seam: `make(op:...)` is the one entry
+/// point the editor calls, and it hands `.curves` to
+/// CurvesAdjustmentSheetController (the curve editor under the same `Mode`
+/// and completion contract) instead of building slider rows.
+final class AdjustmentLayerSheetController: NSViewController {
+    /// What Apply commits.
+    enum Mode {
+        /// Insert a new adjustment layer above the ACTIVE layer. Its mask
+        /// comes from `selection` (the marquee's canvas-sized coverage,
+        /// captured when the sheet opened and left up afterwards, exactly
+        /// like Layer > Mask > From Selection) or is reveal-all when nil.
+        case create(selection: [UInt8]?)
+        /// Replace ONLY layer `layer`'s meta; `original` prefills the
+        /// sliders, and an unchanged meta commits nothing.
+        case edit(layer: Int, original: AdjustmentLayerPayload)
+    }
+
+    /// The op-specific pieces of a slider-built dialog.
+    private struct Config {
+        let sliders: [FilterSliderDescriptor]
+        let willChange: ((Int, inout [Double]) -> Void)?
+        /// Meta params from the sliders' MAPPED values (schema ranges are
+        /// guaranteed by the slider ranges themselves).
+        let params: ([Double]) -> [String: Any]
+        /// SLIDER-space positions from a layer's params (edit-mode prefill),
+        /// clamped defensively into the sliders' ranges.
+        let sliderValues: (AdjustmentLayerPayload) -> [Double]
+    }
+
+    private static func config(for op: AdjustmentLayerOp) -> Config? {
+        switch op {
+        case .bcs:
+            // AdjustSheetController's rows: three sliders, -1…1, 0.01 steps.
+            let format = { String(format: "%.2f", $0) }
+            return Config(
+                sliders: [
+                    FilterSliderDescriptor(
+                        label: "Brightness:", min: -1, max: 1, initial: 0, format: format),
+                    FilterSliderDescriptor(
+                        label: "Contrast:", min: -1, max: 1, initial: 0, format: format),
+                    FilterSliderDescriptor(
+                        label: "Saturation:", min: -1, max: 1, initial: 0, format: format),
+                ],
+                willChange: nil,
+                params: { ["brightness": $0[0], "contrast": $0[1], "saturation": $0[2]] },
+                sliderValues: { payload in
+                    ["brightness", "contrast", "saturation"].map {
+                        payload.number($0, default: 0).clamped(-1, 1)
+                    }
+                })
+        case .levels:
+            // SliderSheetController.levels' rows, including the log-feel
+            // gamma slider and the black < white constraint.
+            let format = { String(format: "%.2f", $0) }
+            return Config(
+                sliders: [
+                    FilterSliderDescriptor(
+                        label: "Black:", min: 0, max: 0.99, initial: 0, format: format),
+                    FilterSliderDescriptor(
+                        label: "White:", min: 0.01, max: 1, initial: 1, format: format),
+                    FilterSliderDescriptor(
+                        label: "Gamma:", min: -1, max: 1, initial: 0,
+                        map: { pow(10, $0) }, format: format),
+                ],
+                willChange: { changed, values in
+                    // Keep black < white by pushing the OTHER slider along.
+                    if changed == 0, values[1] <= values[0] {
+                        values[1] = min(values[0] + 0.01, 1)
+                    } else if changed == 1, values[0] >= values[1] {
+                        values[0] = max(values[1] - 0.01, 0)
+                    }
+                },
+                params: { ["black": $0[0], "white": $0[1], "gamma": $0[2]] },
+                sliderValues: { payload in
+                    var black = payload.number("black", default: 0).clamped(0, 0.99)
+                    let white = payload.number("white", default: 1).clamped(0.01, 1)
+                    if black >= white { black = max(white - 0.01, 0) }
+                    let gamma = payload.number("gamma", default: 1).clamped(0.1, 10)
+                    return [black, white, log10(gamma)]
+                })
+        case .hueRotate:
+            return Config(
+                sliders: [
+                    FilterSliderDescriptor(
+                        label: "Angle:", min: -180, max: 180, initial: 0,
+                        format: { String(format: "%.0f°", $0) })
+                ],
+                willChange: nil,
+                params: { ["degrees": $0[0]] },
+                sliderValues: { payload in
+                    // Any finite angle is legal in meta; show its wrap into
+                    // the dialog's -180…180 range (rotation is mod 360).
+                    var degrees = payload.number("degrees", default: 0)
+                        .truncatingRemainder(dividingBy: 360)
+                    if degrees > 180 { degrees -= 360 }
+                    if degrees < -180 { degrees += 360 }
+                    return [degrees]
+                })
+        case .threshold:
+            return Config(
+                sliders: [
+                    FilterSliderDescriptor(
+                        label: "Level:", min: 0, max: 1, initial: 0.5,
+                        format: { String(format: "%.2f", $0) })
+                ],
+                willChange: nil,
+                params: { ["level": $0[0]] },
+                sliderValues: { [$0.number("level", default: 0.5).clamped(0, 1)] })
+        case .posterize:
+            return Config(
+                sliders: [
+                    FilterSliderDescriptor(
+                        label: "Levels:", min: 2, max: 16, initial: 4, isInteger: true,
+                        format: { String(Int($0.rounded())) })
+                ],
+                willChange: nil,
+                params: { ["levels": Int($0[0].rounded())] },
+                sliderValues: { [$0.number("levels", default: 4).rounded().clamped(2, 16)] })
+        case .curves:
+            // Curves has a dialog, but a bespoke one (the curve editor in
+            // CurvesAdjustmentSheetController), not slider rows.
+            return nil
+        case .invert, .grayscale, .sepia:
+            // Parameterless: created directly, nothing to dialog.
+            return nil
+        }
+    }
+
+    /// Whether `op` has a dialog to open — what enables Adjustment Options…
+    /// (parameterless ops have none).
+    static func opHasDialog(_ op: AdjustmentLayerOp) -> Bool {
+        op == .curves || config(for: op) != nil
+    }
+
+    /// The one entry point the editor calls for both creation and re-edit;
+    /// nil for an op without a dialog. `onCommitted` fires after a
+    /// successful Apply with the created/edited layer's index (the editor
+    /// selects it and refreshes).
+    static func make(
+        op: AdjustmentLayerOp, document: ImageDocument, canvas: ImageCanvasView,
+        mode: Mode, onCommitted: ((Int) -> Void)? = nil
+    ) -> NSViewController? {
+        if op == .curves {
+            let controller = CurvesAdjustmentSheetController(
+                document: document, canvas: canvas, mode: mode)
+            controller.onCommitted = onCommitted
+            return controller
+        }
+        guard let config = config(for: op) else { return nil }
+        let controller = AdjustmentLayerSheetController(
+            op: op, config: config, document: document, canvas: canvas, mode: mode)
+        controller.onCommitted = onCommitted
+        return controller
+    }
+
+    private let document: ImageDocument
+    private weak var canvas: ImageCanvasView?
+    private let op: AdjustmentLayerOp
+    private let config: Config
+    private let mode: Mode
+    // In-context preview base: the chained ops are applied to this captured
+    // handle and the flattened result is shown, so masks, blend modes and
+    // the other layers stay visible while scrubbing.
+    private let baseDoc: RasterDocument?
+    private let aboveIndex: Int
+    private let renderer = PreviewRenderer()
+    private var sliders: [NSSlider] = []
+    private var valueLabels: [NSTextField] = []
+    private var didRequestInitialPreview = false
+    private var onCommitted: ((Int) -> Void)?
+
+    private init(
+        op: AdjustmentLayerOp, config: Config, document: ImageDocument,
+        canvas: ImageCanvasView, mode: Mode
+    ) {
+        self.op = op
+        self.config = config
+        self.document = document
+        self.canvas = canvas
+        self.mode = mode
+        self.baseDoc = document.doc
+        self.aboveIndex = document.activeLayerIndex
+        super.init(nibName: nil, bundle: nil)
+        renderer.onRender = { [weak self] cgImage in
+            self?.canvas?.previewImage = cgImage
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("AdjustmentLayerSheetController does not support NSCoder")
+    }
+
+    override func loadView() {
+        // Edit mode prefills from the layer's meta; create mode starts at
+        // the descriptors' defaults, like the destructive dialogs.
+        var initialValues = config.sliders.map { $0.sliderInitial }
+        if case .edit(_, let original) = mode {
+            let prefill = config.sliderValues(original)
+            if prefill.count == initialValues.count { initialValues = prefill }
+        }
+        var rows: [[NSView]] = []
+        for (index, descriptor) in config.sliders.enumerated() {
+            let slider = NSSlider(
+                value: initialValues[index], minValue: descriptor.sliderMin,
+                maxValue: descriptor.sliderMax, target: self,
+                action: #selector(sliderChanged(_:)))
+            slider.isContinuous = true
+            slider.widthAnchor.constraint(equalToConstant: 180).isActive = true
+
+            let label = NSTextField(
+                labelWithString: descriptor.format(descriptor.map(initialValues[index])))
+            label.font = DS.mono(12)
+            label.textColor = DS.textMuted
+            label.alignment = .right
+            label.widthAnchor.constraint(equalToConstant: 52).isActive = true
+
+            sliders.append(slider)
+            valueLabels.append(label)
+            rows.append([fieldLabel(descriptor.label), slider, label])
+        }
+        let grid = NSGridView(views: rows)
+        grid.rowSpacing = 10
+        grid.columnSpacing = 12
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = 106
+
+        let title: String
+        if case .edit = mode {
+            title = "\(op.displayName) options"
+        } else {
+            title = "New \(op.displayName) layer"
+        }
+        let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
+        let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
+        view = makeSheetView(
+            title: title, content: grid,
+            buttonRow: makeButtonRow(
+                cancel: cancelButton, apply: applyButton,
+                leading: [sheetFootnote("one undo step")]))
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        // A newly inserted layer with non-identity defaults (threshold,
+        // posterize) must preview immediately so what the user sees is what
+        // Apply produces.
+        guard !didRequestInitialPreview else { return }
+        didRequestInitialPreview = true
+        requestPreview()
+    }
+
+    private func mappedValues() -> [Double] {
+        zip(sliders, config.sliders).map { slider, descriptor in
+            descriptor.map(slider.doubleValue)
+        }
+    }
+
+    private func updateValueLabels() {
+        for (index, descriptor) in config.sliders.enumerated() {
+            valueLabels[index].stringValue =
+                descriptor.format(descriptor.map(sliders[index].doubleValue))
+        }
+    }
+
+    private func metaJSON(_ values: [Double]) -> String? {
+        AdjustmentLayerPayload(op: op, params: config.params(values)).json()
+    }
+
+    /// Previews the SAME chained pure ops Apply will commit, applied to the
+    /// captured base and flattened (self stays off the render queue; only
+    /// captured values cross).
+    private func requestPreview() {
+        guard let baseDoc = baseDoc, let meta = metaJSON(mappedValues()) else { return }
+        let mode = mode
+        let above = aboveIndex
+        let name = op.displayName
+        renderer.request {
+            let previewDoc: RasterDocument?
+            switch mode {
+            case .create(let selection):
+                previewDoc = baseDoc.addingAdjustmentLayer(
+                    above: above, name: name, meta: meta, selection: selection)
+            case .edit(let idx, _):
+                previewDoc = baseDoc.withLayerMeta(idx, meta)
+            }
+            return previewDoc?.flattened()?.makeCGImage()
+        }
+    }
+
+    @objc private func sliderChanged(_ sender: Any?) {
+        guard let slider = sender as? NSSlider,
+              let index = sliders.firstIndex(where: { $0 === slider })
+        else { return }
+        if config.sliders[index].isInteger {
+            slider.doubleValue = slider.doubleValue.rounded()
+        }
+        if let willChange = config.willChange {
+            var values = sliders.map { $0.doubleValue }
+            willChange(index, &values)
+            for (i, value) in values.enumerated() where sliders[i].doubleValue != value {
+                sliders[i].doubleValue = value
+            }
+        }
+        updateValueLabels()
+        requestPreview()
+    }
+
+    @objc private func applyClicked(_ sender: Any?) {
+        let values = mappedValues()
+        renderer.cancel()
+        canvas?.previewImage = nil
+        dismiss(self)
+        guard let meta = metaJSON(values) else {
+            NSSound.beep()
+            return
+        }
+        switch mode {
+        case .create(let selection):
+            // Compose on the document's CURRENT doc and active layer, not
+            // the captured preview base, so any edit that slipped in while
+            // the sheet was open (an agent's) survives.
+            let below = document.activeLayerIndex
+            let name = op.displayName
+            let before = document.doc
+            document.applyEdit("New \(name) Layer") {
+                $0.addingAdjustmentLayer(
+                    above: below, name: name, meta: meta, selection: selection)
+            }
+            guard document.doc !== before, let doc = document.doc else { return }
+            onCommitted?(min(below + 1, doc.layerCount - 1))
+        case .edit(let idx, let original):
+            // Closing the dialog with unchanged values must not register an
+            // undo step or dirty the file (sorted-key encoding makes the
+            // comparison byte-stable).
+            guard meta != original.json() else { return }
+            document.applyEdit("Edit \(op.displayName) Layer") { doc in
+                // The layer must still BE an adjustment layer (only an agent
+                // edit can move the stack under an open sheet).
+                guard doc.layerIsAdjustment(idx) else { return nil }
+                return doc.withLayerMeta(idx, meta)
+            }
+            onCommitted?(idx)
+        }
+    }
+
+    @objc private func cancelClicked(_ sender: Any?) {
+        renderer.cancel()
+        canvas?.previewImage = nil
+        dismiss(self)
+    }
+}
+
+extension Double {
+    fileprivate func clamped(_ low: Double, _ high: Double) -> Double {
+        Swift.min(Swift.max(self, low), high)
+    }
+}
+
+// MARK: - CurvesAdjustmentSheetController
+
+/// The `.curves` branch of the adjustment-layer dialog seam: identical
+/// lifecycle to AdjustmentLayerSheetController — same `Mode`, same
+/// captured-handle live preview of the exact chained pure ops Apply will
+/// commit, Apply = one undo step through applyEdit, Cancel = drop the
+/// preview — but the content is a channel popup + CurveEditorView instead
+/// of slider rows. Per-channel point lists live here; the view only ever
+/// shows (and edits) the current channel's.
+final class CurvesAdjustmentSheetController: NSViewController {
+    private let document: ImageDocument
+    private weak var canvas: ImageCanvasView?
+    private let mode: AdjustmentLayerSheetController.Mode
+    // In-context preview base: the chained ops are applied to this captured
+    // handle and the flattened result is shown, so masks, blend modes and
+    // the other layers stay visible while editing.
+    private let baseDoc: RasterDocument?
+    private let aboveIndex: Int
+    private let renderer = PreviewRenderer()
+    var onCommitted: ((Int) -> Void)?
+
+    private var channelPoints: [CurveChannel: [CurvePoint]] = [:]
+    private var channel: CurveChannel = .rgb
+    private let channelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let curveView = CurveEditorView()
+    private let readoutLabel = NSTextField(labelWithString: "")
+    private var didRequestInitialPreview = false
+
+    init(
+        document: ImageDocument, canvas: ImageCanvasView,
+        mode: AdjustmentLayerSheetController.Mode
+    ) {
+        self.document = document
+        self.canvas = canvas
+        self.mode = mode
+        self.baseDoc = document.doc
+        self.aboveIndex = document.activeLayerIndex
+        // Edit mode prefills every channel from the layer's meta (missing
+        // channels show identity); create mode starts all-identity.
+        for ch in CurveChannel.allCases {
+            if case .edit(_, let original) = mode {
+                channelPoints[ch] = CurvesMeta.points(of: ch, in: original)
+            } else {
+                channelPoints[ch] = CurvePoint.identity
+            }
+        }
+        super.init(nibName: nil, bundle: nil)
+        renderer.onRender = { [weak self] cgImage in
+            self?.canvas?.previewImage = cgImage
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("CurvesAdjustmentSheetController does not support NSCoder")
+    }
+
+    override func loadView() {
+        channelPopup.addItems(withTitles: CurveChannel.allCases.map { $0.displayName })
+        channelPopup.font = DS.sans(13)
+        channelPopup.target = self
+        channelPopup.action = #selector(channelChanged(_:))
+
+        let channelRow = NSStackView(views: [fieldLabel("Channel:"), channelPopup])
+        channelRow.orientation = .horizontal
+        channelRow.alignment = .centerY
+        channelRow.spacing = 8
+
+        curveView.points = channelPoints[channel] ?? CurvePoint.identity
+        curveView.curveColor = channel.strokeColor
+        curveView.onPointsChanged = { [weak self] points in
+            guard let self = self else { return }
+            self.channelPoints[self.channel] = points
+            self.requestPreview()
+        }
+        curveView.onDragReadout = { [weak self] readout in
+            self?.readoutLabel.stringValue = readout ?? ""
+        }
+        // Pin the square explicitly so stack stretching can never skew the
+        // plot's value mapping.
+        let side = curveView.intrinsicContentSize.width
+        NSLayoutConstraint.activate([
+            curveView.widthAnchor.constraint(equalToConstant: side),
+            curveView.heightAnchor.constraint(equalToConstant: side),
+        ])
+
+        // Live "in → out" readout during drags, in the options bar's numeric
+        // style (monospaced digits, small).
+        readoutLabel.font = NSFont.monospacedDigitSystemFont(
+            ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        readoutLabel.textColor = DS.textMuted
+
+        let resetButton = StickerButton(
+            title: "Reset", style: .secondary, target: self, action: #selector(resetClicked(_:)))
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
+        let underRow = NSStackView(views: [readoutLabel, spacer, resetButton])
+        underRow.orientation = .horizontal
+        underRow.alignment = .centerY
+        underRow.spacing = 8
+
+        let content = NSStackView(views: [channelRow, curveView, underRow])
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 10
+        underRow.widthAnchor.constraint(equalTo: curveView.widthAnchor).isActive = true
+
+        let title: String
+        if case .edit = mode {
+            title = "\(AdjustmentLayerOp.curves.displayName) options"
+        } else {
+            title = "New \(AdjustmentLayerOp.curves.displayName) layer"
+        }
+        let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
+        let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
+        view = makeSheetView(
+            title: title,
+            hint: "Click the curve to add a point (Reset clears the current "
+                + "channel); drag a point off the plot to remove it.",
+            content: content,
+            buttonRow: makeButtonRow(
+                cancel: cancelButton, apply: applyButton,
+                leading: [sheetFootnote("one undo step")]))
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        // Same pattern as the slider sheets: preview immediately so what the
+        // user sees is what Apply produces.
+        guard !didRequestInitialPreview else { return }
+        didRequestInitialPreview = true
+        requestPreview()
+    }
+
+    /// Meta from the current point lists: only non-identity channels are
+    /// included (missing channel = identity in the schema); all-identity is
+    /// a valid curves op with empty params.
+    private func metaJSON() -> String? {
+        AdjustmentLayerPayload(op: .curves, params: CurvesMeta.params(channelPoints)).json()
+    }
+
+    private func requestPreview() {
+        guard let baseDoc = baseDoc, let meta = metaJSON() else { return }
+        let mode = mode
+        let above = aboveIndex
+        let name = AdjustmentLayerOp.curves.displayName
+        renderer.request {
+            let previewDoc: RasterDocument?
+            switch mode {
+            case .create(let selection):
+                previewDoc = baseDoc.addingAdjustmentLayer(
+                    above: above, name: name, meta: meta, selection: selection)
+            case .edit(let idx, _):
+                previewDoc = baseDoc.withLayerMeta(idx, meta)
+            }
+            return previewDoc?.flattened()?.makeCGImage()
+        }
+    }
+
+    @objc private func channelChanged(_ sender: Any?) {
+        let index = channelPopup.indexOfSelectedItem
+        guard index >= 0, index < CurveChannel.allCases.count else { return }
+        channel = CurveChannel.allCases[index]
+        curveView.points = channelPoints[channel] ?? CurvePoint.identity
+        curveView.curveColor = channel.strokeColor
+        readoutLabel.stringValue = ""
+        // Switching channels changes nothing in the meta — no new preview.
+    }
+
+    /// Resets the CURRENT channel to identity; the others keep their points.
+    @objc private func resetClicked(_ sender: Any?) {
+        channelPoints[channel] = CurvePoint.identity
+        curveView.points = CurvePoint.identity
+        requestPreview()
+    }
+
+    @objc private func applyClicked(_ sender: Any?) {
+        renderer.cancel()
+        canvas?.previewImage = nil
+        dismiss(self)
+        guard let meta = metaJSON() else {
+            NSSound.beep()
+            return
+        }
+        let name = AdjustmentLayerOp.curves.displayName
+        switch mode {
+        case .create(let selection):
+            // Compose on the document's CURRENT doc and active layer, not
+            // the captured preview base, so any edit that slipped in while
+            // the sheet was open (an agent's) survives.
+            let below = document.activeLayerIndex
+            let before = document.doc
+            document.applyEdit("New \(name) Layer") {
+                $0.addingAdjustmentLayer(
+                    above: below, name: name, meta: meta, selection: selection)
+            }
+            guard document.doc !== before, let doc = document.doc else { return }
+            onCommitted?(min(below + 1, doc.layerCount - 1))
+        case .edit(let idx, let original):
+            // Closing the dialog with unchanged values must not register an
+            // undo step or dirty the file (sorted-key encoding makes the
+            // comparison byte-stable for metas this app wrote).
+            guard meta != original.json() else { return }
+            document.applyEdit("Edit \(name) Layer") { doc in
+                // The layer must still BE an adjustment layer (only an agent
+                // edit can move the stack under an open sheet).
+                guard doc.layerIsAdjustment(idx) else { return nil }
+                return doc.withLayerMeta(idx, meta)
+            }
+            onCommitted?(idx)
+        }
     }
 
     @objc private func cancelClicked(_ sender: Any?) {

@@ -13,8 +13,9 @@ decoding, encoding, and manipulation.
   layers panel with thumbnails, inline rename, drag-reorder, and
   new/delete/duplicate/merge-down/flatten; Move tool (V) with arrow-key
   nudges; Paste as New Layer; PSD files import with their real layers; the
-  native `.rz` format saves the full layer stack — masks included —
-  losslessly
+  native `.rz` format saves the full layer stack — masks, clipping flags,
+  and text and adjustment descriptions included — losslessly, and older
+  `.rz` files still load
 - **Layer masks**: a grayscale coverage mask per layer that hides pixels
   without erasing them — Layer > Mask adds one revealing all, hiding all, or
   built from the current selection, then enables/disables it (a disabled mask
@@ -24,6 +25,30 @@ decoding, encoding, and manipulation.
   layers panel — click either to aim the brush and eraser, which paint the
   mask white to reveal and black to hide. A mask is the layer's size and
   moves, rotates, crops and scales with it
+- **Adjustment layers**: non-destructive color adjustments that live in the
+  layer stack and recolor everything below them at composite time, their
+  parameters editable forever. Layer > New Adjustment Layer offers nine ops
+  — Brightness/Contrast/Saturation, Levels, Curves (an interactive spline
+  editor: click the curve to add up to 16 control points per channel, drag
+  to move them, with a channel popup switching between the master RGB curve
+  and Red/Green/Blue individually), Hue Rotate, Posterize, Threshold,
+  Invert, Grayscale, and Sepia. The parameterized ops open live-preview
+  dialogs and re-open any time via Layer > Adjustment Options… or a
+  double-click on the layer's thumbnail (the panel badges adjustment layers
+  "◐"). Every adjustment layer is created with a layer mask gating where
+  the adjustment applies — built from the selection when one exists, else
+  revealing all — and brush and eraser strokes on the layer paint that mask
+  automatically. Because it is just a layer, opacity, blend mode and
+  clipping all apply; where an op has a destructive Filters-menu twin the
+  math mirrors it, so the only difference is reversibility
+- **Clipping masks** (Layer > Create Clipping Mask, ⌥⌘G): confine a layer
+  to the alpha footprint of the first unclipped layer beneath it —
+  Photoshop group semantics, so the base's blend mode and opacity apply to
+  the group as one unit, consecutive clipped layers all ride the same base,
+  hiding the base hides its group, and reordering simply re-derives the
+  groups. The layers panel indents a clipped layer behind a "↳" arrow;
+  releasing (the same menu item, retitled) undoes it, pixels untouched
+  either way
 - Open PNG, JPEG, Photoshop (PSD, layered), TIFF, BMP, GIF, WebP
   — EXIF orientation is applied on open, so camera photos display upright
 - Export a copy to PNG, JPEG (with quality control), TIFF, BMP, GIF, WebP;
@@ -35,7 +60,9 @@ decoding, encoding, and manipulation.
   the proportions, Option grows about the pivot), drag just outside a corner to
   rotate (Shift snaps to 15°), drag inside to move, arrow keys nudge; Return or
   a double-click commits, Escape cancels. The options bar shows editable
-  Angle / Scale X / Scale Y, the resulting size, and the resampling filter
+  Angle / Scale X / Scale Y and W / H — the layer's own scaled pixel size,
+  bound to the matrix both ways, so typing a width sets the scale (keeping
+  a mirrored layer mirrored) — plus the resampling filter
   (nearest, bilinear, bicubic by default, or Lanczos). The drag is a live
   preview and the whole session commits as **one undo step** — the layer is
   resampled exactly once, in premultiplied alpha so rotated edges stay clean
@@ -44,21 +71,35 @@ decoding, encoding, and manipulation.
   first (as any destructive edit does). Selections are not transformable yet —
   a session always transforms the whole layer and hides the marquee while it
   runs
+- **Crop tool** (C): drag out a crop box and refine it by its eight handles
+  — Shift constrains a corner drag to the box's aspect, and the options bar
+  offers aspect presets (Free, Original, 1:1, 4:3, 3:2, 16:9, 9:16) plus
+  editable W/H fields; arrow keys nudge, Return or a double-click inside
+  the box commits, Escape cancels. The commit is the same canvas crop as
+  Image > Crop to Selection — the canvas shrinks to the box and layers keep
+  their pixels outside it, ready to be revealed again
 - Selection-based crop, Image Size (scale with filter choice, up to 100 MP),
   and Canvas Size with the Photoshop-style 3×3 anchor selector — grow or
   trim the canvas without scaling; layers keep their pixels and can be
   revealed again later
 - Brightness / contrast / saturation, Levels, Hue Rotate, Threshold, and
-  Posterize adjustments with live in-context preview on the active layer
+  Posterize adjustments with live in-context preview on the active layer —
+  the destructive Filters-menu twins of the adjustment layers above
 - Grayscale, invert, sepia, Gaussian blur, sharpen, Pixelate, Add Noise,
   Edge Detect, Emboss
 - Selections beyond the rectangle: ellipse marquee (O), polygonal lasso
   (L — click vertices, double-click/Return/click-the-start closes, Escape
   cancels), and a magic wand (W) with tolerance + contiguous options that
   samples the flattened composite; combine selections with Shift (add),
-  Option (subtract), or Shift+Option (intersect), invert (⇧⌘I) or soften
-  them with Select > Feather Selection…, and the marching ants trace the
-  true selection contour — disjoint pieces and holes each get their own
+  Option (subtract), or Shift+Option (intersect), invert (⇧⌘I), soften
+  them with Select > Feather Selection…, reshape them with Grow, Shrink,
+  Border, and Smooth Selection… — true Euclidean-distance morphology at
+  the selection's 50% contour, so a moved edge comes back freshly
+  anti-aliased instead of jagged — or paint them directly in Quick Mask
+  mode (Q — the selection becomes a red rubylith overlay the brush adds
+  to and the eraser removes from; toggling back out converts the buffer
+  into the selection, and an empty one deselects), and the marching ants
+  trace the true selection contour — disjoint pieces and holes each get their own
   dashed loop; selections confine brush, eraser, fill, and gradient, dim
   the outside, and define Crop. Delete (Edit > Clear, ⌫) clears the
   selected region of the active layer to transparency in one undo step,
@@ -69,15 +110,21 @@ decoding, encoding, and manipulation.
   and a Gradient tool (G): drag to paint linear or radial two-color
   gradients (default fades the paint color to transparent), both
   selection-aware
+- Eyedropper (I): picks the color under the cursor into the shared paint
+  color, sampled from the flattened composite — what you actually see, not
+  one layer — with a swatch and monospaced hex + RGBA readout in the
+  options bar; a drag keeps sampling, and Option-click borrows the
+  eyedropper mid-tool from brush, fill, and gradient
 - Brush and eraser (size, opacity, color; `[`/`]` resize; 1 px pixel-snapped
   mode; strokes confine to an active selection) and on-canvas text
-  (font/size/color, ⌘Return commits, Escape cancels) — tools switch via
-  toolbar, Tools menu, or M/O/L/W/V/B/E/K/G/T
+  (font/size/color and left/center/right alignment, ⌘Return commits,
+  Escape cancels) — tools switch via toolbar, Tools menu, or
+  M/O/L/W/V/B/E/K/G/T/I/C
 - **Re-editable text layers**: committing text adds its own layer that
-  remembers the string, font, size and color it was rendered from — click it
-  again with the text tool to reopen the editor pre-filled, with its
-  font/size/color restored into the options bar, and the layers panel badges
-  it with a "T". A destructive edit (filter, adjustment, fill, gradient,
+  remembers the string, font, size, color and alignment it was rendered
+  from — click it again with the text tool to reopen the editor pre-filled,
+  with its font/size/color/alignment restored into the options bar, and the
+  layers panel badges it with a "T". A destructive edit (filter, adjustment, fill, gradient,
   brush, eraser) asks "Rasterize text layer?" first and drops the
   description on confirm, keeping the pixels. The native `.rz` format stores
   the description alongside the pixels, so text stays editable across
@@ -86,8 +133,9 @@ decoding, encoding, and manipulation.
 - Drag image files onto a window to open them; File > New from Clipboard (⌘N)
 - Checkerboard backdrop for transparency
 
-Known limits: PSD support is 8-bit RGB/grayscale composites (16-bit and CMYK
-files are rejected with a clear error); animated GIFs and multi-page TIFFs
+Known limits: PSD support is 8-bit RGB/grayscale (16-bit and CMYK files are
+rejected with a clear error), and PSD layer masks and clipping flags do not
+import; animated GIFs and multi-page TIFFs
 load their first frame/page only, so ⌘S on a GIF deliberately routes through
 Save As instead of overwriting the animation in place. Document-level rotate,
 flip and resize move a text layer's pixels but keep its description, so
@@ -114,19 +162,27 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 39 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 43 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
-image as PNG), layer operations, blend modes, layer masks (add revealing,
-hiding or from the selection; enable, apply, or delete), filters, geometry —
+image as PNG, and `sample_color` reads single pixels off the flattened
+composite — the eyedropper), layer operations, blend modes, layer masks (add
+revealing, hiding or from the selection; enable, apply, or delete), clipping
+masks (`set_layer_clipped` confines a layer to the alpha of the first
+unclipped layer below it; `get_document` reports the flag), non-destructive
+adjustment layers (`add_adjustment_layer` / `edit_adjustment_layer` over all
+nine ops with the same mask-on-creation rule as the UI's; `get_document`
+reports each one's op and params), filters, geometry —
 including `transform_layer`, the Free Transform pipeline with named parameters
 (rotate in degrees, positive is clockwise; scale, translate, pivot, sampler),
 reporting the layer's new bounds — brush and eraser strokes (polyline points
 with size/color/opacity, and a
 `target` choosing the layer's pixels or its mask), text — `add_text_layer`
-and `edit_text_layer` for re-editable text layers (`get_document` reports
-each layer's text parameters) and `add_text` for the rasterizing variant —
+and `edit_text_layer` for re-editable text layers with an `alignment`
+parameter (`get_document` reports each layer's text parameters) and
+`add_text` for the rasterizing variant —
 selections (rect/ellipse/polygon/magic wand with add/subtract/intersect
-modes, plus invert and feather — shared with the UI and
+modes, plus `modify_selection`'s invert, feather, grow, shrink, border, and
+smooth — shared with the UI and
 honored by every paint tool), `clear_selection` to clear the window's
 current selection on a layer (partial coverage clears proportionally),
 bucket fill, gradients,
@@ -194,4 +250,6 @@ after editing `project.yml`, and don't commit the project file.
   Rust allocation; error strings cross the boundary as malloc'd C strings
   released with `rz_string_free`.
 - PSD files are detected by their `8BPS` signature and decoded with the `psd`
-  crate (composite image only); everything else goes through the `image` crate.
+  crate (layered import, falling back to the flattened composite when a
+  file's layers cannot be decoded); everything else goes through the `image`
+  crate.

@@ -13,16 +13,12 @@ const LUMA_R: f32 = 0.2126;
 const LUMA_G: f32 = 0.7152;
 const LUMA_B: f32 = 0.0722;
 
-/// Rotates hue by `degrees` using the standard SVG/CSS `feColorMatrix`
-/// hueRotate matrix built from cos/sin (no HSL round-trip). Any finite angle
-/// is accepted; returns `None` for NaN or infinite values. Alpha untouched.
-pub(crate) fn hue_rotate(img: &RgbaImage, degrees: f32) -> Option<RgbaImage> {
-    if !degrees.is_finite() {
-        return None;
-    }
+/// The hueRotate matrix from the SVG filter effects specification, built
+/// from cos/sin of `degrees` (no HSL round-trip). Shared with the
+/// `hue_rotate` adjustment layer (`adjust`) so both produce the same colors.
+pub(crate) fn hue_rotate_matrix(degrees: f32) -> [[f32; 3]; 3] {
     let (s, c) = degrees.to_radians().sin_cos();
-    // The hueRotate matrix from the SVG filter effects specification.
-    let m = [
+    [
         [
             0.213 + c * 0.787 - s * 0.213,
             0.715 - c * 0.715 - s * 0.715,
@@ -38,7 +34,16 @@ pub(crate) fn hue_rotate(img: &RgbaImage, degrees: f32) -> Option<RgbaImage> {
             0.715 - c * 0.715 + s * 0.715,
             0.072 + c * 0.928 + s * 0.072,
         ],
-    ];
+    ]
+}
+
+/// Rotates hue by `degrees` using [`hue_rotate_matrix`]. Any finite angle
+/// is accepted; returns `None` for NaN or infinite values. Alpha untouched.
+pub(crate) fn hue_rotate(img: &RgbaImage, degrees: f32) -> Option<RgbaImage> {
+    if !degrees.is_finite() {
+        return None;
+    }
+    let m = hue_rotate_matrix(degrees);
     let mut out = img.clone();
     for px in out.pixels_mut() {
         let r = f32::from(px[0]) / 255.0;

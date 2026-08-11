@@ -210,6 +210,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(
             item("Feather Selection…", #selector(EditorViewController.featherSelection(_:))))
+        menu.addItem(
+            item("Grow Selection…", #selector(EditorViewController.growSelection(_:))))
+        menu.addItem(
+            item("Shrink Selection…", #selector(EditorViewController.shrinkSelection(_:))))
+        menu.addItem(
+            item("Border Selection…", #selector(EditorViewController.borderSelection(_:))))
+        menu.addItem(
+            item("Smooth Selection…", #selector(EditorViewController.smoothSelection(_:))))
+        menu.addItem(.separator())
+        // Deliberately NO key equivalent: the bare Q toggles the mode from
+        // the canvas's keyDown alongside the tool keys, so it can never
+        // steal the letter from text editing (the Edit > Clear ⌫ hazard).
+        menu.addItem(
+            item("Quick Mask Mode", #selector(EditorViewController.toggleQuickMask(_:))))
         return menu
     }
 
@@ -238,6 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu(title: "Layer")
         menu.addItem(
             item("New Layer", #selector(EditorViewController.newLayer(_:)), "n", [.command, .shift]))
+        menu.addItem(submenuItem(newAdjustmentLayerMenu()))
         menu.addItem(item("Duplicate Layer", #selector(EditorViewController.duplicateLayer(_:)), "j"))
         menu.addItem(item("Delete Layer", #selector(EditorViewController.deleteLayer(_:))))
         menu.addItem(.separator())
@@ -245,10 +260,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Free Transform", #selector(EditorViewController.freeTransform(_:)), "t"))
         menu.addItem(.separator())
         menu.addItem(submenuItem(layerMaskMenu()))
+        // One toggling item, retitled "Release Clipping Mask" in
+        // EditorViewController.validateUserInterfaceItem when the active
+        // layer is already clipped (Photoshop convention).
+        menu.addItem(
+            item(
+                "Create Clipping Mask",
+                #selector(EditorViewController.toggleClippingMask(_:)), "g",
+                [.command, .option]))
+        // Re-opens the active adjustment layer's dialog; enabled only for an
+        // adjustment layer whose op has one (validation in the editor).
+        menu.addItem(
+            item("Adjustment Options…", #selector(EditorViewController.adjustmentOptions(_:))))
         menu.addItem(.separator())
         menu.addItem(
             item("Merge Down", #selector(EditorViewController.mergeDown(_:)), "e", [.command, .shift]))
         menu.addItem(item("Flatten Image", #selector(EditorViewController.flattenImage(_:))))
+        return menu
+    }
+
+    /// Layer > New Adjustment Layer: one item per adjustment op, named like
+    /// the destructive Filters items where they overlap, grouped
+    /// parameterized (dialog) before parameterless (immediate) the way the
+    /// Filters menu groups its own.
+    private func newAdjustmentLayerMenu() -> NSMenu {
+        let menu = NSMenu(title: "New Adjustment Layer")
+        menu.addItem(
+            item(
+                "Brightness/Contrast/Saturation…",
+                #selector(EditorViewController.newAdjustmentLayerBCS(_:))))
+        menu.addItem(
+            item("Curves…", #selector(EditorViewController.newAdjustmentLayerCurves(_:))))
+        menu.addItem(
+            item("Levels…", #selector(EditorViewController.newAdjustmentLayerLevels(_:))))
+        menu.addItem(
+            item("Hue Rotate…", #selector(EditorViewController.newAdjustmentLayerHueRotate(_:))))
+        menu.addItem(
+            item("Posterize…", #selector(EditorViewController.newAdjustmentLayerPosterize(_:))))
+        menu.addItem(
+            item("Threshold…", #selector(EditorViewController.newAdjustmentLayerThreshold(_:))))
+        menu.addItem(.separator())
+        menu.addItem(
+            item("Invert", #selector(EditorViewController.newAdjustmentLayerInvert(_:))))
+        menu.addItem(
+            item("Grayscale", #selector(EditorViewController.newAdjustmentLayerGrayscale(_:))))
+        menu.addItem(
+            item("Sepia", #selector(EditorViewController.newAdjustmentLayerSepia(_:))))
         return menu
     }
 
@@ -315,6 +372,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(
             item("Gradient Tool", #selector(EditorViewController.selectGradientTool(_:))))
         menu.addItem(item("Text Tool", #selector(EditorViewController.selectTextTool(_:))))
+        menu.addItem(
+            item("Eyedropper Tool", #selector(EditorViewController.selectEyedropperTool(_:))))
+        menu.addItem(item("Crop Tool", #selector(EditorViewController.selectCropTool(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Allow Agent Connections", #selector(toggleAgentServer(_:))))
         return menu

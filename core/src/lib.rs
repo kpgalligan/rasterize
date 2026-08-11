@@ -4,6 +4,7 @@
 //! The safe internal API lives here and in [`ops`]; all unsafe code is
 //! confined to [`ffi`].
 
+mod adjust;
 pub mod agent;
 pub mod assistant;
 pub mod doc;

@@ -14,6 +14,7 @@ use image::{
     RgbaImage,
 };
 
+use crate::adjust::Adjustment;
 use crate::ops::CompositeMode;
 use crate::RzImage;
 
@@ -31,8 +32,9 @@ const MAX_RZDC_PNG_LEN: u32 = 512 * 1024 * 1024;
 pub(crate) const MAX_RZDC_META_LEN: u32 = 16 * 1024 * 1024;
 
 /// The RZDC revision this build writes. Version 1 files (no mask, no layer
-/// meta) still load; anything newer is refused.
-const RZDC_VERSION: u32 = 2;
+/// meta) and version 2 files (no clipped flag) still load; anything newer is
+/// refused.
+const RZDC_VERSION: u32 = 3;
 
 /// Rec. 709 luma coefficients (private copy; `ops` and `ops_filters` keep
 /// their own). Used to reduce a mask-painting overlay to coverage.
@@ -426,13 +428,24 @@ pub struct Layer {
     /// When false the mask is retained but ignored while compositing.
     pub mask_enabled: bool,
     /// Opaque per-layer metadata (a minimal "parasite"): the core stores,
-    /// copies and serializes this JSON blob but never interprets it.
+    /// copies and serializes this JSON blob but never interprets it — with
+    /// ONE exception: meta that parses as an [`Adjustment`] description
+    /// (`{"type":"adjust", ...}`, see `adjust`) makes the compositor treat
+    /// the layer as an adjustment layer.
     pub meta: Option<String>,
+    /// Clipping-mask flag (Photoshop semantics): a clipped layer is confined
+    /// to the alpha footprint of the first UNCLIPPED layer beneath it, its
+    /// base. Group structure is purely positional — [`RzDocument::flattened`]
+    /// re-derives base + consecutive-clipped-run groups on every composite,
+    /// so reordering or deleting layers needs no bookkeeping. A clipped layer
+    /// at the bottom of the stack (no unclipped layer below) composites as if
+    /// unclipped. Copied on duplicate like every other property.
+    pub clipped: bool,
 }
 
 impl Layer {
-    /// A plain layer at offset (0, 0): fully opaque, Normal, visible, with no
-    /// mask and no meta.
+    /// A plain layer at offset (0, 0): fully opaque, Normal, visible,
+    /// unclipped, with no mask and no meta.
     fn new(pixels: RgbaImage, name: &str) -> Self {
         Layer {
             pixels: Arc::new(pixels),
@@ -444,6 +457,7 @@ impl Layer {
             mask: None,
             mask_enabled: true,
             meta: None,
+            clipped: false,
         }
     }
 
@@ -488,6 +502,11 @@ fn sane_opacity(opacity: f32) -> f32 {
 /// and opacity. An enabled layer mask scales the source alpha per pixel
 /// (`mask / 255`) on top of the layer opacity. Pixels outside the layer's
 /// extent are untouched. The caller is responsible for visibility filtering.
+///
+/// A layer whose meta parses as an [`Adjustment`] is routed to
+/// [`composite_adjustment_into`] instead — every projection (flatten, render,
+/// export, merge-down) goes through this function, so adjustment layers
+/// behave identically everywhere.
 fn composite_layer_into(
     acc: &mut [[f32; 4]],
     acc_w: u32,
@@ -497,6 +516,10 @@ fn composite_layer_into(
 ) {
     let opacity = sane_opacity(layer.opacity);
     if opacity <= 0.0 {
+        return;
+    }
+    if let Some(adjustment) = layer.meta.as_deref().and_then(Adjustment::from_meta) {
+        composite_adjustment_into(acc, acc_w, acc_h, origin, layer, &adjustment, opacity);
         return;
     }
     let mask = layer.active_mask().map(|m| m.as_raw().as_slice());
@@ -530,6 +553,178 @@ fn composite_layer_into(
                 // Dissolve skips the compositing formula: the source shows
                 // fully opaque with probability sa (its effective alpha),
                 // otherwise the backdrop pixel stays untouched.
+                let (cx, cy) = (ax + i64::from(origin.0), ay + i64::from(origin.1));
+                if dissolve_threshold(cx, cy) < sa {
+                    acc[ai] = [cs[0], cs[1], cs[2], 1.0];
+                }
+                continue;
+            }
+            let bg = acc[ai];
+            let ab = bg[3];
+            let ao = sa + ab * (1.0 - sa);
+            let blended = match kind {
+                BlendKind::Separable(f) => [f(bg[0], cs[0]), f(bg[1], cs[1]), f(bg[2], cs[2])],
+                BlendKind::NonSeparable(f) => f([bg[0], bg[1], bg[2]], cs),
+                BlendKind::Dissolve => unreachable!("dissolve handled above"),
+            };
+            let mut out = [0.0f32; 4];
+            for c in 0..3 {
+                out[c] =
+                    (sa * (1.0 - ab) * cs[c] + sa * ab * blended[c] + (1.0 - sa) * ab * bg[c]) / ao;
+            }
+            out[3] = ao;
+            acc[ai] = out;
+        }
+    }
+}
+
+/// Composites an ADJUSTMENT layer onto the accumulator: the layer's own
+/// pixels are ignored; instead the adjustment is applied to the accumulated
+/// backdrop color (`adjusted = adjustment(backdrop)`, straight [0, 1] RGB),
+/// pushed through the layer's blend mode as the SOURCE against the backdrop
+/// (Normal therefore leaves `adjusted` as-is), and lerped back in by
+/// `k = opacity * mask coverage`:
+///
+///   out_rgb = backdrop_rgb + (effective_rgb - backdrop_rgb) * k
+///
+/// Alpha is NEVER changed, and a fully transparent backdrop pixel is left
+/// entirely untouched. Coverage honors the layer's offset exactly as for
+/// raster layers, but gates differently: with no mask (or a disabled one)
+/// the adjustment reaches the WHOLE accumulator — an unmasked adjustment
+/// layer is canvas-wide regardless of its own pixel extent — while an
+/// enabled mask confines it (0 outside the mask's extent). Dissolve, which
+/// has no blend function, keeps its all-or-nothing dither: each pixel is
+/// fully adjusted with probability `k`, otherwise untouched.
+fn composite_adjustment_into(
+    acc: &mut [[f32; 4]],
+    acc_w: u32,
+    acc_h: u32,
+    origin: (i32, i32),
+    layer: &Layer,
+    adjustment: &Adjustment,
+    opacity: f32,
+) {
+    let mask = layer.active_mask().map(|m| m.as_raw().as_slice());
+    let kind = blend_kind(layer.blend);
+    let (lw, lh) = layer.pixels.dimensions();
+    let rel_x = i64::from(layer.offset.0) - i64::from(origin.0);
+    let rel_y = i64::from(layer.offset.1) - i64::from(origin.1);
+    for ay in 0..i64::from(acc_h) {
+        for ax in 0..i64::from(acc_w) {
+            let coverage = match mask {
+                None => 1.0,
+                Some(m) => {
+                    let lx = ax - rel_x;
+                    let ly = ay - rel_y;
+                    if lx < 0 || ly < 0 || lx >= i64::from(lw) || ly >= i64::from(lh) {
+                        continue; // outside the mask's extent: coverage 0
+                    }
+                    f32::from(m[(ly as u64 * u64::from(lw) + lx as u64) as usize]) / 255.0
+                }
+            };
+            let k = coverage * opacity;
+            if k <= 0.0 {
+                continue;
+            }
+            let ai = (ay as u64 * u64::from(acc_w) + ax as u64) as usize;
+            let bg = acc[ai];
+            if bg[3] <= 0.0 {
+                continue; // nothing to adjust; alpha (and color) stay exact
+            }
+            let cb = [bg[0], bg[1], bg[2]];
+            let adjusted = adjustment.apply(cb);
+            if let BlendKind::Dissolve = kind {
+                let (cx, cy) = (ax + i64::from(origin.0), ay + i64::from(origin.1));
+                if dissolve_threshold(cx, cy) < k {
+                    acc[ai] = [adjusted[0], adjusted[1], adjusted[2], bg[3]];
+                }
+                continue;
+            }
+            let effective = match kind {
+                BlendKind::Separable(f) => [
+                    f(cb[0], adjusted[0]),
+                    f(cb[1], adjusted[1]),
+                    f(cb[2], adjusted[2]),
+                ],
+                BlendKind::NonSeparable(f) => f(cb, adjusted),
+                BlendKind::Dissolve => unreachable!("dissolve handled above"),
+            };
+            for c in 0..3 {
+                acc[ai][c] = cb[c] + (effective[c] - cb[c]) * k;
+            }
+        }
+    }
+}
+
+/// Composites a CLIP GROUP — `base` plus `group`, the consecutive run of
+/// clipped layers stacked immediately above it — onto the accumulator. The
+/// caller has already filtered the base's visibility (an invisible base hides
+/// its whole group). With an EMPTY group this is exactly
+/// [`composite_layer_into`] on the base: the group machinery never engages,
+/// keeping the plain path byte-identical.
+///
+/// A non-empty group blends as one unit (Photoshop's "blend clipped layers
+/// as group"): the base renders into a private transparent buffer at FULL
+/// opacity in Normal mode, its layer mask applied as usual, and the buffer's
+/// alpha after that render — the base's footprint — is recorded. Each
+/// visible clipped layer then composites into the buffer through the normal
+/// kernel (its own opacity, blend mode, mask and offset; adjustment meta
+/// routes through [`composite_adjustment_into`] with the buffer as
+/// backdrop), and after each one the buffer's alpha is forced back to the
+/// recorded footprint — clipped layers never extend or shrink it. The
+/// finished buffer finally composites onto `acc` with the BASE layer's blend
+/// mode and opacity (Dissolve keeps its canvas-absolute dither). Invisible
+/// clipped layers are skipped.
+///
+/// One consequence of the base rendering into a TRANSPARENT buffer: an
+/// adjustment-meta base has no pixel footprint there (adjustments never touch
+/// alpha, and a transparent backdrop is left untouched), so a non-empty group
+/// over an adjustment base contributes nothing.
+fn composite_clip_group_into(
+    acc: &mut [[f32; 4]],
+    acc_w: u32,
+    acc_h: u32,
+    origin: (i32, i32),
+    base: &Layer,
+    group: &[Layer],
+) {
+    if group.is_empty() {
+        composite_layer_into(acc, acc_w, acc_h, origin, base);
+        return;
+    }
+    let opacity = sane_opacity(base.opacity);
+    if opacity <= 0.0 {
+        return;
+    }
+    let mut buf = vec![[0.0f32; 4]; acc.len()];
+    let full = Layer {
+        opacity: 1.0,
+        blend: BlendMode::Normal,
+        ..base.clone()
+    };
+    composite_layer_into(&mut buf, acc_w, acc_h, origin, &full);
+    let base_alpha: Vec<f32> = buf.iter().map(|px| px[3]).collect();
+    for layer in group.iter().filter(|l| l.visible) {
+        composite_layer_into(&mut buf, acc_w, acc_h, origin, layer);
+        for (px, &a) in buf.iter_mut().zip(&base_alpha) {
+            px[3] = a;
+        }
+    }
+    // The group buffer is accumulator-aligned (same size, same origin), so
+    // this is composite_layer_into's inner loop with an f32 source and the
+    // base's mode and opacity. Pixels a clipped layer touched outside the
+    // footprint carry color at forced alpha 0 and are skipped here.
+    let kind = blend_kind(base.blend);
+    for ay in 0..i64::from(acc_h) {
+        for ax in 0..i64::from(acc_w) {
+            let ai = (ay as u64 * u64::from(acc_w) + ax as u64) as usize;
+            let src = buf[ai];
+            let sa = src[3] * opacity;
+            if sa <= 0.0 {
+                continue;
+            }
+            let cs = [src[0], src[1], src[2]];
+            if let BlendKind::Dissolve = kind {
                 let (cx, cy) = (ax + i64::from(origin.0), ay + i64::from(origin.1));
                 if dissolve_threshold(cx, cy) < sa {
                     acc[ai] = [cs[0], cs[1], cs[2], 1.0];
@@ -617,11 +812,46 @@ impl RzDocument {
 
     /// Canvas-sized straight-alpha projection of all visible layers,
     /// composited bottom-to-top in f32 and quantized once at the end.
+    ///
+    /// The walk re-derives CLIP GROUPS positionally on every call: each
+    /// unclipped layer is a BASE and the consecutive run of clipped layers
+    /// immediately above it composites with it as one unit through
+    /// [`composite_clip_group_into`], confined to the base's alpha footprint.
+    /// An invisible base hides its whole group; clipped layers at the BOTTOM
+    /// of the stack (no unclipped layer below) have no base and composite as
+    /// if unclipped. A base with no clipped layers above composites exactly
+    /// as it always did.
     pub fn flattened(&self) -> RgbaImage {
         let px = self.width as usize * self.height as usize;
         let mut acc = vec![[0.0f32; 4]; px];
-        for layer in self.layers.iter().filter(|l| l.visible) {
-            composite_layer_into(&mut acc, self.width, self.height, (0, 0), layer);
+        let mut i = 0;
+        while i < self.layers.len() {
+            let layer = &self.layers[i];
+            if layer.clipped {
+                // Only reachable at the bottom of the stack (a clipped layer
+                // above a base is consumed by that base's group below):
+                // baseless, so it composites as if unclipped.
+                if layer.visible {
+                    composite_layer_into(&mut acc, self.width, self.height, (0, 0), layer);
+                }
+                i += 1;
+                continue;
+            }
+            let mut end = i + 1;
+            while end < self.layers.len() && self.layers[end].clipped {
+                end += 1;
+            }
+            if layer.visible {
+                composite_clip_group_into(
+                    &mut acc,
+                    self.width,
+                    self.height,
+                    (0, 0),
+                    layer,
+                    &self.layers[i + 1..end],
+                );
+            }
+            i = end;
         }
         quantize(&acc, self.width, self.height)
     }
@@ -644,6 +874,11 @@ impl RzDocument {
     /// Pure setter: replaces layer `idx`'s visibility flag.
     pub fn with_layer_visible(&self, idx: usize, visible: bool) -> Option<Self> {
         self.with_layer(idx, |l| l.visible = visible)
+    }
+
+    /// Pure setter: replaces layer `idx`'s clipped flag (see [`Layer::clipped`]).
+    pub fn with_layer_clipped(&self, idx: usize, clipped: bool) -> Option<Self> {
+        self.with_layer(idx, |l| l.clipped = clipped)
     }
 
     /// Pure setter: replaces layer `idx`'s canvas offset.
@@ -735,7 +970,16 @@ impl RzDocument {
     /// The merge is destructive, so the merged layer carries neither layer's
     /// mask or meta: an ENABLED mask is baked into the pixels by the kernel
     /// (like opacity and blend), a disabled one is simply dropped, and meta no
-    /// longer describes the pixels it is attached to.
+    /// longer describes the pixels it is attached to. Because the kernel is
+    /// shared, merging an ADJUSTMENT layer down bakes the adjustment into the
+    /// layer below, gated by its blend mode, opacity and mask.
+    ///
+    /// A CLIPPED upper layer is baked through its clipping: the pair runs the
+    /// same group kernel as the projection ([`composite_clip_group_into`]
+    /// with the lower layer as base), so the upper layer's contribution is
+    /// alpha-limited to the lower layer's footprint. The merged layer keeps
+    /// the LOWER layer's clipped flag (like its name and visibility), so a
+    /// merge inside a clip group stays in the group.
     pub fn merging_down(&self, idx: usize) -> Option<Self> {
         if idx == 0 {
             return None;
@@ -764,8 +1008,19 @@ impl RzDocument {
         }
         let origin = (x0 as i32, y0 as i32);
         let mut acc = vec![[0.0f32; 4]; (uw * uh) as usize];
-        composite_layer_into(&mut acc, uw as u32, uh as u32, origin, &lower);
-        composite_layer_into(&mut acc, uw as u32, uh as u32, origin, &upper);
+        if upper.clipped {
+            composite_clip_group_into(
+                &mut acc,
+                uw as u32,
+                uh as u32,
+                origin,
+                &lower,
+                std::slice::from_ref(&upper),
+            );
+        } else {
+            composite_layer_into(&mut acc, uw as u32, uh as u32, origin, &lower);
+            composite_layer_into(&mut acc, uw as u32, uh as u32, origin, &upper);
+        }
         let merged = doc.layers.get_mut(idx - 1).expect("lower layer exists");
         merged.pixels = Arc::new(quantize(&acc, uw as u32, uh as u32));
         merged.offset = origin;
@@ -1235,6 +1490,10 @@ impl RzDocument {
     /// coverage bytes when present (the mask's dimensions are the layer's
     /// pixel dimensions and are not stored twice), then u8 meta present and,
     /// when present, u32 meta len + UTF-8 meta bytes.
+    ///
+    /// Version 3 appends one more field after all the version-2 fields (so a
+    /// version-2 record is in turn a strict prefix of a version-3 one):
+    /// u8 clipped.
     fn encode_native(&self) -> Result<Vec<u8>, String> {
         // The writer enforces the reader's caps, so every file it produces
         // can be read back: layer count and per-layer PNG size are hard
@@ -1300,6 +1559,8 @@ impl RzDocument {
                 buf.extend_from_slice(&meta_len.to_le_bytes());
                 buf.extend_from_slice(meta.as_bytes());
             }
+            // Version 3 field.
+            buf.push(u8::from(layer.clipped));
         }
         Ok(buf)
     }
@@ -1366,8 +1627,9 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Parses an RZDC buffer of version 1 or 2 (version 1 predates layer masks
-/// and layer meta, which default to absent). Corrupt or truncated input
+/// Parses an RZDC buffer of version 1, 2 or 3 (version 1 predates layer
+/// masks and layer meta, which default to absent; versions 1 and 2 predate
+/// the clipped flag, which defaults to false). Corrupt or truncated input
 /// produces `Err`, never a panic; unknown blend-mode values fall back to
 /// Normal and opacity is clamped.
 fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
@@ -1379,8 +1641,10 @@ fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
     if version == 0 || version > RZDC_VERSION {
         return Err(format!("unsupported RZDC version {version}"));
     }
-    // Version 1 layer records stop after the pixel PNG.
+    // Version 1 layer records stop after the pixel PNG; version 2 records
+    // after the mask and meta fields.
     let has_mask_and_meta = version >= 2;
+    let has_clipped = version >= 3;
     let width = r.u32()?;
     let height = r.u32()?;
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
@@ -1450,6 +1714,7 @@ fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
                 meta = Some(String::from_utf8_lossy(r.take(meta_len as usize)?).into_owned());
             }
         }
+        let clipped = has_clipped && r.u8()? != 0;
         layers.push(Layer {
             pixels: Arc::new(pixels),
             offset: (off_x, off_y),
@@ -1460,6 +1725,7 @@ fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
             mask,
             mask_enabled,
             meta,
+            clipped,
         });
     }
     Ok(RzDocument {
@@ -1599,10 +1865,13 @@ fn open_psd(bytes: &[u8], path: &str) -> Result<RzDocument, String> {
             blend: map_psd_blend(l.blend_mode() as i32),
             visible: !l.visible(),
             // PSD layer masks are not imported (the crate exposes them only
-            // as raw channel data); imported layers arrive unmasked.
+            // as raw channel data); imported layers arrive unmasked. The PSD
+            // clipping bit is not exposed by the crate either, so imported
+            // layers arrive unclipped.
             mask: None,
             mask_enabled: true,
             meta: None,
+            clipped: false,
         });
     }
     Ok(RzDocument {

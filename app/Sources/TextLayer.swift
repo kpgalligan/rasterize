@@ -8,11 +8,13 @@ import AppKit
 ///
 /// The fields mirror exactly what the text tool's options bar offers: a font
 /// FAMILY (the popup lists families, and `currentFont()` builds the face from
-/// one), a point size, and a color. There is no alignment control, so there
-/// is no alignment field.
+/// one), a point size, a color, and a line alignment.
 ///
 /// JSON shape: `{"type":"text","version":1,"string":…,"font":…,"size":…,
-/// "color":"#RRGGBBAA"}`.
+/// "color":"#RRGGBBAA","alignment":"left"|"center"|"right"}`. `alignment` is
+/// additive and optional — a payload without it (every pre-alignment file)
+/// decodes as "left", so the version does not bump; encoding always writes
+/// it.
 struct TextLayerPayload: Codable, Equatable {
     /// The only `type` this app understands; anything else (or nothing) means
     /// the layer's metadata was written by something that is not a text
@@ -22,6 +24,8 @@ struct TextLayerPayload: Codable, Equatable {
     /// it, and older builds then read those layers as plain rasters — the
     /// graceful degradation the format is designed for.
     static let currentVersion = 1
+    /// The values `alignment` may take, in options-bar segment order.
+    static let alignments = ["left", "center", "right"]
 
     var type: String
     var version: Int
@@ -31,22 +35,47 @@ struct TextLayerPayload: Codable, Equatable {
     var size: Double
     /// sRGB straight alpha, "#RRGGBBAA".
     var color: String
+    /// "left" | "center" | "right" — how lines align within the text block.
+    var alignment: String
 
-    init(string: String, family: String, size: Double, color: NSColor) {
+    enum CodingKeys: String, CodingKey {
+        case type, version, string, font, size, color, alignment
+    }
+
+    init(
+        string: String, family: String, size: Double, color: NSColor,
+        alignment: String = "left"
+    ) {
         self.type = Self.typeName
         self.version = Self.currentVersion
         self.string = string
         self.font = family
         self.size = size
         self.color = TextLayer.hex(color)
+        self.alignment = alignment
     }
 
     /// Snapshot of a live editing session: the font carries both the family
     /// and the size the session was laid out with.
-    init(string: String, font: NSFont, color: NSColor) {
+    init(string: String, font: NSFont, color: NSColor, alignment: NSTextAlignment = .left) {
         self.init(
             string: string, family: font.familyName ?? font.fontName,
-            size: Double(font.pointSize), color: color)
+            size: Double(font.pointSize), color: color,
+            alignment: TextLayer.alignmentName(for: alignment))
+    }
+
+    /// Custom decoding only so a MISSING `alignment` (every payload written
+    /// before the field existed) reads as "left"; everything else is the
+    /// synthesized behavior. Encoding stays synthesized and always writes it.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = try container.decode(String.self, forKey: .type)
+        version = try container.decode(Int.self, forKey: .version)
+        string = try container.decode(String.self, forKey: .string)
+        font = try container.decode(String.self, forKey: .font)
+        size = try container.decode(Double.self, forKey: .size)
+        color = try container.decode(String.self, forKey: .color)
+        alignment = try container.decodeIfPresent(String.self, forKey: .alignment) ?? "left"
     }
 
     /// The face the raster is rendered with, built the same way the options
@@ -61,6 +90,14 @@ struct TextLayerPayload: Codable, Equatable {
 
     var nsColor: NSColor { TextLayer.color(fromHex: color) ?? .black }
 
+    var nsAlignment: NSTextAlignment {
+        switch alignment {
+        case "center": return .center
+        case "right": return .right
+        default: return .left
+        }
+    }
+
     /// The JSON to store as the layer's metadata; nil only if the payload
     /// somehow cannot be encoded. Keys are sorted so re-encoding an unchanged
     /// description produces identical bytes.
@@ -72,16 +109,17 @@ struct TextLayerPayload: Codable, Equatable {
     }
 
     /// Strict, non-throwing decode: malformed JSON, a missing or unknown
-    /// `type`, an unsupported `version`, a non-positive size or an
-    /// unparseable color all mean "this is a plain raster layer", never an
-    /// error and never a crash.
+    /// `type`, an unsupported `version`, a non-positive size, an unparseable
+    /// color or an unknown alignment all mean "this is a plain raster
+    /// layer", never an error and never a crash.
     static func decode(_ json: String) -> TextLayerPayload? {
         guard let data = json.data(using: .utf8),
               let payload = try? JSONDecoder().decode(TextLayerPayload.self, from: data),
               payload.type == typeName,
               payload.version == currentVersion,
               payload.size.isFinite, payload.size > 0,
-              TextLayer.color(fromHex: payload.color) != nil
+              TextLayer.color(fromHex: payload.color) != nil,
+              alignments.contains(payload.alignment)
         else { return nil }
         return payload
     }
@@ -117,17 +155,29 @@ enum TextLayer {
     /// out block so antialiased edges, descenders and glyph overhang are
     /// never clipped.
     ///
+    /// Alignment moves lines within the BLOCK — the tight extent of the
+    /// left-aligned layout (the wrap width when the text wraps to fill it,
+    /// the widest line's natural width otherwise) — never within the wrap
+    /// box. That keeps the block anchored at `origin`, so the committed
+    /// offset does not move when only the alignment changes, and single-line
+    /// text renders identically for all three values.
+    ///
     /// nil for an empty string, a degenerate layout, or a raster beyond the
     /// core's pixel cap.
     static func render(
         _ payload: TextLayerPayload, origin: CGPoint, wrapWidth: CGFloat
     ) -> TextLayerRaster? {
         guard !payload.string.isEmpty, origin.x.isFinite, origin.y.isFinite else { return nil }
-        let attributed = NSAttributedString(
-            string: payload.string,
-            attributes: [.font: payload.nsFont, .foregroundColor: payload.nsColor])
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: payload.nsFont, .foregroundColor: payload.nsColor,
+            .paragraphStyle: paragraphStyle(.left),
+        ]
+        // Alignment never changes line BREAKS, so the left-aligned string is
+        // the geometry: block extent, sub-pixel remainders, raster size and
+        // offset all come from it, for every alignment.
+        let measured = NSAttributedString(string: payload.string, attributes: attributes)
         let wrap = max(wrapWidth, 1)
-        let layout = attributed.boundingRect(
+        let layout = measured.boundingRect(
             with: NSSize(width: wrap, height: 10_000_000),
             options: [.usesLineFragmentOrigin, .usesFontLeading])
         guard layout.width.isFinite, layout.height.isFinite,
@@ -148,6 +198,22 @@ enum TextLayer {
         let height = Int(ceil(layout.height + fracY + pad * 2))
         guard width > 0, height > 0, width * height <= RasterImage.maxResizePixels else {
             return nil
+        }
+
+        // What actually draws: the same string with the payload's alignment.
+        // Left draws in the wrap box (identical to the measure); center and
+        // right draw in a box exactly the block wide, so lines shift within
+        // the block while the widest line — and the block itself — stay put.
+        let alignment = payload.nsAlignment
+        let drawnString: NSAttributedString
+        let drawWidth: CGFloat
+        if alignment == .left {
+            drawnString = measured
+            drawWidth = wrap
+        } else {
+            attributes[.paragraphStyle] = paragraphStyle(alignment)
+            drawnString = NSAttributedString(string: payload.string, attributes: attributes)
+            drawWidth = layout.width
         }
 
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -171,11 +237,11 @@ enum TextLayer {
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
             // Drawing at (pad + frac − layout.min) puts the ink box's
             // top-left exactly `pad` (plus the sub-pixel remainder) inside
-            // the raster; the width stays `wrap` so lines break identically.
-            attributed.draw(
+            // the raster; drawWidth reproduces the measured line breaks.
+            drawnString.draw(
                 with: NSRect(
                     x: pad + fracX - layout.minX, y: pad + fracY - layout.minY,
-                    width: wrap, height: 10_000_000),
+                    width: drawWidth, height: 10_000_000),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 context: nil)
             NSGraphicsContext.restoreGraphicsState()
@@ -186,6 +252,24 @@ enum TextLayer {
         return TextLayerRaster(
             pixels: pixels, width: width, height: height,
             offsetX: Int(floor(inkX)) - Int(pad), offsetY: Int(floor(inkY)) - Int(pad))
+    }
+
+    /// A paragraph style that differs from the default only in alignment —
+    /// what both `render` and the on-canvas editor style their text with.
+    static func paragraphStyle(_ alignment: NSTextAlignment) -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.alignment = alignment
+        return style
+    }
+
+    /// The payload string for an alignment ("left" | "center" | "right");
+    /// anything the payload cannot express maps to "left".
+    static func alignmentName(for alignment: NSTextAlignment) -> String {
+        switch alignment {
+        case .center: return "center"
+        case .right: return "right"
+        default: return "left"
+        }
     }
 
     /// Slack kept around the laid-out block, in pixels: enough for
@@ -280,8 +364,8 @@ enum TextLayer {
         alert.messageText = "Rasterize text layer?"
         alert.informativeText =
             "This edit paints over “\(layerName)”, so the layer will no longer be editable "
-            + "as text: the string, font, size and color it was rendered from are dropped. "
-            + "The pixels themselves are kept."
+            + "as text: the string, font, size, color and alignment it was rendered from "
+            + "are dropped. The pixels themselves are kept."
         alert.addButton(withTitle: "Rasterize")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn

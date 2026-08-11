@@ -182,6 +182,57 @@ struct CanvasSelection {
             shape: .mask(bytes), canvasWidth: canvasWidth, canvasHeight: canvasHeight)
     }
 
+    /// Grows (dilates) the selection by `radius` px of Euclidean distance
+    /// from its 50% contour into a mask-kind selection (nil when nothing
+    /// remains, or on an invalid radius).
+    func grown(by radius: Double) -> CanvasSelection? {
+        morphed { bytes in
+            RasterSelection.growMask(
+                &bytes, width: canvasWidth, height: canvasHeight, radius: radius)
+        }
+    }
+
+    /// Shrinks (erodes) the selection by `radius` px (nil when nothing
+    /// remains — a shrink can consume the whole selection — or on an
+    /// invalid radius).
+    func shrunk(by radius: Double) -> CanvasSelection? {
+        morphed { bytes in
+            RasterSelection.shrinkMask(
+                &bytes, width: canvasWidth, height: canvasHeight, radius: radius)
+        }
+    }
+
+    /// Replaces the selection with an anti-aliased band `width` px wide
+    /// straddling its 50% contour (nil when nothing remains, or on an
+    /// invalid width).
+    func bordered(width: Double) -> CanvasSelection? {
+        morphed { bytes in
+            RasterSelection.borderMask(
+                &bytes, width: canvasWidth, height: canvasHeight, widthPx: width)
+        }
+    }
+
+    /// Smooths the selection's outline — corners round, jagged edges
+    /// reconcile, soft coverage stays soft (nil when nothing remains, or
+    /// on an invalid radius).
+    func smoothed(by radius: Double) -> CanvasSelection? {
+        morphed { bytes in
+            RasterSelection.smoothMask(
+                &bytes, width: canvasWidth, height: canvasHeight, radius: radius)
+        }
+    }
+
+    /// Shared shape of feathered(by:) for the morphology ops: rasterize,
+    /// run the in-place mask op, rebuild a mask-kind selection (contour,
+    /// bounds, empty check — an all-zero result comes back nil, which the
+    /// callers treat as deselect).
+    private func morphed(_ op: (inout [UInt8]) -> Bool) -> CanvasSelection? {
+        var bytes = maskBytes()
+        guard op(&bytes) else { return nil }
+        return CanvasSelection(
+            shape: .mask(bytes), canvasWidth: canvasWidth, canvasHeight: canvasHeight)
+    }
+
     /// Canvas-sized coverage bytes: geometric shapes rasterize with
     /// anti-aliased edges; wand masks return their stored bytes.
     func maskBytes() -> [UInt8] {
@@ -337,7 +388,9 @@ struct CanvasSelection {
         return path.isEmpty ? nil : path
     }
 
-    private static func grayImage(_ bytes: [UInt8], _ width: Int, _ height: Int) -> CGImage? {
+    /// Grayscale coverage bytes as a DeviceGray CGImage — an alpha source
+    /// for clip(to:mask:). Also used by the canvas's Quick Mask rubylith.
+    static func grayImage(_ bytes: [UInt8], _ width: Int, _ height: Int) -> CGImage? {
         guard let provider = CGDataProvider(data: Data(bytes) as CFData) else { return nil }
         return CGImage(
             width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 8,

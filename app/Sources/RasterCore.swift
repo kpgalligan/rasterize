@@ -405,6 +405,18 @@ final class RasterDocument {
         return wrap(rz_doc_with_layer_meta(ptr, idx, meta))
     }
 
+    /// Whether layer `idx`'s metadata parses as a color-adjustment
+    /// description ({"type":"adjust", ...} — the ONE meta shape the core
+    /// itself interprets): such a layer composites as an adjustment of the
+    /// backdrop and its own pixels are ignored. Asked of the CORE, whose
+    /// parse is the compositor's, so the answer can never drift from what
+    /// actually renders; the Swift-side parse (AdjustmentLayer.swift) is
+    /// only for reading the op and params back into a dialog.
+    func layerIsAdjustment(_ idx: Int) -> Bool {
+        guard isValidIndex(idx) else { return false }
+        return rz_doc_layer_is_adjustment(ptr, idx)
+    }
+
     // MARK: - Stack operations
 
     /// Inserts a transparent canvas-sized layer ABOVE `idx`.
@@ -588,6 +600,24 @@ final class RasterDocument {
         return rz_doc_layer_mask_enabled(ptr, idx)
     }
 
+    // MARK: - Clipping masks
+
+    /// Sets or clears layer `idx`'s clipped flag: a clipped layer is
+    /// confined to the alpha footprint of the first UNCLIPPED layer beneath
+    /// it (Photoshop clipping-mask semantics). Grouping is positional and
+    /// re-derived at every composite, so reordering or deleting layers needs
+    /// no bookkeeping here; a clipped BOTTOM layer has no base and
+    /// composites as if unclipped.
+    func withLayerClipped(_ idx: Int, clipped: Bool) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_with_layer_clipped(ptr, idx, clipped))
+    }
+
+    func layerClipped(_ idx: Int) -> Bool {
+        guard isValidIndex(idx) else { return false }
+        return rz_doc_layer_clipped(ptr, idx)
+    }
+
     // MARK: - Whole-document geometry
 
     func rotated90() -> RasterDocument? { wrap(rz_doc_rotate90(ptr)) }
@@ -660,6 +690,60 @@ enum RasterSelection {
         guard width > 0, height > 0, mask.count == width * height else { return false }
         return mask.withUnsafeMutableBufferPointer { buffer in
             rz_selection_feather(
+                buffer.baseAddress, UInt32(width), UInt32(height), Float(radius))
+        }
+    }
+
+    // Morphology companions to featherMask, same conventions throughout:
+    // in place, canvas edges are not contours, a parameter <= 0 leaves the
+    // mask untouched, false on a size mismatch or a non-finite parameter.
+
+    /// Grows (dilates) the coverage mask in place by `radius` px of true
+    /// Euclidean distance from its 50% contour, re-antialiasing the new
+    /// edge.
+    static func growMask(
+        _ mask: inout [UInt8], width: Int, height: Int, radius: Double
+    ) -> Bool {
+        guard width > 0, height > 0, mask.count == width * height else { return false }
+        return mask.withUnsafeMutableBufferPointer { buffer in
+            rz_selection_grow(
+                buffer.baseAddress, UInt32(width), UInt32(height), Float(radius))
+        }
+    }
+
+    /// Shrinks (erodes) the coverage mask in place by `radius` px — grow
+    /// with the sign flipped, so edges move inward.
+    static func shrinkMask(
+        _ mask: inout [UInt8], width: Int, height: Int, radius: Double
+    ) -> Bool {
+        guard width > 0, height > 0, mask.count == width * height else { return false }
+        return mask.withUnsafeMutableBufferPointer { buffer in
+            rz_selection_shrink(
+                buffer.baseAddress, UInt32(width), UInt32(height), Float(radius))
+        }
+    }
+
+    /// Replaces the coverage mask in place with an anti-aliased band
+    /// `widthPx` wide straddling its 50% contour.
+    static func borderMask(
+        _ mask: inout [UInt8], width: Int, height: Int, widthPx: Double
+    ) -> Bool {
+        guard width > 0, height > 0, mask.count == width * height else { return false }
+        return mask.withUnsafeMutableBufferPointer { buffer in
+            rz_selection_border(
+                buffer.baseAddress, UInt32(width), UInt32(height), Float(widthPx))
+        }
+    }
+
+    /// Smooths the coverage mask in place: featherMask's Gaussian blur
+    /// followed by a smoothstep remap, so corners round and jagged edges
+    /// reconcile while soft coverage stays soft.
+    static func smoothMask(
+        _ mask: inout [UInt8], width: Int, height: Int, radius: Double
+    ) -> Bool {
+        guard width > 0, height > 0, mask.count == width * height else { return false }
+        return mask.withUnsafeMutableBufferPointer { buffer in
+            rz_selection_smooth(
                 buffer.baseAddress, UInt32(width), UInt32(height), Float(radius))
         }
     }

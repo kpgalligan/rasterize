@@ -94,6 +94,7 @@ final class AgentServer {
         case "open_document": return try openDocument(a)
         case "get_document": return try getDocument(a)
         case "render": return try render(a)
+        case "sample_color": return try sampleColor(a)
         case "set_active_layer": return try setActiveLayer(a)
         case "new_layer": return try newLayer(a)
         case "duplicate_layer": return try layerEdit(a, "Duplicate Layer") { $0.duplicatingLayer($1) }
@@ -106,6 +107,9 @@ final class AgentServer {
         case "add_layer_mask": return try addLayerMask(a)
         case "remove_layer_mask": return try removeLayerMask(a)
         case "set_layer_mask_enabled": return try setLayerMaskEnabled(a)
+        case "set_layer_clipped": return try setLayerClipped(a)
+        case "add_adjustment_layer": return try addAdjustmentLayer(a)
+        case "edit_adjustment_layer": return try editAdjustmentLayer(a)
         case "apply_filter": return try applyFilter(a)
         case "brush_stroke": return try paintStroke(a, erase: false)
         case "eraser_stroke": return try paintStroke(a, erase: true)
@@ -230,6 +234,7 @@ final class AgentServer {
                 "visible": info.visible,
                 "has_mask": doc.layerHasMask(index),
                 "mask_enabled": doc.layerMaskEnabled(index),
+                "clipped": doc.layerClipped(index),
             ]
             // A TEXT LAYER also carries the description its pixels were
             // rendered from; only those layers can be re-rendered with
@@ -240,7 +245,17 @@ final class AgentServer {
                     "font": payload.font,
                     "size": payload.size,
                     "color": payload.color,
+                    "alignment": payload.alignment,
                 ]
+            }
+            // An ADJUSTMENT layer recolors everything below it while
+            // compositing and its own pixels are ignored (the core's parse
+            // is authoritative); the description it composites from is what
+            // edit_adjustment_layer replaces.
+            let isAdjustment = doc.layerIsAdjustment(index)
+            layer["is_adjustment"] = isAdjustment
+            if isAdjustment, let payload = doc.adjustmentPayload(index) {
+                layer["adjustment"] = ["op": payload.op, "params": payload.params]
             }
             return layer
         }
@@ -311,6 +326,34 @@ final class AgentServer {
                 ["type": "image", "data": png.base64EncodedString(), "mimeType": "image/png"],
                 ["type": "text", "text": text],
             ], isError: false)
+    }
+
+    /// sample_color: the eyedropper. Reads one pixel of the flattened
+    /// composite — the same projection render shows and the magic wand
+    /// samples. Read-only: no undo step, no change counting, no document
+    /// mutation. Runs on the main thread like every other tool (the
+    /// trampoline hops there before dispatch).
+    private func sampleColor(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
+        guard let x = intArg(a, "x"), let y = intArg(a, "y") else {
+            throw ToolError(message: "sample_color requires x and y")
+        }
+        guard x >= 0, y >= 0, x < doc.width, y < doc.height else {
+            throw ToolError(
+                message: "Point (\(x), \(y)) is outside the canvas "
+                    + "(\(doc.width)×\(doc.height), origin top-left)")
+        }
+        guard let projection = document.projection ?? doc.flattened(),
+            let rgba = projection.pixelRGBA(x: x, y: y)
+        else {
+            throw ToolError(message: "Could not sample the composite")
+        }
+        return try jsonResult([
+            "x": x, "y": y,
+            "r": Int(rgba.r), "g": Int(rgba.g), "b": Int(rgba.b), "a": Int(rgba.a),
+            "hex": RasterImage.hexString(rgba),
+        ])
     }
 
     // MARK: - Layer operations
@@ -387,9 +430,9 @@ final class AgentServer {
             result["rasterized_text"] = true
             result["note"] =
                 "This edit painted over layer \(layer)'s pixels, so the layer is no longer "
-                + "editable as text: the string, font, size and color it was rendered from "
-                + "were dropped and edit_text_layer no longer works on it. The pixels are "
-                + "intact; undo restores the text layer."
+                + "editable as text: the string, font, size, color and alignment it was "
+                + "rendered from were dropped and edit_text_layer no longer works on it. The "
+                + "pixels are intact; undo restores the text layer."
         }
         return try jsonResult(result)
     }
@@ -565,6 +608,33 @@ final class AgentServer {
             $0.withLayerMaskEnabled(index, enabled)
         }
         return try jsonResult(["ok": true, "layer": index, "mask_enabled": enabled])
+    }
+
+    // MARK: - Clipping masks
+
+    /// set_layer_clipped: the agent mirror of Layer > Create/Release
+    /// Clipping Mask, named the same way so the undo menu reads identically.
+    /// The core accepts a clipped BOTTOM layer (it composites as unclipped —
+    /// there is nothing below to clip to), so that call succeeds with a
+    /// note instead of erroring: the flag is real and matters the moment a
+    /// layer is reordered beneath it.
+    private func setLayerClipped(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        let index = try paintLayerIndex(a, document)
+        guard let clipped = boolArg(a, "clipped") else {
+            throw ToolError(message: "set_layer_clipped requires clipped (true or false)")
+        }
+        try performEdit(document, clipped ? "Create Clipping Mask" : "Release Clipping Mask") {
+            $0.withLayerClipped(index, clipped: clipped)
+        }
+        var result: [String: Any] = ["ok": true, "layer": index, "clipped": clipped]
+        if clipped, index == 0 {
+            result["note"] =
+                "Layer 0 is the bottom layer: with no unclipped layer beneath it to clip "
+                + "to, it composites as if unclipped. The flag is stored and takes effect "
+                + "if a layer is ever moved below it."
+        }
+        return try jsonResult(result)
     }
 
     // MARK: - Layer transform
@@ -782,6 +852,7 @@ final class AgentServer {
         guard index >= 0, index < count else {
             throw ToolError(message: "Layer \(index) is out of range (0..\(count - 1))")
         }
+        try rejectAdjustmentPixelEdit(document, index)
         let filter = try requiredString(a, "filter")
         let rasterized = try performPixelEdit(
             document, "Apply \(filter)", pixelLayer: index
@@ -827,6 +898,244 @@ final class AgentServer {
                 seed: UInt64(bitPattern: Int64(intArg(a, "seed") ?? 1)))
         default: return nil
         }
+    }
+
+    // MARK: - Adjustment layers
+
+    /// Refuses an edit aimed at an ADJUSTMENT layer's pixels — the compositor
+    /// ignores them (the layer recolors its backdrop instead), so the edit
+    /// would silently change nothing. The agent mirror of the UI's
+    /// refuseAdjustmentPixelEdit alert, word for word. Mask, move, transform,
+    /// property and stacking tools deliberately do NOT come through here.
+    private func rejectAdjustmentPixelEdit(_ document: ImageDocument, _ index: Int) throws {
+        guard document.doc?.layerIsAdjustment(index) == true else { return }
+        throw ToolError(
+            message: "Adjustment layers have no pixels to edit. Paint on the layer's mask "
+                + "instead, or target another layer.")
+    }
+
+    /// The `op` argument of the adjustment tools, as one of the nine ops the
+    /// core's schema (core/src/adjust.rs) interprets.
+    private func adjustmentOp(_ name: String) throws -> AdjustmentLayerOp {
+        guard let op = AdjustmentLayerOp(rawValue: name) else {
+            let names = AdjustmentLayerOp.allCases.map { $0.rawValue }.joined(separator: ", ")
+            throw ToolError(message: "Unknown adjustment op \"\(name)\". One of: \(names)")
+        }
+        return op
+    }
+
+    /// The `params` argument of the adjustment tools ([:] when omitted),
+    /// validated against the core's meta schema for `op` — what passes here
+    /// is guaranteed to parse in the core, so the app never stores meta the
+    /// compositor would silently treat as plain raster. Deliberately STRICTER
+    /// than the core, which clamps some out-of-range numbers and ignores
+    /// unknown keys: silently bending a model's values (or dropping a typo'd
+    /// key, leaving an accidental identity adjustment) hides mistakes, so
+    /// every violation is refused naming the offending key and its range.
+    private func adjustmentParams(
+        _ a: [String: Any], for op: AdjustmentLayerOp
+    ) throws -> [String: Any] {
+        let params: [String: Any]
+        if let raw = a["params"] {
+            guard let object = raw as? [String: Any] else {
+                throw ToolError(
+                    message: "params must be a JSON object, e.g. {\"brightness\": 0.2}")
+            }
+            params = object
+        } else {
+            params = [:]
+        }
+        let allowed: [String]
+        switch op {
+        case .bcs: allowed = ["brightness", "contrast", "saturation"]
+        case .curves: allowed = ["rgb", "r", "g", "b"]
+        case .levels: allowed = ["black", "white", "gamma"]
+        case .hueRotate: allowed = ["degrees"]
+        case .threshold: allowed = ["level"]
+        case .posterize: allowed = ["levels"]
+        case .invert, .grayscale, .sepia: allowed = []
+        }
+        let unknown = params.keys.filter { !allowed.contains($0) }.sorted()
+        if let first = unknown.first {
+            guard !allowed.isEmpty else {
+                throw ToolError(
+                    message: "\(op.rawValue) takes no params "
+                        + "(got \(unknown.joined(separator: ", ")))")
+            }
+            throw ToolError(
+                message: "Unknown \(op.rawValue) parameter \"\(first)\" — \(op.rawValue) "
+                    + "takes \(allowed.joined(separator: ", ")).")
+        }
+        // A present value must be a JSON number (finite, inside `range`);
+        // nil when the key was omitted, so callers can apply defaults.
+        func number(_ key: String, range: ClosedRange<Double>? = nil) throws -> Double? {
+            guard let value = params[key] else { return nil }
+            guard let n = (value as? NSNumber)?.doubleValue, n.isFinite else {
+                throw ToolError(message: "\(key) must be a number")
+            }
+            if let range = range, !range.contains(n) {
+                throw ToolError(
+                    message: "\(key) must be between \(range.lowerBound) and "
+                        + "\(range.upperBound) (got \(n))")
+            }
+            return n
+        }
+        switch op {
+        case .bcs:
+            for key in ["brightness", "contrast", "saturation"] {
+                _ = try number(key, range: -1...1)
+            }
+        case .levels:
+            let black = try number("black", range: 0...1) ?? 0
+            let white = try number("white", range: 0...1) ?? 1
+            _ = try number("gamma", range: 0.1...10)
+            guard black < white else {
+                throw ToolError(
+                    message: "levels requires 0 <= black < white <= 1 "
+                        + "(got black \(black), white \(white))")
+            }
+        case .hueRotate:
+            _ = try number("degrees")
+        case .threshold:
+            _ = try number("level", range: 0...1)
+        case .posterize:
+            guard let levels = try number("levels") else {
+                throw ToolError(
+                    message: "posterize requires levels, an integer from 2 to 64")
+            }
+            guard levels == levels.rounded() else {
+                throw ToolError(
+                    message: "levels must be an integer from 2 to 64 (got \(levels))")
+            }
+            guard levels >= 2, levels <= 64 else {
+                throw ToolError(
+                    message: "levels must be between 2 and 64 (got \(Int(levels)))")
+            }
+        case .curves:
+            for key in allowed {
+                guard let value = params[key] else { continue }
+                guard let list = value as? [Any] else {
+                    throw ToolError(
+                        message: "curves \(key) must be an array of [in, out] pairs")
+                }
+                guard (2...16).contains(list.count) else {
+                    throw ToolError(
+                        message: "curves \(key) needs 2 to 16 [in, out] points "
+                            + "(got \(list.count))")
+                }
+                var inputs = Set<Double>()
+                for entry in list {
+                    guard let pair = entry as? [Any], pair.count == 2,
+                        let x = (pair[0] as? NSNumber)?.doubleValue, x.isFinite,
+                        let y = (pair[1] as? NSNumber)?.doubleValue, y.isFinite
+                    else {
+                        throw ToolError(
+                            message: "curves \(key): every point must be an [in, out] pair "
+                                + "of two numbers")
+                    }
+                    guard x >= 0, x <= 255, y >= 0, y <= 255 else {
+                        throw ToolError(
+                            message: "curves \(key): point values must be between 0 and 255 "
+                                + "(got [\(x), \(y)])")
+                    }
+                    inputs.insert(x)
+                }
+                guard inputs.count >= 2 else {
+                    throw ToolError(
+                        message: "curves \(key) needs at least 2 points with distinct "
+                            + "\"in\" values")
+                }
+            }
+        case .invert, .grayscale, .sepia:
+            break // no params; the unknown-key check above already refused any
+        }
+        return params
+    }
+
+    /// add_adjustment_layer: the agent mirror of Layer > New Adjustment
+    /// Layer — the very chain the UI commits
+    /// (RasterDocument.addingAdjustmentLayer): a canvas-sized transparent
+    /// layer above the ACTIVE layer, the validated meta attached, and always
+    /// a mask — from the live selection when one exists (marquee left up,
+    /// exactly like Layer > Mask > From Selection) else reveal-all. One
+    /// handle committed through performEdit = one undo step; the new layer
+    /// becomes active, like the UI's post-commit selection.
+    private func addAdjustmentLayer(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        guard document.doc != nil else { throw ToolError(message: "Document has no image") }
+        let op = try adjustmentOp(requiredString(a, "op"))
+        let params = try adjustmentParams(a, for: op)
+        guard let meta = AdjustmentLayerPayload(op: op, params: params).json() else {
+            throw ToolError(message: "Could not encode the adjustment parameters")
+        }
+        let name = stringArg(a, "name") ?? op.displayName
+        let below = document.activeLayerIndex
+        let selection = selectionMask(document)
+        try performEdit(document, "New \(op.displayName) Layer") {
+            $0.addingAdjustmentLayer(above: below, name: name, meta: meta, selection: selection)
+        }
+        let index = min(below + 1, (document.doc?.layerCount ?? 1) - 1)
+        document.activeLayerIndex = index
+        // The edit's own notification went out before the active layer
+        // moved; this one lands the UI's paint target on the new mask.
+        NotificationCenter.default.post(
+            name: .imageDocumentImageDidChange, object: document, userInfo: ["isLive": false])
+        return try jsonResult([
+            "ok": true,
+            "layer": index,
+            "name": name,
+            "op": op.rawValue,
+            "mask": selection != nil ? "from_selection" : "reveal_all",
+            "note": "Non-destructive: the layer recolors everything below it, gated by its "
+                + "mask. Change its parameters with edit_adjustment_layer; brush/eraser "
+                + "strokes on it paint the mask.",
+        ])
+    }
+
+    /// edit_adjustment_layer: replaces ONLY an adjustment layer's meta — the
+    /// agent mirror of the Adjustment Options sheet's Apply. params is a
+    /// WHOLESALE replacement (validated like add_adjustment_layer's); op
+    /// alone switches the op to its defaults (refused by validation when the
+    /// op requires a parameter, i.e. posterize). Pixels, mask, properties
+    /// and stacking are untouched; one undo step.
+    private func editAdjustmentLayer(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        let index = try paintLayerIndex(a, document)
+        guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
+        guard doc.layerIsAdjustment(index) else {
+            let name = doc.layerInfo(index)?.name ?? ""
+            throw ToolError(
+                message: "Layer \(index) (\"\(name)\") is not an adjustment layer "
+                    + "(get_document reports is_adjustment on the layers that are). Make one "
+                    + "with add_adjustment_layer.")
+        }
+        let opArg = stringArg(a, "op")
+        guard opArg != nil || a["params"] != nil else {
+            throw ToolError(
+                message: "edit_adjustment_layer: nothing to change — pass op and/or params.")
+        }
+        let op: AdjustmentLayerOp
+        if let opArg = opArg {
+            op = try adjustmentOp(opArg)
+        } else {
+            let current = doc.adjustmentPayload(index)
+            guard let known = current?.knownOp else {
+                throw ToolError(
+                    message: "Layer \(index)'s adjustment op \"\(current?.op ?? "?")\" is not "
+                        + "one this app can edit; pass op to replace it with a known one.")
+            }
+            op = known
+        }
+        let params = try adjustmentParams(a, for: op)
+        guard let meta = AdjustmentLayerPayload(op: op, params: params).json() else {
+            throw ToolError(message: "Could not encode the adjustment parameters")
+        }
+        try performEdit(document, "Edit \(op.displayName) Layer") {
+            $0.withLayerMeta(index, meta)
+        }
+        return try jsonResult([
+            "ok": true, "layer": index, "op": op.rawValue, "params": params,
+        ])
     }
 
     // MARK: - Painting (brush, eraser, text)
@@ -952,11 +1261,23 @@ final class AgentServer {
 
     private func paintStroke(_ a: [String: Any], erase: Bool) throws -> String {
         let document = try target(a)
-        let toMask = try paintTargetsMask(a)
+        let requestedMask = try paintTargetsMask(a)
+        let index = try paintLayerIndex(a, document)
+        // Strokes on an ADJUSTMENT layer always paint its MASK, whatever
+        // target asked for — the compositor ignores such a layer's pixels,
+        // and the UI's paint target enforces the same routing. Not an
+        // error; the result reports target "mask".
+        let isAdjustment = document.doc?.layerIsAdjustment(index) == true
+        if isAdjustment, document.doc?.layerHasMask(index) != true {
+            throw ToolError(
+                message: "Layer \(index) is an adjustment layer, so strokes paint its MASK "
+                    + "— but its mask was deleted. Add one with add_layer_mask.")
+        }
+        let toMask = requestedMask || isAdjustment
         let layer =
             toMask
             ? try maskedLayerIndex(a, document, erase ? "erase" : "paint")
-            : try paintLayerIndex(a, document)
+            : index
         let points = try parsePoints(a)
         let size = CGFloat(min(max(doubleArg(a, "size") ?? 16, 1), 512))
         let opacity = min(max(doubleArg(a, "opacity") ?? 1, 0), 1)
@@ -1003,16 +1324,22 @@ final class AgentServer {
             }
             context.strokePath()
         }
-        return try pixelEditResult(
-            [
-                "ok": true, "action": actionName, "layer": layer, "points": points.count,
-                "target": toMask ? "mask" : "layer",
-            ], layer: layer, rasterizedText: rasterized)
+        var fields: [String: Any] = [
+            "ok": true, "action": actionName, "layer": layer, "points": points.count,
+            "target": toMask ? "mask" : "layer",
+        ]
+        if isAdjustment, !requestedMask {
+            fields["note"] =
+                "Layer \(layer) is an adjustment layer (no pixels to paint), so the stroke "
+                + "was routed to its mask."
+        }
+        return try pixelEditResult(fields, layer: layer, rasterizedText: rasterized)
     }
 
     private func addText(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         let layer = try paintLayerIndex(a, document)
+        try rejectAdjustmentPixelEdit(document, layer)
         let text = try requiredString(a, "text")
         guard let x = doubleArg(a, "x"), let y = doubleArg(a, "y") else {
             throw ToolError(message: "add_text requires x and y (top-left of the text block)")
@@ -1084,6 +1411,18 @@ final class AgentServer {
         return name
     }
 
+    /// The `alignment` argument of the text-layer tools ("left" | "center" |
+    /// "right"). nil when the caller named none, so the caller can keep what
+    /// the layer already says.
+    private func textAlignment(_ a: [String: Any]) throws -> String? {
+        guard let name = stringArg(a, "alignment") else { return nil }
+        guard TextLayerPayload.alignments.contains(name) else {
+            throw ToolError(
+                message: "alignment must be left, center, or right (got \"\(name)\")")
+        }
+        return name
+    }
+
     /// The width the text lays out (and wraps) in: `wrap_width`, or from the
     /// text's left edge to the canvas's right edge — the same default
     /// add_text uses. The description has no wrap field, so an edit that
@@ -1120,6 +1459,7 @@ final class AgentServer {
             "text": [
                 "string": payload.string, "font": payload.font,
                 "size": payload.size, "color": payload.color,
+                "alignment": payload.alignment,
             ],
             "wrap_width": Int(wrapWidth.rounded()),
             "note": "Re-editable: change it with edit_text_layer. Painting on this layer "
@@ -1129,8 +1469,8 @@ final class AgentServer {
     }
 
     /// Creates a RE-EDITABLE text layer above the active one: the string,
-    /// font, size and color become the layer's description and the pixels
-    /// are only their rendering. Mirrors the text tool's own commit
+    /// font, size, color and alignment become the layer's description and
+    /// the pixels are only their rendering. Mirrors the text tool's own commit
     /// (EditorViewController.commitTextLayer) so both paths produce
     /// identical layers.
     private func addTextLayer(_ a: [String: Any]) throws -> String {
@@ -1144,7 +1484,9 @@ final class AgentServer {
         let size = min(max(doubleArg(a, "size") ?? 48, 4), 1000)
         let family = try textFamily(a, size: size) ?? Self.defaultTextFamily
         let color = try parseColor(a, "color", fallback: .black)
-        let payload = TextLayerPayload(string: text, family: family, size: size, color: color)
+        let alignment = try textAlignment(a) ?? "left"
+        let payload = TextLayerPayload(
+            string: text, family: family, size: size, color: color, alignment: alignment)
         let wrapWidth = try textWrapWidth(a, from: x, canvasWidth: doc.width)
         guard
             let raster = TextLayer.render(
@@ -1204,7 +1546,9 @@ final class AgentServer {
         let size = doubleArg(a, "size").map { min(max($0, 4), 1000) } ?? current.size
         let family = try textFamily(a, size: size) ?? current.font
         let color = try parseColor(a, "color", fallback: current.nsColor)
-        let payload = TextLayerPayload(string: text, family: family, size: size, color: color)
+        let alignment = try textAlignment(a) ?? current.alignment
+        let payload = TextLayerPayload(
+            string: text, family: family, size: size, color: color, alignment: alignment)
         // Lay the new description out at the very origin the layer's pixels
         // were rendered from (the old description's padding is what its
         // offset includes), exactly as re-opening it with the text tool does.
@@ -1353,17 +1697,36 @@ final class AgentServer {
             throw ToolError(
                 message: "There is no selection to modify. Make one with the select_* tools.")
         }
+        // grow/shrink/smooth share feather's parameter name and validation
+        // (radius, positive and finite, clamped to 250); border's band is a
+        // width, so its parameter says so.
+        func radius(_ op: String) throws -> Double {
+            guard let radius = doubleArg(a, "radius"), radius.isFinite, radius > 0 else {
+                throw ToolError(message: "\(op) requires a positive radius (px)")
+            }
+            return min(radius, 250)
+        }
         let modified: CanvasSelection?
         switch try requiredString(a, "operation") {
         case "invert":
             modified = selection.inverted()
         case "feather":
-            guard let radius = doubleArg(a, "radius"), radius.isFinite, radius > 0 else {
-                throw ToolError(message: "feather requires a positive radius (px)")
+            modified = selection.feathered(by: try radius("feather"))
+        case "grow":
+            modified = selection.grown(by: try radius("grow"))
+        case "shrink":
+            modified = selection.shrunk(by: try radius("shrink"))
+        case "smooth":
+            modified = selection.smoothed(by: try radius("smooth"))
+        case "border":
+            guard let width = doubleArg(a, "width"), width.isFinite, width > 0 else {
+                throw ToolError(message: "border requires a positive width (px)")
             }
-            modified = selection.feathered(by: min(radius, 250))
+            modified = selection.bordered(width: min(width, 250))
         case let other:
-            throw ToolError(message: "operation must be \"invert\" or \"feather\" (got \"\(other)\")")
+            throw ToolError(
+                message: "operation must be \"invert\", \"feather\", \"grow\", \"shrink\", "
+                    + "\"border\", or \"smooth\" (got \"\(other)\")")
         }
         return try setCombined(editorVC, modified)
     }
@@ -1371,6 +1734,7 @@ final class AgentServer {
     private func fill(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         let index = try paintLayerIndex(a, document)
+        try rejectAdjustmentPixelEdit(document, index)
         guard let x = intArg(a, "x"), let y = intArg(a, "y") else {
             throw ToolError(message: "fill requires x and y (the seed point)")
         }
@@ -1390,6 +1754,7 @@ final class AgentServer {
     private func gradient(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         let index = try paintLayerIndex(a, document)
+        try rejectAdjustmentPixelEdit(document, index)
         guard let x0 = doubleArg(a, "x0"), let y0 = doubleArg(a, "y0"),
             let x1 = doubleArg(a, "x1"), let y1 = doubleArg(a, "y1")
         else {
@@ -1424,6 +1789,7 @@ final class AgentServer {
     private func clearSelection(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         let index = try paintLayerIndex(a, document)
+        try rejectAdjustmentPixelEdit(document, index)
         guard let mask = selectionMask(document) else {
             throw ToolError(
                 message: "There is no selection to clear. Make one first with select_rect, "
@@ -1538,17 +1904,33 @@ final class AgentServer {
 
     private func saveCopy(_ a: [String: Any]) throws -> String {
         let document = try target(a)
-        guard let image = document.projection ?? document.doc?.flattened() else {
-            throw ToolError(message: "Could not flatten the document")
-        }
         let path = try requiredString(a, "path")
         let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         let formatName = stringArg(a, "format") ?? url.pathExtension.lowercased()
+        if formatName.lowercased() == "rz" {
+            // Native layered format: the full document (layers, masks,
+            // metadata, clipped flags), no flattening. rz_doc_save_native
+            // writes atomically (temp file + rename), so a failure never
+            // truncates an existing destination.
+            guard let doc = document.doc else {
+                throw ToolError(message: "No image loaded")
+            }
+            do {
+                try doc.saveNative(to: url)
+            } catch {
+                throw ToolError(message: error.localizedDescription)
+            }
+            return try jsonResult(["ok": true, "path": url.path, "format": "rz"])
+        }
+        guard let image = document.projection ?? document.doc?.flattened() else {
+            throw ToolError(message: "Could not flatten the document")
+        }
         let format = ExportFormat.allCases.first {
             $0.fileExtension == formatName || $0.displayName.lowercased() == formatName
         }
         guard let format = format else {
-            let names = ExportFormat.allCases.map { $0.fileExtension }.joined(separator: ", ")
+            let names = (["rz"] + ExportFormat.allCases.map { $0.fileExtension })
+                .joined(separator: ", ")
             throw ToolError(message: "Cannot infer the format; pass format as one of: \(names)")
         }
         let quality = intArg(a, "jpeg_quality") ?? document.jpegExportQuality
@@ -1660,11 +2042,15 @@ final class AgentServer {
             tool(
                 "get_document",
                 "Full state of one document: canvas size and every layer's name, size, offset, "
-                    + "opacity, blend mode, visibility, and layer mask (has_mask, mask_enabled). "
+                    + "opacity, blend mode, visibility, layer mask (has_mask, mask_enabled), "
+                    + "and clipped flag (see set_layer_clipped). "
                     + "A re-editable TEXT layer also reports a text object (string, font, size, "
-                    + "color) — those are the layers edit_text_layer can change; a layer without "
-                    + "that key is plain pixels. Layer index 0 is the bottom layer; offsets are "
-                    + "measured from the canvas top-left corner, y increasing down.",
+                    + "color, alignment) — those are the layers edit_text_layer can change; a "
+                    + "layer without that key is plain pixels. An ADJUSTMENT layer reports "
+                    + "is_adjustment true plus an adjustment object (op, params) — those are "
+                    + "the layers edit_adjustment_layer can change. Layer index 0 is the bottom "
+                    + "layer; offsets are measured from the canvas top-left corner, y "
+                    + "increasing down.",
                 ["document_id": docID]),
             tool(
                 "render",
@@ -1677,6 +2063,23 @@ final class AgentServer {
                         "description": "Longest output side in px (64-4096, default 1024).",
                     ],
                 ]),
+            tool(
+                "sample_color",
+                "Reads the color of one pixel of the flattened composite (what you see "
+                    + "in a render) — the eyedropper. Returns straight (non-premultiplied) "
+                    + "RGBA components (0-255) and the hex string (#RRGGBB, or #RRGGBBAA "
+                    + "when not fully opaque). Errors when the point is outside the canvas.",
+                [
+                    "x": [
+                        "type": "integer",
+                        "description": "Pixel x in canvas coordinates (0 = left edge).",
+                    ],
+                    "y": [
+                        "type": "integer",
+                        "description": "Pixel y in canvas coordinates (0 = top edge).",
+                    ],
+                    "document_id": docID,
+                ], required: ["x", "y"]),
             tool(
                 "set_active_layer",
                 "Selects the layer that untargeted edits apply to.",
@@ -1845,8 +2248,88 @@ final class AgentServer {
                     "document_id": docID,
                 ], required: ["enabled"]),
             tool(
+                "set_layer_clipped",
+                "Clips a layer to the one below it (a Photoshop clipping mask) or releases "
+                    + "it. A clipped layer only shows where the first UNCLIPPED layer "
+                    + "beneath it has content — that base layer's alpha footprint gates the "
+                    + "whole group, and the group blends as one unit with the base's blend "
+                    + "mode and opacity. Grouping is positional: consecutive clipped layers "
+                    + "above a base all clip to it, and reordering re-derives the groups "
+                    + "with no extra bookkeeping. Hiding the base hides its group. "
+                    + "Non-destructive and reversible: pixels are untouched either way.",
+                [
+                    "layer": index,
+                    "clipped": [
+                        "type": "boolean",
+                        "description": "true clips the layer to the one below; false "
+                            + "releases it.",
+                    ],
+                    "document_id": docID,
+                ], required: ["clipped"]),
+            tool(
+                "add_adjustment_layer",
+                "Adds a NON-DESTRUCTIVE adjustment layer above the active layer and selects "
+                    + "it: while compositing it recolors everything below it, its own pixels "
+                    + "are ignored, and its parameters stay editable with "
+                    + "edit_adjustment_layer (get_document reports them) — same math as "
+                    + "apply_filter's matching filters, but reversible. The layer always gets "
+                    + "a mask gating where the adjustment applies: built from the current "
+                    + "selection when one exists (which stays active), else reveal-all; "
+                    + "brush/eraser strokes on the layer paint that mask. Ops and their "
+                    + "params: bcs (brightness, contrast, saturation, each -1..1, default 0); "
+                    + "curves (rgb, r, g, b: each an optional array of 2-16 [in, out] control "
+                    + "points, values 0-255, monotone-interpolated; a missing channel is "
+                    + "identity; per-channel curves apply before rgb); levels (black default "
+                    + "0, white default 1, 0 <= black < white <= 1; gamma 0.1-10, default 1); "
+                    + "hue_rotate (degrees, default 0); threshold (level 0-1, default 0.5); "
+                    + "posterize (levels, integer 2-64, REQUIRED); invert, grayscale, sepia "
+                    + "(none).",
+                [
+                    "op": [
+                        "type": "string",
+                        "enum": AdjustmentLayerOp.allCases.map { $0.rawValue },
+                        "description": "The adjustment operation.",
+                    ],
+                    "params": [
+                        "type": "object",
+                        "description": "Parameters for op (see the tool description); omit "
+                            + "for that op's defaults. posterize has no default: its levels "
+                            + "is required.",
+                    ],
+                    "name": [
+                        "type": "string",
+                        "description": "Layer name (default: the op's display name).",
+                    ],
+                    "document_id": docID,
+                ], required: ["op"]),
+            tool(
+                "edit_adjustment_layer",
+                "Changes an existing adjustment layer non-destructively by replacing its "
+                    + "stored description — one undo step; pixels, mask, opacity, blend mode "
+                    + "and stacking are untouched. params REPLACES the whole params object "
+                    + "(pass every key you want kept — nothing is merged); op without params "
+                    + "switches the layer to that op's defaults. Ops and params exactly as in "
+                    + "add_adjustment_layer. Errors when the target layer is not an "
+                    + "adjustment layer.",
+                [
+                    "layer": index,
+                    "op": [
+                        "type": "string",
+                        "enum": AdjustmentLayerOp.allCases.map { $0.rawValue },
+                        "description": "New operation; omit to keep the layer's current op.",
+                    ],
+                    "params": [
+                        "type": "object",
+                        "description": "Replacement params object for the op (see "
+                            + "add_adjustment_layer).",
+                    ],
+                    "document_id": docID,
+                ]),
+            tool(
                 "apply_filter",
-                "Applies a filter or adjustment to one layer's pixels. Filters and their "
+                "Applies a filter or adjustment DESTRUCTIVELY to one layer's pixels (prefer "
+                    + "add_adjustment_layer for a reversible color adjustment; this tool "
+                    + "errors on an adjustment layer). Filters and their "
                     + "parameters: grayscale, invert, sepia, edge_detect, emboss (none); "
                     + "blur (sigma, default 4); sharpen (amount, default 1); adjust "
                     + "(brightness, contrast, saturation, each -1..1, default 0); levels "
@@ -1908,7 +2391,8 @@ final class AgentServer {
                             + "stroke REVEALS what it covers. A mask is coverage, not color, "
                             + "so a mask stroke is forced to WHITE whatever color you pass, "
                             + "and opacity becomes partial coverage. The layer must already "
-                            + "have a mask (add_layer_mask).",
+                            + "have a mask (add_layer_mask). On an ADJUSTMENT layer every "
+                            + "stroke paints the mask, whatever this says.",
                     ],
                     "document_id": docID,
                 ], required: ["points"]),
@@ -1943,7 +2427,8 @@ final class AgentServer {
                             + "intact (undo it by brushing the mask with target: \"mask\"). "
                             + "A mask is coverage, not color, so a mask stroke is forced to "
                             + "BLACK, and opacity becomes partial coverage. The layer must "
-                            + "already have a mask (add_layer_mask).",
+                            + "already have a mask (add_layer_mask). On an ADJUSTMENT layer "
+                            + "every stroke paints the mask, whatever this says.",
                     ],
                     "document_id": docID,
                 ], required: ["points"]),
@@ -1975,14 +2460,15 @@ final class AgentServer {
             tool(
                 "add_text_layer",
                 "Adds a RE-EDITABLE text layer above the active layer and selects it. The "
-                    + "layer remembers the string, font, size and color it was rendered from "
-                    + "(get_document reports them, edit_text_layer changes them, and they "
-                    + "survive saving to .rz), unlike add_text which just bakes characters "
-                    + "into pixels. x,y is the TOP-LEFT corner of the text block, positioned "
-                    + "exactly like add_text; \\n starts a new line and long lines wrap at "
-                    + "wrap_width. Returns the new layer's index and bounds. NOTE: painting "
-                    + "on the layer afterwards (brush, eraser, fill, gradient, add_text, "
-                    + "apply_filter) drops the text and leaves plain pixels.",
+                    + "layer remembers the string, font, size, color and alignment it was "
+                    + "rendered from (get_document reports them, edit_text_layer changes "
+                    + "them, and they survive saving to .rz), unlike add_text which just "
+                    + "bakes characters into pixels. x,y is the TOP-LEFT corner of the text "
+                    + "block, positioned exactly like add_text; \\n starts a new line and "
+                    + "long lines wrap at wrap_width. Returns the new layer's index and "
+                    + "bounds. NOTE: painting on the layer afterwards (brush, eraser, fill, "
+                    + "gradient, add_text, apply_filter) drops the text and leaves plain "
+                    + "pixels.",
                 [
                     "text": ["type": "string"],
                     "x": ["type": "number"], "y": ["type": "number"],
@@ -2000,6 +2486,14 @@ final class AgentServer {
                         "type": "string",
                         "description": "Hex color, #RRGGBB or #RRGGBBAA (default #000000).",
                     ],
+                    "alignment": [
+                        "type": "string",
+                        "enum": TextLayerPayload.alignments,
+                        "description": "How lines align within the text block (default "
+                            + "left). The block stays anchored at x,y — only the lines "
+                            + "inside it shift, so single-line text looks the same for all "
+                            + "three values.",
+                    ],
                     "wrap_width": [
                         "type": "number",
                         "description": "Width in px the lines wrap at; default is from x to "
@@ -2010,14 +2504,15 @@ final class AgentServer {
             tool(
                 "edit_text_layer",
                 "Re-renders a text layer made by add_text_layer (or by the app's text tool) "
-                    + "from changed parameters: pass any subset of text, font, size, color "
-                    + "and wrap_width, and everything you omit keeps the layer's current "
-                    + "value. The layer keeps its position (the text block is re-laid-out "
-                    + "from the same top-left corner, so the bounds follow the new text), "
-                    + "its opacity, blend mode and stacking. Errors when the target layer is "
-                    + "not a text layer — add_text_layer makes one. Returns the resulting "
-                    + "bounds. wrap_width is not stored on the layer, so omitting it re-wraps "
-                    + "at the canvas's right edge; pass it to keep a narrower block narrow.",
+                    + "from changed parameters: pass any subset of text, font, size, color, "
+                    + "alignment and wrap_width, and everything you omit keeps the layer's "
+                    + "current value. The layer keeps its position (the text block is "
+                    + "re-laid-out from the same top-left corner, so the bounds follow the "
+                    + "new text), its opacity, blend mode and stacking. Errors when the "
+                    + "target layer is not a text layer — add_text_layer makes one. Returns "
+                    + "the resulting bounds. wrap_width is not stored on the layer, so "
+                    + "omitting it re-wraps at the canvas's right edge; pass it to keep a "
+                    + "narrower block narrow.",
                 [
                     "layer": index,
                     "text": ["type": "string"],
@@ -2033,6 +2528,12 @@ final class AgentServer {
                     "color": [
                         "type": "string",
                         "description": "Hex color, #RRGGBB or #RRGGBBAA.",
+                    ],
+                    "alignment": [
+                        "type": "string",
+                        "enum": TextLayerPayload.alignments,
+                        "description": "How lines align within the text block; omit to keep "
+                            + "the layer's current alignment.",
                     ],
                     "wrap_width": [
                         "type": "number",
@@ -2096,13 +2597,25 @@ final class AgentServer {
                 "Transforms the current selection (errors when nothing is selected): "
                     + "invert selects the complement over the canvas; feather "
                     + "Gaussian-softens the selection edge by radius px, so later "
-                    + "fills, gradients, and strokes fade out across it. An empty "
-                    + "result clears the selection.",
+                    + "fills, gradients, and strokes fade out across it; grow/shrink "
+                    + "move the selection edge outward/inward by radius px (corners "
+                    + "round into arcs); border replaces the selection with a band "
+                    + "width px wide straddling its edge; smooth rounds corners and "
+                    + "evens out jagged edges without moving long straight ones. An "
+                    + "empty result clears the selection.",
                 [
-                    "operation": ["type": "string", "enum": ["invert", "feather"]],
+                    "operation": [
+                        "type": "string",
+                        "enum": ["invert", "feather", "grow", "shrink", "border", "smooth"],
+                    ],
                     "radius": [
                         "type": "number",
-                        "description": "Feather radius in px (0-250; required for feather).",
+                        "description": "Radius in px (0-250; required for feather, grow, "
+                            + "shrink, and smooth).",
+                    ],
+                    "width": [
+                        "type": "number",
+                        "description": "Band width in px (0-250; required for border).",
                     ],
                     "document_id": docID,
                 ], required: ["operation"]),
@@ -2208,13 +2721,15 @@ final class AgentServer {
             tool("redo", "Redoes the most recently undone edit.", ["document_id": docID]),
             tool(
                 "save_copy",
-                "Exports the flattened document to a file without changing the open document. "
-                    + "Format comes from the extension unless given explicitly.",
+                "Exports the document to a file without changing the open document. "
+                    + "Format comes from the extension unless given explicitly. "
+                    + "rz writes the full layered document (layers, masks, metadata); "
+                    + "raster formats flatten.",
                 [
                     "path": ["type": "string"],
                     "format": [
                         "type": "string",
-                        "enum": ["png", "jpeg", "tiff", "bmp", "gif", "webp"],
+                        "enum": ["rz", "png", "jpeg", "tiff", "bmp", "gif", "webp"],
                     ],
                     "jpeg_quality": ["type": "integer", "minimum": 1, "maximum": 100],
                     "document_id": docID,

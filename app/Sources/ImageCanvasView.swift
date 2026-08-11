@@ -13,6 +13,8 @@ enum CanvasTool {
     case fill
     case gradient
     case text
+    case eyedropper
+    case crop
 }
 
 /// Text view used for in-canvas text sessions: ⌘Return commits the session.
@@ -50,6 +52,27 @@ final class ImageCanvasView: NSView {
                     || selection.canvasHeight != (image?.height ?? 0)
             {
                 setSelection(nil)
+            }
+            // Likewise the crop session's rect: any canvas size change
+            // underneath it (undo, an agent edit, Canvas Size) cancels the
+            // session. `bounds` still holds the OLD canvas size here — the
+            // view controller resizes the frame after setting the image.
+            if cropRect != nil,
+               CGFloat(image?.width ?? 0) != bounds.width
+                   || CGFloat(image?.height ?? 0) != bounds.height
+            {
+                cropDrag = nil
+                setCropRect(nil)
+            }
+            // A Quick Mask buffer made at a different canvas size is
+            // meaningless: discard the session (no selection comes back —
+            // there is nothing valid to convert). Same-size doc swaps
+            // (undo of a paint edit, agent edits) keep the session.
+            if quickMaskActive,
+               (image?.width ?? 0) != quickMaskWidth
+                   || (image?.height ?? 0) != quickMaskHeight
+            {
+                discardQuickMask()
             }
             needsDisplay = true
         }
@@ -122,6 +145,14 @@ final class ImageCanvasView: NSView {
             cancelLasso()
             gradientAnchor = nil
             gradientCurrent = nil
+            eyedropperDragActive = false
+            // Switching tools cancels the crop session (the rect is pure
+            // view state, so cancelling is just dropping it). Re-selecting
+            // the already-active crop tool keeps the rect.
+            if tool != oldValue {
+                cropDrag = nil
+                if cropRect != nil { setCropRect(nil) }
+            }
             if moveDragOrigin != nil {
                 // A tool switch mid-drag must still close the live edit so
                 // the drag-so-far becomes one undo step.
@@ -138,6 +169,10 @@ final class ImageCanvasView: NSView {
     var paintColor: NSColor = .black
     var brushOpacity: CGFloat = 1.0
     var textFont: NSFont = .systemFont(ofSize: 48)
+    /// How text-session lines align. The live session aligns within its
+    /// editing box; the commit aligns within the laid-out block
+    /// (TextLayer.render), which matches once the text wraps to fill it.
+    var textAlignment: NSTextAlignment = .left
 
     /// True while brush and eraser edit the active layer's MASK instead of
     /// its pixels (the layers panel's paint target). A mask is coverage, not
@@ -194,6 +229,9 @@ final class ImageCanvasView: NSView {
 
     var onToolKey: ((CanvasTool) -> Void)?
     var onBrushSizeKey: ((CGFloat) -> Void)?
+    /// Bare Q, handled with the tool keys (deliberately not a menu key
+    /// equivalent): toggles Quick Mask mode.
+    var onQuickMaskKey: (() -> Void)?
 
     // Free Transform. The canvas owns none of the geometry: it reports the
     // gesture in image pixel coordinates (unclamped — handles are routinely
@@ -230,8 +268,43 @@ final class ImageCanvasView: NSView {
     var onWandClick: ((CGPoint, SelectionCombineMode) -> Void)?
     /// Fired on a fill-tool click.
     var onFillClick: ((CGPoint) -> Void)?
+    /// Fired on every eyedropper sample tick — the mouse-down and each drag
+    /// tick of the eyedropper tool, or of Option-click borrowing it from
+    /// brush/fill/gradient. The point is UNCLAMPED image pixels: samples
+    /// outside the canvas are the receiver's no-op, not an edge pin.
+    var onEyedropper: ((CGPoint) -> Void)?
     /// Fired when a gradient drag commits (start, end in image pixels).
     var onGradientCommit: ((CGPoint, CGPoint) -> Void)?
+
+    // Crop tool. The rect is SESSION/VIEW state only — never stored on the
+    // document. It is cleared by Escape, commit, tool switches, and any
+    // canvas size change underneath it (see the image setter).
+
+    /// The crop session's rect in image pixel coordinates, clamped to the
+    /// canvas; nil when no session is in progress.
+    private(set) var cropRect: CGRect?
+    /// Aspect (width / height) constraining crop creates and corner/edge
+    /// resizes; nil = free. Kept current by EditorViewController from the
+    /// options bar's preset popup.
+    var cropAspect: CGFloat?
+    /// Fired whenever the crop rect changes, including to nil (the options
+    /// bar mirrors the size into its W/H fields).
+    var onCropRectChange: ((CGRect?) -> Void)?
+    /// Fired when the crop session commits (Return, or a double-click
+    /// inside the rect) with the finalized integral rect. The receiver runs
+    /// the core crop as one undo step; the session is already cleared.
+    var onCropCommit: ((CGRect) -> Void)?
+
+    /// What the current crop-tool drag does, captured at mouse-down with the
+    /// state it started from (every tick recomputes from that snapshot, like
+    /// the Free Transform drags).
+    private enum CropDrag {
+        case create(anchor: CGPoint)
+        case move(start: CGRect, grab: CGPoint)
+        case resize(handle: TransformHandle, start: CGRect)
+    }
+
+    private var cropDrag: CropDrag?
 
     // Lasso state: committed vertices of the in-progress polygon.
     private var lassoPoints: [CGPoint] = []
@@ -256,12 +329,33 @@ final class ImageCanvasView: NSView {
     // Move-drag state: the unclamped image-space point the drag started at.
     private var moveDragOrigin: CGPoint?
 
+    // True from an eyedropper mouse-down (the tool, or Option borrowing it)
+    // to its mouse-up: the whole gesture samples, whatever the tool's own
+    // drag would otherwise do.
+    private var eyedropperDragActive = false
+
     // Stroke state (brush/eraser). `strokeOnMask` latches paintsMask at
     // mouse-down so nothing (an agent edit landing on the main thread, a
     // panel click) can switch a stroke's target halfway through it.
+    // `strokeOnQuickMask` latches the mode the same way: a Quick Mask
+    // stroke edits ONLY the mode's coverage buffer — no document edit, no
+    // undo step, no callbacks.
     private var strokeActive = false
     private var strokeOnMask = false
+    private var strokeOnQuickMask = false
     private var strokeLastPoint: CGPoint?
+
+    // Quick Mask mode: the selection as an editable canvas-sized coverage
+    // buffer under a rubylith tint. Pure per-editor VIEW state — it never
+    // touches the document, and entering/leaving is not undoable, exactly
+    // like the selection it stands in for. `quickMaskImage` is the tint's
+    // alpha source (grayscale 255 − coverage), rebuilt whenever the
+    // coverage on display changes.
+    private(set) var quickMaskActive = false
+    private var quickMaskBuffer: [UInt8] = []
+    private var quickMaskWidth = 0
+    private var quickMaskHeight = 0
+    private var quickMaskImage: CGImage?
 
     // Full-image premultiplied overlay accumulating stroke geometry. Never
     // drawn directly: the projection previews strokes via the live-edit
@@ -381,10 +475,19 @@ final class ImageCanvasView: NSView {
         // overlay itself is ghosted on top until the stroke commits.
         drawMaskStrokeGhost(in: context)
 
+        // Quick Mask mode: the rubylith tint over the whole image. During
+        // a stroke the tint is rebuilt per tick (emitStrokeUpdate), so this
+        // is always the buffer-plus-stroke on display.
+        if quickMaskActive {
+            drawQuickMaskOverlay(in: context)
+        }
+
         // Paint can only land inside the active layer's extent; when that is
         // smaller than the canvas, show the boundary so strokes and text
-        // outside it don't silently vanish.
+        // outside it don't silently vanish. Quick Mask strokes land on the
+        // canvas-sized buffer instead, so the boundary would mislead there.
         if tool == .brush || tool == .eraser || tool == .text, !isTransforming,
+           !quickMaskActive,
            let layerRect = activeLayerRect,
            layerRect != CGRect(origin: .zero, size: bounds.size) {
             drawActiveLayerBounds(layerRect)
@@ -392,9 +495,17 @@ final class ImageCanvasView: NSView {
 
         // A transform ignores the selection entirely, and its dimming wash
         // and marquee would fight the box: the selection survives the
-        // session, it just stops drawing for it.
-        if let selection = selection, !isTransforming {
+        // session, it just stops drawing for it. A crop session's own dim
+        // and box would fight it the same way, so it too suspends the
+        // selection's drawing without dropping the selection.
+        if let selection = selection, !isTransforming, cropRect == nil {
             drawSelection(selection)
+        }
+
+        // The crop session: dim outside the rect (the selection wash,
+        // reused) and hang transform-style handles off the rect.
+        if tool == .crop, let cropRect = cropRect, !isTransforming {
+            drawCropOverlay(cropRect)
         }
 
         // Both of these belong to a tool gesture the session has suspended;
@@ -623,6 +734,39 @@ final class ImageCanvasView: NSView {
         }
     }
 
+    /// The crop overlay: the selection's dimming wash outside the rect,
+    /// then a transform-style box — hairline black under white, with the
+    /// eight white handle squares — on the rect itself.
+    private func drawCropOverlay(_ rect: CGRect) {
+        let dimPath = NSBezierPath(rect: bounds)
+        dimPath.append(NSBezierPath(rect: rect))
+        dimPath.windingRule = .evenOdd
+        NSColor.black.withAlphaComponent(0.35).setFill()
+        dimPath.fill()
+
+        let scale = magnification
+        let path = NSBezierPath(rect: rect)
+        path.lineWidth = 3 / scale
+        NSColor.black.withAlphaComponent(0.45).setStroke()
+        path.stroke()
+        path.lineWidth = 1 / scale
+        NSColor.white.withAlphaComponent(0.95).setStroke()
+        path.stroke()
+
+        let size = Self.transformHandleSize / scale
+        for handle in TransformHandle.allCases {
+            let point = handle.point(in: rect)
+            let square = NSBezierPath(
+                rect: CGRect(
+                    x: point.x - size / 2, y: point.y - size / 2, width: size, height: size))
+            NSColor.white.setFill()
+            square.fill()
+            square.lineWidth = 1 / scale
+            NSColor.black.withAlphaComponent(0.65).setStroke()
+            square.stroke()
+        }
+    }
+
     /// Subtle dashed outline (selection stroke style, thinner) marking the
     /// active layer's extent for the paint tools.
     private func drawActiveLayerBounds(_ rect: CGRect) {
@@ -667,6 +811,14 @@ final class ImageCanvasView: NSView {
     // MARK: - Selection
 
     func setSelection(_ new: CanvasSelection?) {
+        // A selection arriving from outside the mode (an agent select_*
+        // call — the UI's selection paths are inert while it is active)
+        // supersedes a Quick Mask session: end it rather than leave a
+        // stale buffer under a live marquee. Exit passes through here with
+        // quickMaskActive already false, and entry only ever passes nil.
+        if quickMaskActive, new != nil {
+            discardQuickMask()
+        }
         selection = new
         needsDisplay = true
         onSelectionChange?(new?.bounds)
@@ -732,6 +884,330 @@ final class ImageCanvasView: NSView {
         }
     }
 
+    // MARK: - Quick Mask mode
+
+    func toggleQuickMask() {
+        // Mid-stroke the buffer (or the selection) is in flux; ignore the
+        // toggle rather than tear the stroke's target out from under it.
+        guard !strokeActive else {
+            NSSound.beep()
+            return
+        }
+        if quickMaskActive {
+            exitQuickMask()
+        } else {
+            enterQuickMask()
+        }
+    }
+
+    /// Entering: the current selection rasterizes into the coverage buffer
+    /// (no selection ⇒ all zeros), the marquee hides (the selection is
+    /// consumed — it comes back, edited, on exit), and any transient tool
+    /// gesture is dropped the way a tool switch drops it.
+    private func enterQuickMask() {
+        guard let image = image, image.width > 0, image.height > 0 else {
+            NSSound.beep()
+            return
+        }
+        cancelLasso()
+        cropDrag = nil
+        if cropRect != nil { setCropRect(nil) }
+        gradientAnchor = nil
+        gradientCurrent = nil
+        dragAnchor = nil
+        quickMaskWidth = image.width
+        quickMaskHeight = image.height
+        quickMaskBuffer =
+            selection?.maskBytes()
+            ?? [UInt8](repeating: 0, count: image.width * image.height)
+        setSelection(nil)
+        quickMaskActive = true
+        rebuildQuickMaskImage(from: quickMaskBuffer)
+        needsDisplay = true
+    }
+
+    /// Exiting: the buffer becomes the selection via the mask-kind path —
+    /// contour, bounds, and marquee recompute; an all-zero buffer comes
+    /// back nil and deselects.
+    private func exitQuickMask() {
+        guard quickMaskActive else { return }
+        quickMaskActive = false
+        let buffer = quickMaskBuffer
+        let width = quickMaskWidth
+        let height = quickMaskHeight
+        clearQuickMaskState()
+        setSelection(
+            CanvasSelection(shape: .mask(buffer), canvasWidth: width, canvasHeight: height))
+    }
+
+    /// Ends the session without converting the buffer (canvas size changed
+    /// underneath it — the coverage is meaningless at the new size).
+    private func discardQuickMask() {
+        guard quickMaskActive else { return }
+        quickMaskActive = false
+        clearQuickMaskState()
+        needsDisplay = true
+    }
+
+    private func clearQuickMaskState() {
+        quickMaskBuffer = []
+        quickMaskWidth = 0
+        quickMaskHeight = 0
+        quickMaskImage = nil
+    }
+
+    /// Rebuilds the rubylith's alpha source from `coverage`: grayscale
+    /// 255 − coverage, so UNSELECTED areas carry the red tint (classic
+    /// Photoshop) once drawQuickMaskOverlay scales it by 0.5.
+    private func rebuildQuickMaskImage(from coverage: [UInt8]) {
+        quickMaskImage = CanvasSelection.grayImage(
+            coverage.map { 255 - $0 }, quickMaskWidth, quickMaskHeight)
+    }
+
+    /// The buffer with the in-progress stroke's overlay composited over it
+    /// (source-over on coverage): the premultiplied gray channel is the
+    /// source term — white brush = alpha, black eraser = 0 — so a brush
+    /// stroke pulls coverage toward 255 and an eraser stroke toward 0,
+    /// scaled by the stroke's own alpha (brush opacity). Used per tick for
+    /// the live tint and once at mouse-up to land the stroke.
+    private func quickMaskComposited() -> [UInt8] {
+        var result = quickMaskBuffer
+        guard let data = overlayData,
+              overlayWidth == quickMaskWidth, overlayHeight == quickMaskHeight
+        else { return result }
+        let bytes = data.assumingMemoryBound(to: UInt8.self)
+        for i in 0..<result.count {
+            let alpha = Int(bytes[i * 4 + 3])
+            guard alpha > 0 else { continue }
+            let source = Int(bytes[i * 4])
+            let kept = Int(result[i]) * (255 - alpha) + 127
+            result[i] = UInt8(min(255, source + kept / 255))
+        }
+        return result
+    }
+
+    /// The rubylith: red tint with per-pixel alpha 0.5 × (1 − coverage/255)
+    /// — unselected areas red, selected areas clear. The grayscale mask
+    /// multiplies the clip's alpha per pixel (the clipOutside convention),
+    /// and the 0.5 rides in the fill color.
+    private func drawQuickMaskOverlay(in context: CGContext) {
+        guard let mask = quickMaskImage else { return }
+        context.saveGState()
+        context.translateBy(x: 0, y: bounds.height)
+        context.scaleBy(x: 1, y: -1)
+        let rect = CGRect(origin: .zero, size: bounds.size)
+        context.clip(to: rect, mask: mask)
+        context.setFillColor(NSColor.systemRed.withAlphaComponent(0.5).cgColor)
+        context.fill(rect)
+        context.restoreGState()
+    }
+
+    // MARK: - Crop session
+
+    /// The single write path for the crop rect (drag ticks, nudges, the
+    /// options bar's W/H fields, cancellation).
+    func setCropRect(_ rect: CGRect?) {
+        cropRect = rect
+        needsDisplay = true
+        onCropRectChange?(rect)
+    }
+
+    /// Escape (and every other way a session dies without committing): the
+    /// document was never touched, so cancelling is just dropping the rect.
+    /// The tool stays active.
+    private func cancelCropSession() {
+        cropDrag = nil
+        guard cropRect != nil else { return }
+        setCropRect(nil)
+    }
+
+    /// Return or a double-click inside the rect: clears the session and
+    /// hands the finalized rect to the receiver, which runs the core crop.
+    private func commitCropSession() {
+        guard let rect = cropRect.flatMap(finalizedCropRect) else { return }
+        cropDrag = nil
+        setCropRect(nil)
+        onCropCommit?(rect)
+    }
+
+    private func cropMouseDown(_ point: CGPoint, _ event: NSEvent) {
+        if let rect = cropRect {
+            if event.clickCount >= 2, rect.contains(point) {
+                commitCropSession()
+                return
+            }
+            // Handle hit-testing borrows the transform box's convention:
+            // the handle's screen-size slop around its point, handles first.
+            let slop = Self.transformHandleSize / magnification
+            for handle in TransformHandle.allCases {
+                let handlePoint = handle.point(in: rect)
+                if abs(point.x - handlePoint.x) <= slop,
+                   abs(point.y - handlePoint.y) <= slop {
+                    cropDrag = .resize(handle: handle, start: rect)
+                    return
+                }
+            }
+            if rect.contains(point) {
+                cropDrag = .move(start: rect, grab: point)
+                return
+            }
+        }
+        // Outside any rect: start a new one. The zero rect makes a plain
+        // click read as click-to-clear at mouse-up (the drag threshold).
+        cropDrag = .create(anchor: point)
+        setCropRect(CGRect(origin: point, size: .zero))
+    }
+
+    /// `raw` is unclamped (like the transform drags) so deltas stay honest
+    /// when the pointer leaves the canvas; each drag kind clamps the RECT.
+    private func cropMouseDragged(_ raw: CGPoint, shift: Bool) {
+        guard let drag = cropDrag else { return }
+        switch drag {
+        case let .create(anchor):
+            setCropRect(cropRectCreating(anchor: anchor, to: clamp(point: raw)))
+        case let .move(start, grab):
+            setCropRect(cropRectMoving(start, dx: raw.x - grab.x, dy: raw.y - grab.y))
+        case let .resize(handle, start):
+            setCropRect(
+                cropRectResizing(start, handle: handle, to: clamp(point: raw), shift: shift))
+        }
+    }
+
+    private func cropMouseUp() {
+        guard let drag = cropDrag else { return }
+        cropDrag = nil
+        guard let rect = cropRect else { return }
+        if case .create = drag {
+            // The click-vs-drag threshold, in SCREEN points like the
+            // selection tools': a tiny drag (or plain click) clears instead
+            // of leaving an invisible sliver of a session behind.
+            let scale = magnification
+            if rect.width * scale < 2 || rect.height * scale < 2 {
+                setCropRect(nil)
+                return
+            }
+        }
+        // Settle on the pixel grid once per gesture, like the marquee.
+        setCropRect(finalizedCropRect(rect))
+    }
+
+    /// Arrow-key nudge of the whole rect (Shift: 10px, matching the
+    /// transform session), clamped to the canvas.
+    private func nudgeCropRect(_ dx: CGFloat, _ dy: CGFloat) {
+        guard let rect = cropRect else { return }
+        setCropRect(cropRectMoving(rect, dx: dx, dy: dy))
+    }
+
+    /// A new rect dragged out from `anchor`, constrained to `cropAspect`
+    /// and clamped to the canvas.
+    private func cropRectCreating(anchor: CGPoint, to point: CGPoint) -> CGRect {
+        let dirX: CGFloat = point.x >= anchor.x ? 1 : -1
+        let dirY: CGFloat = point.y >= anchor.y ? 1 : -1
+        var w = abs(point.x - anchor.x)
+        var h = abs(point.y - anchor.y)
+        if let aspect = cropAspect, aspect > 0 {
+            // Follow the dominant axis, then refit inside the canvas.
+            if w / aspect >= h { h = w / aspect } else { w = h * aspect }
+            let availW = dirX > 0 ? bounds.width - anchor.x : anchor.x
+            let availH = dirY > 0 ? bounds.height - anchor.y : anchor.y
+            if w > availW { w = availW; h = w / aspect }
+            if h > availH { h = availH; w = h * aspect }
+        }
+        return CGRect(
+            x: dirX > 0 ? anchor.x : anchor.x - w,
+            y: dirY > 0 ? anchor.y : anchor.y - h,
+            width: w, height: h)
+    }
+
+    /// `start` moved by (dx, dy), clamped so the whole rect stays on the
+    /// canvas.
+    private func cropRectMoving(_ start: CGRect, dx: CGFloat, dy: CGFloat) -> CGRect {
+        var origin = CGPoint(x: start.minX + dx, y: start.minY + dy)
+        origin.x = min(max(origin.x, 0), max(bounds.width - start.width, 0))
+        origin.y = min(max(origin.y, 0), max(bounds.height - start.height, 0))
+        return CGRect(origin: origin, size: start.size)
+    }
+
+    /// `start` resized so the dragged handle lands on `point` (already
+    /// clamped to the canvas), pinning the opposite side(s). The aspect is
+    /// the popup's when set; otherwise Shift on a CORNER constrains to the
+    /// rect's aspect at drag start. No flipping: a side dragged past its
+    /// opposite pins at 1px instead.
+    private func cropRectResizing(
+        _ start: CGRect, handle: TransformHandle, to point: CGPoint, shift: Bool
+    ) -> CGRect {
+        let unit = handle.unit
+        let aspect = cropAspect
+            ?? ((shift && handle.isCorner && start.height >= 1)
+                ? start.width / start.height : nil)
+
+        if let aspect = aspect, aspect > 0 {
+            if handle.isCorner {
+                // The opposite corner is the fixed point; the dominant axis
+                // of the drag drives the size, refit inside the canvas.
+                let fixedX = unit.x > 0 ? start.minX : start.maxX
+                let fixedY = unit.y > 0 ? start.minY : start.maxY
+                var w = max((point.x - fixedX) * unit.x, 1)
+                var h = max((point.y - fixedY) * unit.y, 1)
+                if w / aspect >= h { h = w / aspect } else { w = h * aspect }
+                let availW = unit.x > 0 ? bounds.width - fixedX : fixedX
+                let availH = unit.y > 0 ? bounds.height - fixedY : fixedY
+                if w > availW { w = availW; h = w / aspect }
+                if h > availH { h = availH; w = h * aspect }
+                return CGRect(
+                    x: unit.x > 0 ? fixedX : fixedX - w,
+                    y: unit.y > 0 ? fixedY : fixedY - h,
+                    width: w, height: h)
+            }
+            if unit.y == 0 {
+                // Left/right edge: the drag drives the width; the height
+                // follows the aspect, centered on the rect and shifted back
+                // inside the canvas where centering would leave it.
+                let fixedX = unit.x > 0 ? start.minX : start.maxX
+                var w = max((point.x - fixedX) * unit.x, 1)
+                var h = w / aspect
+                if h > bounds.height { h = bounds.height; w = h * aspect }
+                let y = min(max(start.midY - h / 2, 0), bounds.height - h)
+                return CGRect(
+                    x: unit.x > 0 ? fixedX : fixedX - w, y: y, width: w, height: h)
+            }
+            // Top/bottom edge: the mirror image.
+            let fixedY = unit.y > 0 ? start.minY : start.maxY
+            var h = max((point.y - fixedY) * unit.y, 1)
+            var w = h * aspect
+            if w > bounds.width { w = bounds.width; h = w / aspect }
+            let x = min(max(start.midX - w / 2, 0), bounds.width - w)
+            return CGRect(
+                x: x, y: unit.y > 0 ? fixedY : fixedY - h, width: w, height: h)
+        }
+
+        // Unconstrained: the dragged side(s) follow the pointer.
+        var minX = start.minX
+        var maxX = start.maxX
+        var minY = start.minY
+        var maxY = start.maxY
+        if unit.x < 0 { minX = min(point.x, maxX - 1) }
+        if unit.x > 0 { maxX = max(point.x, minX + 1) }
+        if unit.y < 0 { minY = min(point.y, maxY - 1) }
+        if unit.y > 0 { maxY = max(point.y, minY + 1) }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    /// The rect a gesture (or the commit) settles on: snapped to the pixel
+    /// grid, at least 1×1, pulled back inside the canvas; nil when the
+    /// canvas has no room for even that.
+    private func finalizedCropRect(_ rect: CGRect) -> CGRect? {
+        var r = rect.integral
+        r.size.width = min(max(r.width, 1), bounds.width)
+        r.size.height = min(max(r.height, 1), bounds.height)
+        r.origin.x = min(max(r.minX, 0), max(bounds.width - r.width, 0))
+        r.origin.y = min(max(r.minY, 0), max(bounds.height - r.height, 0))
+        guard r.width >= 1, r.height >= 1,
+              r.maxX <= bounds.width, r.maxY <= bounds.height
+        else { return nil }
+        return r
+    }
+
     // MARK: - Mouse
 
     override func mouseDown(with event: NSEvent) {
@@ -752,6 +1228,32 @@ final class ImageCanvasView: NSView {
             // With the text tool, this click only ends the session; the user
             // clicks again to start a new one.
             if tool == .text { return }
+        }
+        // Quick Mask mode: only brush (add coverage) and eraser (remove)
+        // strokes are live — they edit the mode's buffer. Every other
+        // tool's canvas interaction is inert, like the locked states'
+        // no-ops (zoom/pan/scroll live outside this view and stay live).
+        if quickMaskActive {
+            switch tool {
+            case .brush, .eraser:
+                beginStroke(at: clamp(point: convert(event.locationInWindow, from: nil)))
+            default:
+                NSSound.beep()
+            }
+            return
+        }
+        // Eyedropper: the tool itself, or Option temporarily borrowing it
+        // from brush/fill/gradient (whose Option is otherwise free — unlike
+        // the selection tools, where Option means subtract). The gesture
+        // latches so the drag keeps sampling, and the point stays UNCLAMPED
+        // so a sample off the canvas is a no-op rather than an edge pin.
+        // Sampling is not an edit: nothing here touches the document.
+        if tool == .eyedropper
+            || (event.modifierFlags.contains(.option)
+                && (tool == .brush || tool == .fill || tool == .gradient)) {
+            eyedropperDragActive = true
+            onEyedropper?(convert(event.locationInWindow, from: nil))
+            return
         }
         let point = clamp(point: convert(event.locationInWindow, from: nil))
         switch tool {
@@ -793,6 +1295,10 @@ final class ImageCanvasView: NSView {
             beginStroke(at: point)
         case .text:
             onTextClick?(point)
+        case .eyedropper:
+            break // handled before the switch
+        case .crop:
+            cropMouseDown(point, event)
         }
     }
 
@@ -804,6 +1310,10 @@ final class ImageCanvasView: NSView {
             onTransformMouseDragged?(raw, event.modifierFlags)
             return
         }
+        if eyedropperDragActive {
+            onEyedropper?(raw)
+            return
+        }
         switch tool {
         case .select:
             guard let anchor = dragAnchor else { return }
@@ -812,7 +1322,7 @@ final class ImageCanvasView: NSView {
             guard let anchor = dragAnchor else { return }
             setSelection(
                 shapeSelection(.ellipse(rect(from: anchor, to: clamp(point: raw)))))
-        case .lasso, .wand, .fill:
+        case .lasso, .wand, .fill, .eyedropper:
             break
         case .gradient:
             guard gradientAnchor != nil else { return }
@@ -829,6 +1339,8 @@ final class ImageCanvasView: NSView {
             continueStroke(to: raw)
         case .text:
             break
+        case .crop:
+            cropMouseDragged(raw, shift: event.modifierFlags.contains(.shift))
         }
     }
 
@@ -836,6 +1348,10 @@ final class ImageCanvasView: NSView {
         if isTransforming {
             onTransformMouseUp?(
                 convert(event.locationInWindow, from: nil), event.modifierFlags)
+            return
+        }
+        if eyedropperDragActive {
+            eyedropperDragActive = false
             return
         }
         switch tool {
@@ -861,7 +1377,7 @@ final class ImageCanvasView: NSView {
             } else {
                 commitSelection(shapeSelection(.rect(dragged.integral)), mode: mode, base: base)
             }
-        case .lasso, .wand, .fill:
+        case .lasso, .wand, .fill, .eyedropper:
             break
         case .gradient:
             guard let anchor = gradientAnchor else { return }
@@ -882,6 +1398,8 @@ final class ImageCanvasView: NSView {
             endStroke()
         case .text:
             break
+        case .crop:
+            cropMouseUp()
         }
     }
 
@@ -902,14 +1420,22 @@ final class ImageCanvasView: NSView {
     // MARK: - Brush / eraser strokes
 
     private func beginStroke(at point: CGPoint) {
-        // The begin callback opens the document's live-edit session and may
-        // refuse (hidden layer); it must not fire if the overlay is missing.
-        guard let context = ensureOverlayContext(), onStrokeBegin?() == true else {
+        // A Quick Mask stroke never touches the document: no begin
+        // callback (which would open a live-edit session, or refuse for
+        // reasons — hidden layer, adjustment routing — that only apply to
+        // document strokes), no selection confinement (the mode consumed
+        // the selection on entry), and the layer-vs-mask paint target is
+        // ignored — the stroke can only hit the mode's buffer.
+        strokeOnQuickMask = quickMaskActive
+        guard let context = ensureOverlayContext(),
+              strokeOnQuickMask || onStrokeBegin?() == true
+        else {
+            strokeOnQuickMask = false
             NSSound.beep()
             return
         }
         context.saveGState()
-        if let selection = selection {
+        if let selection = selection, !strokeOnQuickMask {
             // Strokes and erases confine to the active selection (exact
             // shape, not just the bounding box).
             selection.clip(context)
@@ -918,11 +1444,14 @@ final class ImageCanvasView: NSView {
         // for both tools. Painting a MASK ignores the color well entirely —
         // coverage, not color: white reveals, black hides — and carries the
         // opacity in the stroke's own alpha, since the mask-painting FFI
-        // takes no separate alpha the way rz_doc_painting_layer does.
-        strokeOnMask = paintsMask
-        let base: NSColor = strokeOnMask ? (tool == .eraser ? .black : .white) : paintColor
+        // takes no separate alpha the way rz_doc_painting_layer does. A
+        // Quick Mask stroke is coverage the same way: brush white (adds),
+        // eraser black (removes), paint color ignored.
+        strokeOnMask = strokeOnQuickMask ? false : paintsMask
+        let onCoverage = strokeOnMask || strokeOnQuickMask
+        let base: NSColor = onCoverage ? (tool == .eraser ? .black : .white) : paintColor
         let color = (base.usingColorSpace(.sRGB) ?? base)
-            .withAlphaComponent(strokeOnMask ? brushOpacity : 1)
+            .withAlphaComponent(onCoverage ? brushOpacity : 1)
         context.setStrokeColor(color.cgColor)
         context.setFillColor(color.cgColor)
         context.setLineWidth(brushSize)
@@ -968,6 +1497,14 @@ final class ImageCanvasView: NSView {
     /// the pre-stroke document and swaps in the resulting projection (which
     /// is what redraws the canvas — the overlay itself is never drawn).
     private func emitStrokeUpdate() {
+        // A Quick Mask stroke stays entirely in the view: refresh the
+        // rubylith from the buffer-plus-overlay composite so the tint
+        // tracks the stroke live; the buffer itself changes at mouse-up.
+        if strokeOnQuickMask {
+            rebuildQuickMaskImage(from: quickMaskComposited())
+            needsDisplay = true
+            return
+        }
         // A mask stroke never round-trips through the document mid-drag: it
         // ghosts on top of the unchanged projection and commits once.
         guard !strokeOnMask else {
@@ -987,6 +1524,17 @@ final class ImageCanvasView: NSView {
         overlayContext?.restoreGState()
         strokeActive = false
         strokeLastPoint = nil
+        if strokeOnQuickMask {
+            // The stroke lands in the Quick Mask buffer and nowhere else:
+            // no document edit, no undo step, no stroke-end callback (there
+            // is no live-edit session to close).
+            quickMaskBuffer = quickMaskComposited()
+            rebuildQuickMaskImage(from: quickMaskBuffer)
+            strokeOnQuickMask = false
+            clearOverlay()
+            needsDisplay = true
+            return
+        }
         let actionName = strokeActionName()
         if strokeOnMask, let data = overlayData {
             // The receiver's applyEdit consumes the bytes synchronously.
@@ -1017,6 +1565,15 @@ final class ImageCanvasView: NSView {
         strokeActive = false
         strokeOnMask = false
         clearOverlay()
+        if strokeOnQuickMask {
+            // The buffer never changed mid-stroke; dropping the overlay and
+            // restoring the tint from the buffer is the whole rollback (no
+            // live-edit session to unwind).
+            strokeOnQuickMask = false
+            rebuildQuickMaskImage(from: quickMaskBuffer)
+            needsDisplay = true
+            return
+        }
         onStrokeCancel?()
         needsDisplay = true
     }
@@ -1044,6 +1601,8 @@ final class ImageCanvasView: NSView {
         textView.string = string
         textView.textColor = paintColor
         textView.insertionPointColor = paintColor
+        textView.defaultParagraphStyle = TextLayer.paragraphStyle(textAlignment)
+        textView.alignment = textAlignment
         textView.minSize = NSSize(width: width, height: height)
         textView.maxSize = NSSize(width: width, height: 10_000_000)
         textView.textContainer?.widthTracksTextView = true
@@ -1064,17 +1623,22 @@ final class ImageCanvasView: NSView {
         window?.makeFirstResponder(textView)
     }
 
-    /// Applies the current textFont/paintColor to the whole active session
-    /// (called by the view controller when the options change).
+    /// Applies the current textFont/paintColor/textAlignment to the whole
+    /// active session (called by the view controller when the options
+    /// change).
     func updateActiveTextSessionStyle() {
         guard let textView = activeTextView else { return }
         textView.font = textFont
         textView.textColor = paintColor
         textView.insertionPointColor = paintColor
+        textView.defaultParagraphStyle = TextLayer.paragraphStyle(textAlignment)
+        textView.alignment = textAlignment
         if let storage = textView.textStorage, storage.length > 0 {
             let range = NSRange(location: 0, length: storage.length)
             storage.addAttribute(.font, value: textFont, range: range)
             storage.addAttribute(.foregroundColor, value: paintColor, range: range)
+            storage.addAttribute(
+                .paragraphStyle, value: TextLayer.paragraphStyle(textAlignment), range: range)
         }
         resizeActiveTextSession()
     }
@@ -1097,8 +1661,8 @@ final class ImageCanvasView: NSView {
     }
 
     /// Hands the session's text off as a DESCRIPTION — string, font, size,
-    /// color plus the origin and wrap width it was laid out at — so the
-    /// receiver can render it into a re-editable text layer. An
+    /// color and alignment plus the origin and wrap width it was laid out at
+    /// — so the receiver can render it into a re-editable text layer. An
     /// all-whitespace session cancels instead.
     func commitTextSession() {
         guard let textView = activeTextView else { return }
@@ -1121,7 +1685,9 @@ final class ImageCanvasView: NSView {
         }
 
         onCommitText?(
-            TextLayerPayload(string: string, font: sessionFont, color: sessionColor),
+            TextLayerPayload(
+                string: string, font: sessionFont, color: sessionColor,
+                alignment: textAlignment),
             origin, width, editingLayer)
         needsDisplay = true
     }
@@ -1188,6 +1754,13 @@ final class ImageCanvasView: NSView {
                 cancelLasso()
                 return
             }
+            // A crop session: Escape cancels it (the tool stays active).
+            // Gated on the rect, so with no session Escape falls through to
+            // deselect as always.
+            if tool == .crop, cropRect != nil {
+                cancelCropSession()
+                return
+            }
             setSelection(nil)
             return
         }
@@ -1196,9 +1769,16 @@ final class ImageCanvasView: NSView {
             closeLasso()
             return
         }
+        // Return commits a crop session; without one the key falls through
+        // untouched.
+        if (event.keyCode == 36 || event.keyCode == 76), tool == .crop, cropRect != nil {
+            commitCropSession()
+            return
+        }
         // Arrow-key nudges for the move tool (Shift: 10px). Down is +y in the
-        // flipped image coordinate space.
-        if tool == .move, !hasActiveTextSession,
+        // flipped image coordinate space. Inert in Quick Mask mode — a nudge
+        // is a document edit, and only the mode's buffer may change there.
+        if tool == .move, !hasActiveTextSession, !quickMaskActive,
            event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
             let step = event.modifierFlags.contains(.shift) ? 10 : 1
             switch event.keyCode {
@@ -1206,6 +1786,21 @@ final class ImageCanvasView: NSView {
             case 124: onMoveNudge?(step, 0); return // right
             case 125: onMoveNudge?(0, step); return // down
             case 126: onMoveNudge?(0, -step); return // up
+            default:
+                break
+            }
+        }
+        // Arrow-key nudges of a crop session's rect (Shift: 10px, matching
+        // the transform session). Gated on the rect: with no session the
+        // arrows fall through untouched.
+        if tool == .crop, cropRect != nil, !hasActiveTextSession,
+           event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+            let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
+            switch event.keyCode {
+            case 123: nudgeCropRect(-step, 0); return // left
+            case 124: nudgeCropRect(step, 0); return // right
+            case 125: nudgeCropRect(0, step); return // down
+            case 126: nudgeCropRect(0, -step); return // up
             default:
                 break
             }
@@ -1247,6 +1842,18 @@ final class ImageCanvasView: NSView {
             case "g":
                 onToolKey?(.gradient)
                 return
+            case "i":
+                onToolKey?(.eyedropper)
+                return
+            case "c":
+                onToolKey?(.crop)
+                return
+            case "q":
+                // Quick Mask toggle rides with the tool keys for the same
+                // reason they live here: a menu key equivalent would steal
+                // the letter from every text field.
+                onQuickMaskKey?()
+                return
             case "[" where tool == .brush || tool == .eraser:
                 onBrushSizeKey?(min(max(brushSize * 0.8, 1), 200))
                 return
@@ -1268,7 +1875,8 @@ final class ImageCanvasView: NSView {
             return
         }
         switch tool {
-        case .select, .ellipseSelect, .lasso, .wand, .fill, .gradient, .brush, .eraser:
+        case .select, .ellipseSelect, .lasso, .wand, .fill, .gradient, .brush, .eraser,
+            .eyedropper, .crop:
             addCursorRect(bounds, cursor: .crosshair)
         case .move:
             addCursorRect(bounds, cursor: moveDragOrigin == nil ? .openHand : .closedHand)

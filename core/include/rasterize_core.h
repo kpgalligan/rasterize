@@ -187,7 +187,7 @@ void rz_doc_free(RzDocument *doc);
  * rz_image_save. The writer enforces the reader's limits so every file it
  * produces can be read back: more than 1024 layers or a layer PNG over
  * 512 MiB is an error; layer names longer than 64 KiB are truncated on a
- * UTF-8 character boundary. Layout (little-endian): "RZDC", u32 version=2,
+ * UTF-8 character boundary. Layout (little-endian): "RZDC", u32 version=3,
  * u32 canvas width, u32 canvas height, u32 layer count; then per layer
  * bottom-to-top: u32 name byte length + UTF-8 name, i32 offset x, i32
  * offset y, f32 opacity, u32 blend mode, u8 visible, u32 PNG byte length +
@@ -196,8 +196,11 @@ void rz_doc_free(RzDocument *doc);
  * byte length + that many RAW coverage bytes when present (a mask is always
  * the layer's pixel count, so its dimensions are not stored twice), then u8
  * layer-metadata present and, when present, u32 byte length + UTF-8 bytes (see
- * "Layer metadata" below). Version-1 files still load, with no mask and no
- * metadata on any layer. */
+ * "Layer metadata" below); then the version-3 field, appended after all the
+ * version-2 fields (each older record is a strict prefix of the next): u8
+ * clipped (see "Clipping masks" below). Version-1 and version-2 files still
+ * load, missing fields taking their defaults: no mask and no metadata on any
+ * layer (v1), clipped false (v1 and v2). */
 bool rz_doc_save_native(const RzDocument *doc, const char *path,
                         char **err_out);
 
@@ -228,7 +231,9 @@ RzImage *rz_doc_layer_thumbnail(const RzDocument *doc, size_t idx,
  * (Cb, ab), source layer (Cs, as' = as * opacity) and blend function B:
  *   ao = as' + ab*(1-as')
  *   Co = ( as'*(1-ab)*Cs + as'*ab*B(Cb,Cs) + (1-as')*ab*Cb ) / ao   (ao > 0)
- * Invisible layers are skipped; areas a layer does not cover use Cb. */
+ * Invisible layers are skipped; areas a layer does not cover use Cb. Layers
+ * flagged clipped composite in groups with the unclipped layer beneath them
+ * (see "Clipping masks" below). */
 RzImage *rz_doc_flattened(const RzDocument *doc);
 
 /* Pure per-layer setters: return a NEW document (input untouched), NULL on
@@ -264,10 +269,13 @@ RzDocument *rz_doc_moving_layer(const RzDocument *doc, size_t from, size_t to);
  * modes and opacities are baked into the merged pixels (same math as the
  * projection, the lower compositing onto a transparent backdrop), so the
  * merged layer is RZ_BLEND_NORMAL at opacity 1.0; it keeps only the LOWER
- * layer's name and visibility and covers the union of both layers' extents.
- * An invisible upper layer is simply removed. NULL if idx == 0 / out of
- * range, or if the LOWER layer is hidden (the merge would discard the upper
- * layer's content). */
+ * layer's name, visibility and clipped flag and covers the union of both
+ * layers' extents. A CLIPPED upper layer is baked through its clipping: its
+ * contribution is alpha-limited to the lower layer's footprint (the same
+ * group kernel as the projection — see "Clipping masks" below). An invisible
+ * upper layer is simply removed. NULL if idx == 0 / out of range, or if the
+ * LOWER layer is hidden (the merge would discard the upper layer's
+ * content). */
 RzDocument *rz_doc_merging_down(const RzDocument *doc, size_t idx);
 
 /* Single-layer document containing the projection, named "Background". */
@@ -471,6 +479,47 @@ RzDocument *rz_doc_clear_selection(const RzDocument *doc, size_t idx,
 bool rz_selection_feather(uint8_t *mask, uint32_t width, uint32_t height,
                           float radius);
 
+/* Selection morphology: in-place companions to rz_selection_feather on the
+ * same width*height coverage buffers (row 0 top). Grow, shrink and border
+ * are defined on the signed Euclidean distance to the mask's 50% contour:
+ * coverage is first binarized at >= 128 — any feathered softness is
+ * DELIBERATELY resolved to its 50% contour — and an exact Euclidean
+ * distance transform both ways yields s = distance to the contour,
+ * positive inside. The canvas boundary is NOT a contour: only the
+ * inside/outside pixels actually present in the buffer count, so a full
+ * mask stays full under grow and shrink, an empty mask stays empty, and
+ * border maps both to empty (no contour, no band). New edges come back
+ * with a fresh ~1px anti-aliased ramp.
+ *
+ * All four return false on a NULL mask, zero dimensions, or a non-finite
+ * parameter; a parameter <= 0 returns true and leaves the mask untouched,
+ * exactly as rz_selection_feather treats its radius. */
+
+/* Grows (dilates) the selection by radius pixels of true Euclidean
+ * distance: coverage' = clamp(s + radius + 0.5, 0, 1) * 255, so edges move
+ * outward by radius and corners round into circular arcs. */
+bool rz_selection_grow(uint8_t *mask, uint32_t width, uint32_t height,
+                       float radius);
+
+/* Shrinks (erodes) the selection by radius pixels: grow with -radius, so
+ * edges move inward and outside corners round the same way. */
+bool rz_selection_shrink(uint8_t *mask, uint32_t width, uint32_t height,
+                         float radius);
+
+/* Replaces the selection with an anti-aliased band width_px wide straddling
+ * its 50% contour: coverage' = clamp(width_px/2 - |s| + 0.5, 0, 1) * 255. */
+bool rz_selection_border(uint8_t *mask, uint32_t width, uint32_t height,
+                         float width_px);
+
+/* Smooths the selection: a Gaussian blur with exactly the sigma mapping of
+ * rz_selection_feather, then a smoothstep contrast remap (t = v/255,
+ * v' = round(255 * t^2 * (3 - 2t))). Corners round and jagged edges
+ * reconcile while a long straight edge stays put — the blur is symmetric
+ * across it and smoothstep fixes 1/2. Unlike grow/shrink/border this never
+ * binarizes: soft coverage stays soft. */
+bool rz_selection_smooth(uint8_t *mask, uint32_t width, uint32_t height,
+                         float radius);
+
 /* ---- Layer masks --------------------------------------------------------
  *
  * A layer mask is a per-layer grayscale coverage channel gating the layer's
@@ -548,15 +597,57 @@ RzImage *rz_doc_layer_mask_image(const RzDocument *doc, size_t idx);
 bool rz_doc_layer_has_mask(const RzDocument *doc, size_t idx);
 bool rz_doc_layer_mask_enabled(const RzDocument *doc, size_t idx);
 
+/* ---- Clipping masks -----------------------------------------------------
+ *
+ * Every layer carries a CLIPPED flag (default false): a clipped layer is
+ * confined to the alpha footprint of the first unclipped layer beneath it —
+ * Photoshop clipping-mask semantics, "blend clipped layers as group". Group
+ * structure is purely POSITIONAL and re-derived at every composite: any
+ * unclipped layer is a BASE, and its clip group is the consecutive run of
+ * clipped layers immediately above it, so reordering or deleting layers
+ * needs no bookkeeping. A clipped layer at the BOTTOM of the stack (nothing
+ * unclipped below) has no base and composites as if unclipped.
+ *
+ * A base with no clipped layers above composites exactly as it always did.
+ * A non-empty group blends as one unit: the base renders into a private
+ * transparent buffer at FULL opacity in Normal mode, its layer mask applied
+ * as usual, and the buffer's alpha after that render is the group's
+ * footprint. Each visible clipped layer then composites into the buffer
+ * through the normal kernel — its own opacity, blend mode (blending against
+ * the base's content), mask and offset; an adjustment layer adjusts the
+ * buffer — and after each one the buffer's alpha is forced back to the
+ * footprint, so clipped layers never extend or shrink it. The finished
+ * buffer composites into the real backdrop with the BASE layer's blend mode
+ * and opacity. Hiding the base hides its whole group; invisible clipped
+ * layers are skipped.
+ *
+ * The flag rides along wherever the layer survives as itself (setters,
+ * painting, geometry, reordering), is copied by rz_doc_duplicating_layer,
+ * is baked through by rz_doc_merging_down (which keeps the LOWER layer's
+ * flag — see above), and round-trips through rz_doc_save_native: it is what
+ * bumped the RZDC format to version 3. */
+
+/* Pure setter: replaces layer idx's clipped flag. NULL on NULL doc or
+ * out-of-range idx. */
+RzDocument *rz_doc_with_layer_clipped(const RzDocument *doc, size_t idx,
+                                      bool clipped);
+
+/* The layer's clipped flag; false on NULL doc or out-of-range idx. */
+bool rz_doc_layer_clipped(const RzDocument *doc, size_t idx);
+
 /* ---- Layer metadata -----------------------------------------------------
  *
  * Every layer carries an optional metadata string: an OPAQUE, host-owned blob
- * that the core stores, copies and serializes but NEVER parses. Its meaning,
- * its schema and its versioning belong entirely to the host — the core only
- * guarantees the bytes come back exactly as they went in. Rasterize uses it to
- * keep the parameters a layer's pixels were rendered from (a text layer's
- * string, font, size, color, alignment), making the raster a cache of a
- * description the host can re-render.
+ * that the core stores, copies and serializes but never parses — with ONE
+ * exception: the compositor recognizes the {"type":"adjust", ...} shape
+ * (schema in core/src/adjust.rs; query with rz_doc_layer_is_adjustment below)
+ * and composites such a layer as a color adjustment of the backdrop instead
+ * of as pixels. For every other blob its meaning, its schema and its
+ * versioning belong entirely to the host — the core only guarantees the bytes
+ * come back exactly as they went in. Rasterize uses it to keep the parameters
+ * a layer's pixels were rendered from (a text layer's string, font, size,
+ * color, alignment), making the raster a cache of a description the host can
+ * re-render.
  *
  * Lifetime rules, all of them consequences of ONE principle — metadata is
  * attached to a layer's identity, not to its pixel values:
@@ -594,6 +685,16 @@ char *rz_doc_layer_meta(const RzDocument *doc, size_t idx);
  * payload. */
 RzDocument *rz_doc_with_layer_meta(const RzDocument *doc, size_t idx,
                                    const char *meta);
+
+/* Whether layer idx's metadata parses as a color-adjustment description
+ * ({"type":"adjust", ...} — schema in core/src/adjust.rs), i.e. whether the
+ * compositor treats the layer as an ADJUSTMENT LAYER: its own pixels are
+ * ignored and its contribution is the adjustment applied to the accumulated
+ * backdrop, pushed through its blend mode and scaled by opacity * mask
+ * coverage (an unmasked adjustment layer reaches the whole canvas; alpha is
+ * never changed). False on out-of-range idx, absent meta, or meta that does
+ * not parse as an adjustment (such a layer composites as plain raster). */
+bool rz_doc_layer_is_adjustment(const RzDocument *doc, size_t idx);
 
 /* Replaces layer idx's pixels with a copy of a straight-alpha RGBA8 buffer
  * (`src`, exactly w*h*4 bytes, row 0 top) — the same op as

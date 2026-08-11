@@ -13,6 +13,8 @@ enum EditorTool: Int {
     case fill
     case gradient
     case text
+    case eyedropper
+    case crop
 }
 
 /// What brush and eraser edit on the active layer: its pixels, or its layer
@@ -57,6 +59,7 @@ final class EditorViewController: NSViewController {
     private let fontLabel = NSTextField(labelWithString: "Font")
     private let fontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let fontSizeField = NSTextField(string: "48")
+    private let alignmentControl = NSSegmentedControl(frame: .zero)
     private let toleranceLabel = NSTextField(labelWithString: "Tolerance")
     private let toleranceSlider = NSSlider(
         value: 32, minValue: 0, maxValue: 255, target: nil, action: nil)
@@ -66,6 +69,20 @@ final class EditorViewController: NSViewController {
     private let gradientShapePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let gradientEndLabel = NSTextField(labelWithString: "End")
     private let gradientEndWell = NSColorWell()
+    // Eyedropper readout: a swatch of the last sampled color plus its hex
+    // and R G B A values. Display only — the sample itself lands in the
+    // shared paint color.
+    private let sampleSwatch = NSBox()
+    private let sampleValueLabel = NSTextField(labelWithString: "Click to sample")
+    // Crop: the aspect preset constraining drags and resizes, and the W/H
+    // fields (transform-bar conventions) that resize the session's rect
+    // keeping its top-left corner fixed.
+    private let cropAspectLabel = NSTextField(labelWithString: "Aspect")
+    private let cropAspectPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let cropSizeWLabel = NSTextField(labelWithString: "W")
+    private let cropSizeWField = NSTextField(string: "")
+    private let cropSizeHLabel = NSTextField(labelWithString: "H")
+    private let cropSizeHField = NSTextField(string: "")
     // Free Transform: numerics bound both ways to the session's parameters,
     // plus the sampler the single commit-time resample will use.
     private let transformAngleLabel = NSTextField(labelWithString: "Angle°")
@@ -74,8 +91,10 @@ final class EditorViewController: NSViewController {
     private let transformScaleXField = NSTextField(string: "100")
     private let transformScaleYLabel = NSTextField(labelWithString: "Y%")
     private let transformScaleYField = NSTextField(string: "100")
-    private let transformSizeLabel = NSTextField(labelWithString: "Size")
-    private let transformSizeValueLabel = NSTextField(labelWithString: "")
+    private let transformSizeLabel = NSTextField(labelWithString: "W")
+    private let transformSizeWField = NSTextField(string: "0")
+    private let transformSizeHLabel = NSTextField(labelWithString: "H")
+    private let transformSizeHField = NSTextField(string: "0")
     private let transformSamplerLabel = NSTextField(labelWithString: "Sampler")
     private let transformSamplerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
 
@@ -121,6 +140,9 @@ final class EditorViewController: NSViewController {
     private var paintColor: NSColor = .black
     private var fontFamily = "Helvetica Neue"
     private var fontSize: CGFloat = 48
+    /// Text-tool line alignment, in the options bar's segment order
+    /// (0 left, 1 center, 2 right).
+    private var textAlignment: NSTextAlignment = .left
     /// Sampler a Free Transform commit resamples with; remembered between
     /// sessions, like the paint options above.
     private var transformSampler = RZ_FILTER_CATMULL_ROM
@@ -180,9 +202,15 @@ final class EditorViewController: NSViewController {
             guard let self = self, let document = self.document, let doc = document.doc,
                   doc.layerInfo(document.activeLayerIndex)?.visible == true
             else { return false } // hidden layer: refuse instead of painting invisibly
+            // An adjustment layer's pixels are ignored by the compositor, so
+            // strokes ALWAYS land on its mask; with the mask deleted there
+            // is nothing left to paint — refuse (the canvas beeps).
+            let idx = document.activeLayerIndex
+            let isAdjustment = doc.layerIsAdjustment(idx)
+            if isAdjustment, !doc.layerHasMask(idx) { return false }
             // Decided once per stroke so a target change mid-drag can never
             // split it across the layer and its mask.
-            let targetsMask = self.paintsActiveMask
+            let targetsMask = isAdjustment || self.paintsActiveMask
             self.strokeTargetsMask = targetsMask
             self.canvas.paintsMask = targetsMask
             guard !targetsMask else {
@@ -280,11 +308,17 @@ final class EditorViewController: NSViewController {
             case .fill: self?.selectTool(.fill)
             case .gradient: self?.selectTool(.gradient)
             case .text: self?.selectTool(.text)
+            case .eyedropper: self?.selectTool(.eyedropper)
+            case .crop: self?.selectTool(.crop)
             }
         }
+        canvas.onQuickMaskKey = { [weak self] in self?.toggleQuickMask(nil) }
         canvas.onWandClick = { [weak self] point, mode in self?.wandClicked(point, mode: mode) }
         canvas.onFillClick = { [weak self] point in self?.fillClicked(point) }
+        canvas.onEyedropper = { [weak self] point in self?.sampleColor(at: point) }
         canvas.onGradientCommit = { [weak self] a, b in self?.gradientCommitted(a, b) }
+        canvas.onCropRectChange = { [weak self] _ in self?.updateCropFields() }
+        canvas.onCropCommit = { [weak self] rect in self?.cropCommitted(rect) }
         canvas.onBrushSizeKey = { [weak self] newSize in
             guard let self = self else { return }
             self.brushSize = newSize
@@ -339,6 +373,7 @@ final class EditorViewController: NSViewController {
         canvas.paintColor = paintColor
         canvas.brushOpacity = brushOpacity
         canvas.textFont = currentFont()
+        canvas.textAlignment = textAlignment
 
         // Toolbar: pill tool group left, ghost zoom cluster, crop pinned
         // right, on a card bar with a subtle bottom border.
@@ -364,6 +399,10 @@ final class EditorViewController: NSViewController {
                   action: #selector(selectGradientTool(_:))),
             .init(symbol: "textformat", fallback: "T", label: "Text",
                   action: #selector(selectTextTool(_:))),
+            .init(symbol: "eyedropper", fallback: "I", label: "Pick",
+                  action: #selector(selectEyedropperTool(_:))),
+            .init(symbol: "crop", fallback: "C", label: "Crop",
+                  action: #selector(selectCropTool(_:))),
         ])
         toolPill.translatesAutoresizingMaskIntoConstraints = false
         let zoomOutButton = GhostButton(
@@ -422,6 +461,9 @@ final class EditorViewController: NSViewController {
         }
         layersPanel.onPaintTargetChange = { [weak self] target in
             self?.setPaintTarget(target)
+        }
+        layersPanel.onAdjustmentEdit = { [weak self] idx in
+            self?.editAdjustmentLayer(idx)
         }
         layersPanel.onShowAssistant = { [weak self] in
             self?.panelTab = 1
@@ -536,7 +578,8 @@ final class EditorViewController: NSViewController {
 
         for label in [
             sizeLabel, opacityLabel, fontLabel, transformAngleLabel, transformScaleXLabel,
-            transformScaleYLabel, transformSizeLabel, transformSamplerLabel,
+            transformScaleYLabel, transformSizeLabel, transformSizeHLabel,
+            transformSamplerLabel, cropAspectLabel, cropSizeWLabel, cropSizeHLabel,
         ] {
             label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
         }
@@ -604,6 +647,29 @@ final class EditorViewController: NSViewController {
         fontSizeField.action = #selector(fontSizeChanged(_:))
         fontSizeField.widthAnchor.constraint(equalToConstant: 44).isActive = true
 
+        // Alignment: a compact 3-segment control in the payload's order
+        // (left, center, right). SF Symbols on the systems that have them,
+        // short labels otherwise.
+        alignmentControl.segmentCount = 3
+        alignmentControl.trackingMode = .selectOne
+        alignmentControl.controlSize = .small
+        alignmentControl.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        let alignmentSegments = [
+            ("text.alignleft", "Left"), ("text.aligncenter", "Center"),
+            ("text.alignright", "Right"),
+        ]
+        for (segment, (symbol, label)) in alignmentSegments.enumerated() {
+            if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
+                alignmentControl.setImage(image, forSegment: segment)
+            } else {
+                alignmentControl.setLabel(label, forSegment: segment)
+            }
+            alignmentControl.setToolTip("Align \(label.lowercased())", forSegment: segment)
+        }
+        alignmentControl.selectedSegment = Self.alignmentIndex(textAlignment)
+        alignmentControl.target = self
+        alignmentControl.action = #selector(alignmentChanged(_:))
+
         toleranceSlider.isContinuous = true
         toleranceSlider.controlSize = .small
         toleranceSlider.target = self
@@ -629,9 +695,23 @@ final class EditorViewController: NSViewController {
         gradientEndWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
         gradientEndWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
 
+        // Eyedropper readout: swatch + monospaced hex / R G B A values of the
+        // last sampled pixel. A plain bordered box, not a color well — it
+        // displays the sample, it is not an editable color.
+        sampleSwatch.boxType = .custom
+        sampleSwatch.titlePosition = .noTitle
+        sampleSwatch.borderWidth = 1
+        sampleSwatch.borderColor = NSColor.separatorColor
+        sampleSwatch.cornerRadius = 3
+        sampleSwatch.fillColor = .clear
+        sampleSwatch.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        sampleSwatch.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        sampleValueLabel.font = NSFont.monospacedSystemFont(
+            ofSize: NSFont.smallSystemFontSize, weight: .regular)
+
         // Free Transform numerics: the session's parameters, editable. Angle
-        // in degrees (clockwise), scales in percent; the resulting pixel
-        // size is derived, so it only reads back.
+        // in degrees (clockwise), scales in percent, and the layer's own
+        // scaled pixel size — W/H write the scales through the base size.
         let angleFormatter = NumberFormatter()
         angleFormatter.numberStyle = .decimal
         angleFormatter.usesGroupingSeparator = false
@@ -661,11 +741,24 @@ final class EditorViewController: NSViewController {
         transformScaleXField.action = #selector(transformScaleXChanged(_:))
         transformScaleYField.action = #selector(transformScaleYChanged(_:))
 
-        transformSizeValueLabel.font = NSFont.monospacedDigitSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        transformSizeValueLabel.textColor = .secondaryLabelColor
-        // Fixed width so the bar doesn't shuffle as the digits change.
-        transformSizeValueLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        // W/H: the layer's OWN scaled dimensions (|scale| × base pixel
+        // size), not the rotated bounding box — that is what keeps them
+        // cleanly two-way bindable. Whole pixels; the scale clamp bounds
+        // them, so the formatter only rules out empty/zero/negative input.
+        for field in [transformSizeWField, transformSizeHField] {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            formatter.usesGroupingSeparator = false
+            formatter.maximumFractionDigits = 0
+            formatter.minimum = 1
+            field.formatter = formatter
+            field.controlSize = .small
+            field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            field.target = self
+            field.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        }
+        transformSizeWField.action = #selector(transformSizeWChanged(_:))
+        transformSizeHField.action = #selector(transformSizeHChanged(_:))
 
         transformSamplerPopup.controlSize = .small
         transformSamplerPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -675,17 +768,46 @@ final class EditorViewController: NSViewController {
         transformSamplerPopup.action = #selector(transformSamplerChanged(_:))
         transformSamplerPopup.widthAnchor.constraint(equalToConstant: 170).isActive = true
 
+        // Crop: aspect presets, plus W/H fields following the transform
+        // bar's conventions (whole pixels; the formatter only rules out
+        // empty/zero/negative input, the action clamps to the canvas).
+        cropAspectPopup.controlSize = .small
+        cropAspectPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        cropAspectPopup.addItems(withTitles: Self.cropAspectTitles)
+        cropAspectPopup.target = self
+        cropAspectPopup.action = #selector(cropAspectChanged(_:))
+        cropAspectPopup.widthAnchor.constraint(equalToConstant: 100).isActive = true
+
+        for field in [cropSizeWField, cropSizeHField] {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            formatter.usesGroupingSeparator = false
+            formatter.maximumFractionDigits = 0
+            formatter.minimum = 1
+            field.formatter = formatter
+            field.controlSize = .small
+            field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            field.target = self
+            field.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        }
+        cropSizeWField.action = #selector(cropSizeWChanged(_:))
+        cropSizeHField.action = #selector(cropSizeHChanged(_:))
+
         let controls: [NSView] = [
             sizeLabel, sizeSlider, sizeField,
             opacityLabel, opacitySlider, opacityValueLabel,
             colorWell,
             toleranceLabel, toleranceSlider, toleranceValueLabel, contiguousCheck,
             gradientShapePopup, gradientEndLabel, gradientEndWell,
-            fontLabel, fontPopup, fontSizeField,
+            sampleSwatch, sampleValueLabel,
+            cropAspectLabel, cropAspectPopup,
+            cropSizeWLabel, cropSizeWField, cropSizeHLabel, cropSizeHField,
+            fontLabel, fontPopup, fontSizeField, alignmentControl,
             transformAngleLabel, transformAngleField,
             transformScaleXLabel, transformScaleXField,
             transformScaleYLabel, transformScaleYField,
-            transformSizeLabel, transformSizeValueLabel,
+            transformSizeLabel, transformSizeWField,
+            transformSizeHLabel, transformSizeHField,
             transformSamplerLabel, transformSamplerPopup,
         ]
         for control in controls {
@@ -751,6 +873,14 @@ final class EditorViewController: NSViewController {
         case .fill: canvas.tool = .fill
         case .gradient: canvas.tool = .gradient
         case .text: canvas.tool = .text
+        case .eyedropper: canvas.tool = .eyedropper
+        case .crop: canvas.tool = .crop
+        }
+        // Entering the crop tool: hand the canvas the popup's constraint
+        // and blank the W/H fields (the tool switch cleared any old rect).
+        if tool == .crop {
+            syncCropAspect()
+            updateCropFields()
         }
         // Only brush and eraser edit masks; picking one of the other paint
         // tools silently points the target back at the layer rather than
@@ -776,10 +906,16 @@ final class EditorViewController: NSViewController {
 
     /// Points brush/eraser at the layer or at its mask (a mask target falls
     /// back to the layer when there is no mask), and mirrors the choice into
-    /// the canvas and the layers panel's focus ring.
+    /// the canvas and the layers panel's focus ring. An adjustment layer's
+    /// PIXEL target is never selectable — the compositor ignores its pixels
+    /// — so any request lands on the mask while one exists.
     func setPaintTarget(_ target: PaintTarget) {
         let idx = document?.activeLayerIndex ?? 0
         var target = target
+        if document?.doc?.layerIsAdjustment(idx) == true,
+           document?.doc?.layerHasMask(idx) == true {
+            target = .mask
+        }
         if target == .mask, document?.doc?.layerHasMask(idx) != true {
             target = .layer
         }
@@ -792,9 +928,16 @@ final class EditorViewController: NSViewController {
     }
 
     /// Drops a mask target that no longer applies — the active layer changed
-    /// underneath it, or its mask was deleted, applied, or undone away.
+    /// underneath it, or its mask was deleted, applied, or undone away — and
+    /// forces the mask target whenever the active layer is an adjustment
+    /// layer (its pixels are pointless to paint).
     private func syncPaintTarget() {
         let idx = document?.activeLayerIndex ?? 0
+        if document?.doc?.layerIsAdjustment(idx) == true,
+           document?.doc?.layerHasMask(idx) == true {
+            setPaintTarget(.mask)
+            return
+        }
         guard paintTarget == .mask else {
             paintTargetLayer = idx
             return
@@ -819,6 +962,8 @@ final class EditorViewController: NSViewController {
     @objc func selectFillTool(_ sender: Any?) { selectTool(.fill) }
     @objc func selectGradientTool(_ sender: Any?) { selectTool(.gradient) }
     @objc func selectTextTool(_ sender: Any?) { selectTool(.text) }
+    @objc func selectEyedropperTool(_ sender: Any?) { selectTool(.eyedropper) }
+    @objc func selectCropTool(_ sender: Any?) { selectTool(.crop) }
 
     private func updateOptionsBar() {
         // A Free Transform session takes the whole bar over: it is modal on
@@ -839,6 +984,7 @@ final class EditorViewController: NSViewController {
         fontLabel.isHidden = !textTool
         fontPopup.isHidden = !textTool
         fontSizeField.isHidden = !textTool
+        alignmentControl.isHidden = !textTool
         for control in [toleranceLabel, toleranceSlider, toleranceValueLabel] as [NSView] {
             control.isHidden = !toleranceTool
         }
@@ -847,10 +993,20 @@ final class EditorViewController: NSViewController {
         gradientShapePopup.isHidden = !gradientTool
         gradientEndLabel.isHidden = !gradientTool
         gradientEndWell.isHidden = !gradientTool
+        let eyedropperTool = !transforming && tool == .eyedropper
+        sampleSwatch.isHidden = !eyedropperTool
+        sampleValueLabel.isHidden = !eyedropperTool
+        let cropTool = !transforming && tool == .crop
+        for control in [
+            cropAspectLabel, cropAspectPopup, cropSizeWLabel, cropSizeWField,
+            cropSizeHLabel, cropSizeHField,
+        ] as [NSView] {
+            control.isHidden = !cropTool
+        }
         for control in [
             transformAngleLabel, transformAngleField, transformScaleXLabel, transformScaleXField,
-            transformScaleYLabel, transformScaleYField, transformSizeLabel,
-            transformSizeValueLabel, transformSamplerLabel, transformSamplerPopup,
+            transformScaleYLabel, transformScaleYField, transformSizeLabel, transformSizeWField,
+            transformSizeHLabel, transformSizeHField, transformSamplerLabel, transformSamplerPopup,
         ] as [NSView] {
             control.isHidden = !transforming
         }
@@ -909,6 +1065,9 @@ final class EditorViewController: NSViewController {
 
     private func fillClicked(_ point: CGPoint) {
         guard let document = document else { return }
+        // A canvas click can't be blocked by menu validation: refuse a fill
+        // aimed at an adjustment layer's (ignored) pixels with the alert.
+        guard !refuseAdjustmentPixelEdit() else { return }
         let idx = document.activeLayerIndex
         let rgba = colorBytes(paintColor)
         let mask = canvas.selection?.maskBytes()
@@ -921,8 +1080,31 @@ final class EditorViewController: NSViewController {
         }
     }
 
+    /// Eyedropper sample (tool click/drag tick, or Option borrowing it from
+    /// brush/fill/gradient): reads the pixel under the cursor from the
+    /// FLATTENED COMPOSITE — the same projection the canvas draws and the
+    /// magic wand samples — and routes it into the shared paint color.
+    /// Points outside the canvas no-op. Sampling is NOT an edit: no undo
+    /// step, no change counting.
+    private func sampleColor(at point: CGPoint) {
+        guard let document = document,
+              let projection = document.projection ?? document.doc?.flattened(),
+              let sample = projection.pixelRGBA(
+                x: Int(floor(point.x)), y: Int(floor(point.y)))
+        else { return }
+        setPaintColor(NSColor(
+            srgbRed: CGFloat(sample.r) / 255, green: CGFloat(sample.g) / 255,
+            blue: CGFloat(sample.b) / 255, alpha: CGFloat(sample.a) / 255))
+        sampleSwatch.fillColor = paintColor
+        sampleValueLabel.stringValue =
+            "\(RasterImage.hexString(sample))  \(sample.r) \(sample.g) \(sample.b) \(sample.a)"
+    }
+
     private func gradientCommitted(_ a: CGPoint, _ b: CGPoint) {
         guard let document = document else { return }
+        // Same rule as fillClicked: a gradient drag ends on the canvas,
+        // outside menu validation's reach.
+        guard !refuseAdjustmentPixelEdit() else { return }
         let idx = document.activeLayerIndex
         let start = colorBytes(paintColor)
         let end = colorBytes(gradientEndWell.color)
@@ -938,6 +1120,99 @@ final class EditorViewController: NSViewController {
     private func currentFont() -> NSFont {
         NSFontManager.shared.font(withFamily: fontFamily, traits: [], weight: 5, size: fontSize)
             ?? .systemFont(ofSize: fontSize)
+    }
+
+    // MARK: - Crop tool
+
+    /// Aspect preset titles, in popup order. Free is unconstrained;
+    /// Original is the canvas's own aspect, computed at use time — a canvas
+    /// size change cancels the session (ImageCanvasView's image setter), so
+    /// "at session start" and "now" always agree.
+    private static let cropAspectTitles = [
+        "Free", "Original", "1:1", "4:3", "3:2", "16:9", "9:16",
+    ]
+
+    /// The popup's constraint as width / height; nil = free.
+    private func currentCropAspect() -> CGFloat? {
+        switch cropAspectPopup.indexOfSelectedItem {
+        case 1:
+            guard let doc = document?.doc, doc.width > 0, doc.height > 0 else { return nil }
+            return CGFloat(doc.width) / CGFloat(doc.height)
+        case 2: return 1
+        case 3: return 4.0 / 3.0
+        case 4: return 3.0 / 2.0
+        case 5: return 16.0 / 9.0
+        case 6: return 9.0 / 16.0
+        default: return nil
+        }
+    }
+
+    /// Pushes the popup's constraint to the canvas (tool entry, popup
+    /// changes, and document changes — Original tracks the new canvas).
+    private func syncCropAspect() {
+        canvas.cropAspect = currentCropAspect()
+    }
+
+    @objc private func cropAspectChanged(_ sender: Any?) {
+        syncCropAspect()
+    }
+
+    /// The rect → fields half of the binding (the fields' actions are the
+    /// other half); blank fields when no session is in progress.
+    private func updateCropFields() {
+        guard let rect = canvas.cropRect else {
+            cropSizeWField.stringValue = ""
+            cropSizeHField.stringValue = ""
+            return
+        }
+        cropSizeWField.stringValue = String(Int(rect.width.rounded()))
+        cropSizeHField.stringValue = String(Int(rect.height.rounded()))
+    }
+
+    @objc private func cropSizeWChanged(_ sender: Any?) {
+        resizeCropRect(width: CGFloat(cropSizeWField.doubleValue), height: nil)
+    }
+
+    @objc private func cropSizeHChanged(_ sender: Any?) {
+        resizeCropRect(width: nil, height: CGFloat(cropSizeHField.doubleValue))
+    }
+
+    /// Typing W or H resizes the crop rect keeping its TOP-LEFT corner
+    /// fixed, clamped to the canvas. Bad input (no session, non-positive)
+    /// just snaps the field back to the current value.
+    private func resizeCropRect(width: CGFloat?, height: CGFloat?) {
+        defer { updateCropFields() }
+        guard var rect = canvas.cropRect else { return }
+        if let width = width, width >= 1 {
+            rect.size.width = min(max(width.rounded(), 1), canvas.bounds.width - rect.minX)
+        }
+        if let height = height, height >= 1 {
+            rect.size.height = min(max(height.rounded(), 1), canvas.bounds.height - rect.minY)
+        }
+        canvas.setCropRect(rect)
+    }
+
+    /// Crop-tool commit (Return, or a double-click inside the rect): the
+    /// same core crop op as Image > Crop to Selection, with the same
+    /// semantics — the canvas shrinks to the rect and layers keep their
+    /// pixels outside it — as ONE undo step through applyEdit (which also
+    /// counts the edit change). The canvas has already cleared the session.
+    private func cropCommitted(_ rect: CGRect) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        let w = Int(rect.width)
+        let h = Int(rect.height)
+        guard w >= 1, h >= 1 else {
+            NSSound.beep()
+            return
+        }
+        let x = Int(rect.minX)
+        let y = Int(rect.minY)
+        document.applyEdit("Crop") { doc in
+            doc.cropped(x: x, y: y, w: w, h: h)
+        }
     }
 
     // MARK: - Text layers
@@ -1002,8 +1277,11 @@ final class EditorViewController: NSViewController {
         fontSizeField.integerValue = Int(fontSize.rounded())
         paintColor = payload.nsColor
         colorWell.color = paintColor
+        textAlignment = payload.nsAlignment
+        alignmentControl.selectedSegment = Self.alignmentIndex(textAlignment)
         canvas.textFont = font
         canvas.paintColor = paintColor
+        canvas.textAlignment = textAlignment
     }
 
     /// Commits a text session: a NEW text layer above the active one, or the
@@ -1224,8 +1502,9 @@ final class EditorViewController: NSViewController {
     }
 
     /// The parameters → fields half of the binding (the fields' actions are
-    /// the other half). The resulting pixel size is derived the same way the
-    /// core derives it, so it needs no core call either.
+    /// the other half). W/H are the layer's own scaled dimensions (|scale| ×
+    /// base pixel size, whole pixels) — not the rotated bounding box — so
+    /// they read straight off the scales without decomposing anything.
     private func updateTransformFields() {
         guard let session = transformSession else { return }
         transformAngleField.stringValue = Self.transformNumber(session.transform.degrees)
@@ -1233,9 +1512,10 @@ final class EditorViewController: NSViewController {
             Double(session.transform.scaleX) * 100)
         transformScaleYField.stringValue = Self.transformNumber(
             Double(session.transform.scaleY) * 100)
-        let extent = session.transform.matrix.destinationExtent(of: session.sourceRect)
-        transformSizeValueLabel.stringValue =
-            "\(Int(extent.width)) × \(Int(extent.height)) px"
+        transformSizeWField.stringValue = String(
+            Int((abs(session.transform.scaleX) * session.sourceRect.width).rounded()))
+        transformSizeHField.stringValue = String(
+            Int((abs(session.transform.scaleY) * session.sourceRect.height).rounded()))
         transformSamplerPopup.selectItem(at: Self.transformSamplerIndex(session.sampler))
     }
 
@@ -1343,6 +1623,35 @@ final class EditorViewController: NSViewController {
         updateTransformFields()
     }
 
+    /// W = |scaleX| × base width, so typing W sets scaleX = W / base width —
+    /// preserving the current sign, so a mirrored layer stays mirrored — and
+    /// runs through the same clamp the scale fields use. Bad input (the
+    /// formatter rejects non-numbers; a zero base cannot happen, the session
+    /// refuses empty layers) just snaps the field back to the current value.
+    @objc private func transformSizeWChanged(_ sender: Any?) {
+        guard let session = transformSession else { return }
+        let typed = CGFloat(transformSizeWField.doubleValue)
+        let base = session.sourceRect.width
+        if typed > 0, base > 0 {
+            let sign: CGFloat = session.transform.scaleX < 0 ? -1 : 1
+            transformSession?.transform.scaleX = LayerTransform.clampScale(sign * typed / base)
+            refreshTransformPreview()
+        }
+        updateTransformFields()
+    }
+
+    @objc private func transformSizeHChanged(_ sender: Any?) {
+        guard let session = transformSession else { return }
+        let typed = CGFloat(transformSizeHField.doubleValue)
+        let base = session.sourceRect.height
+        if typed > 0, base > 0 {
+            let sign: CGFloat = session.transform.scaleY < 0 ? -1 : 1
+            transformSession?.transform.scaleY = LayerTransform.clampScale(sign * typed / base)
+            refreshTransformPreview()
+        }
+        updateTransformFields()
+    }
+
     @objc private func transformSamplerChanged(_ sender: Any?) {
         let index = min(
             max(transformSamplerPopup.indexOfSelectedItem, 0), Self.transformSamplers.count - 1)
@@ -1443,8 +1752,16 @@ final class EditorViewController: NSViewController {
     }
 
     @objc private func colorChanged(_ sender: Any?) {
-        paintColor = colorWell.color
-        canvas.paintColor = paintColor
+        setPaintColor(colorWell.color)
+    }
+
+    /// The single write path for the shared paint color (color well changes,
+    /// eyedropper samples): brush, fill, gradient start, and text all read
+    /// `paintColor`, and the well and canvas mirror it.
+    private func setPaintColor(_ color: NSColor) {
+        paintColor = color
+        colorWell.color = color
+        canvas.paintColor = color
         canvas.updateActiveTextSessionStyle()
     }
 
@@ -1461,6 +1778,21 @@ final class EditorViewController: NSViewController {
         fontSizeField.integerValue = clamped
         fontSize = CGFloat(clamped)
         canvas.textFont = currentFont()
+        canvas.updateActiveTextSessionStyle()
+    }
+
+    /// Segment order of the alignment control, which is also the payload's
+    /// `alignments` order.
+    private static let alignmentSegmentValues: [NSTextAlignment] = [.left, .center, .right]
+
+    private static func alignmentIndex(_ alignment: NSTextAlignment) -> Int {
+        alignmentSegmentValues.firstIndex(of: alignment) ?? 0
+    }
+
+    @objc private func alignmentChanged(_ sender: Any?) {
+        let segment = min(max(alignmentControl.selectedSegment, 0), 2)
+        textAlignment = Self.alignmentSegmentValues[segment]
+        canvas.textAlignment = textAlignment
         canvas.updateActiveTextSessionStyle()
     }
 
@@ -1538,6 +1870,10 @@ final class EditorViewController: NSViewController {
         }
         canvas.needsDisplay = true
         syncPaintTarget()
+        // The canvas cancels a crop session itself when its size changed
+        // (the rect would be meaningless); the Original preset just needs to
+        // track the new canvas for the next drag.
+        syncCropAspect()
         updateStatus()
         updateActiveLayerRect()
         view.window?.subtitle = "\(doc.width) × \(doc.height) px"
@@ -1555,7 +1891,11 @@ final class EditorViewController: NSViewController {
             return
         }
         var dims = "\(doc.width) × \(doc.height) px"
-        if let selection = canvas.selectionRect {
+        if canvas.quickMaskActive {
+            // The selection segment's slot: the mode holds the selection as
+            // its editable buffer, so this is what "selected" currently is.
+            dims += " · Quick Mask"
+        } else if let selection = canvas.selectionRect {
             dims += " · sel \(Int(selection.width)) × \(Int(selection.height))"
         }
         statusDims.text = dims
@@ -1586,6 +1926,8 @@ final class EditorViewController: NSViewController {
         case .fill: return "Fill"
         case .gradient: return "Gradient"
         case .text: return "Text"
+        case .eyedropper: return "Eyedropper"
+        case .crop: return "Crop"
         }
     }
 
@@ -1629,6 +1971,9 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
+        // Menu validation already disables the one-shot filters on an
+        // adjustment layer; this backstop covers any path around it.
+        guard !refuseAdjustmentPixelEdit() else { return }
         document.applyToActiveLayer(actionName, op)
     }
 
@@ -1862,6 +2207,161 @@ final class EditorViewController: NSViewController {
         updateStatus()
     }
 
+    // MARK: - Clipping masks (Layer > Create/Release Clipping Mask)
+
+    /// Whether the ACTIVE layer is clipped to the layer below (drives the
+    /// menu item's Create/Release retitle).
+    private var activeLayerClipped: Bool {
+        guard let document = document, let doc = document.doc else { return false }
+        return doc.layerClipped(document.activeLayerIndex)
+    }
+
+    /// One toggling action, Photoshop-style: clips the active layer to the
+    /// layer below, or releases it. The bottom layer has nothing below to
+    /// clip to (validation disables the item; the core would composite it as
+    /// unclipped anyway). Grouping is positional in the core, so this flag
+    /// flip is the whole edit — one undo step.
+    @objc func toggleClippingMask(_ sender: Any?) {
+        guard let document = document, let doc = document.doc,
+              document.activeLayerIndex >= 1
+        else {
+            NSSound.beep()
+            return
+        }
+        let idx = document.activeLayerIndex
+        let clipped = !doc.layerClipped(idx)
+        document.applyEdit(clipped ? "Create Clipping Mask" : "Release Clipping Mask") {
+            $0.withLayerClipped(idx, clipped: clipped)
+        }
+        updateStatus()
+    }
+
+    // MARK: - Adjustment layers (Layer > New Adjustment Layer / Adjustment Options)
+
+    /// Whether the ACTIVE layer composites as an adjustment (asked of the
+    /// core — the authoritative parse). Gates every pixel-destructive path:
+    /// an adjustment layer's pixels are ignored, so editing them is
+    /// meaningless.
+    private var activeLayerIsAdjustment: Bool {
+        guard let document = document, let doc = document.doc else { return false }
+        return doc.layerIsAdjustment(document.activeLayerIndex)
+    }
+
+    /// Refuses a pixel edit aimed at the active adjustment layer with a
+    /// brief app-modal alert (the canvas-click paths — fill, gradient — are
+    /// outside menu validation's reach); true when refused. Move and Free
+    /// Transform deliberately do NOT come through here: they move the mask
+    /// footprint, which is meaningful.
+    private func refuseAdjustmentPixelEdit() -> Bool {
+        guard activeLayerIsAdjustment else { return false }
+        let alert = NSAlert()
+        alert.messageText = "Adjustment layers have no pixels to edit."
+        alert.informativeText = "Paint on the layer's mask instead, or target another layer."
+        alert.runModal()
+        return true
+    }
+
+    @objc func newAdjustmentLayerBCS(_ sender: Any?) { newAdjustmentLayer(.bcs) }
+    @objc func newAdjustmentLayerCurves(_ sender: Any?) { newAdjustmentLayer(.curves) }
+    @objc func newAdjustmentLayerLevels(_ sender: Any?) { newAdjustmentLayer(.levels) }
+    @objc func newAdjustmentLayerHueRotate(_ sender: Any?) { newAdjustmentLayer(.hueRotate) }
+    @objc func newAdjustmentLayerPosterize(_ sender: Any?) { newAdjustmentLayer(.posterize) }
+    @objc func newAdjustmentLayerThreshold(_ sender: Any?) { newAdjustmentLayer(.threshold) }
+    @objc func newAdjustmentLayerInvert(_ sender: Any?) { newAdjustmentLayer(.invert) }
+    @objc func newAdjustmentLayerGrayscale(_ sender: Any?) { newAdjustmentLayer(.grayscale) }
+    @objc func newAdjustmentLayerSepia(_ sender: Any?) { newAdjustmentLayer(.sepia) }
+
+    /// Layer > New Adjustment Layer > <op>. Parameterless ops create
+    /// immediately (one undo step); parameterized ops open their live-preview
+    /// sheet, and only its Apply commits. Either way the new layer's mask
+    /// captures the CURRENT selection (marquee left up, exactly like
+    /// Layer > Mask > From Selection) or is reveal-all.
+    private func newAdjustmentLayer(_ op: AdjustmentLayerOp) {
+        guard let document = document, document.doc != nil else {
+            NSSound.beep()
+            return
+        }
+        let selection = canvas.selection?.maskBytes()
+        guard op.isParameterless else {
+            guard let sheet = AdjustmentLayerSheetController.make(
+                op: op, document: document, canvas: canvas,
+                mode: .create(selection: selection),
+                onCommitted: { [weak self] idx in self?.didCommitAdjustmentLayer(idx) })
+            else {
+                NSSound.beep()
+                return
+            }
+            presentAsSheet(sheet)
+            return
+        }
+        guard let meta = AdjustmentLayerPayload(op: op).json() else {
+            NSSound.beep()
+            return
+        }
+        let below = document.activeLayerIndex
+        let before = document.doc
+        document.applyEdit("New \(op.displayName) Layer") {
+            $0.addingAdjustmentLayer(
+                above: below, name: op.displayName, meta: meta, selection: selection)
+        }
+        guard document.doc !== before else { return }
+        didCommitAdjustmentLayer(min(below + 1, document.doc.layerCount - 1))
+    }
+
+    /// Post-commit bookkeeping shared by every adjustment-layer commit (the
+    /// steps newLayer takes): select the layer, then refresh. syncPaintTarget
+    /// lands brush/eraser on the layer's mask.
+    private func didCommitAdjustmentLayer(_ idx: Int) {
+        guard let document = document, document.doc != nil else { return }
+        document.activeLayerIndex = min(max(idx, 0), document.doc.layerCount - 1)
+        syncPaintTarget()
+        layersPanel.reload()
+        updateStatus()
+        updateActiveLayerRect()
+    }
+
+    /// Layer > Adjustment Options… — enabled only when the active layer is
+    /// an adjustment layer whose op has a dialog.
+    @objc func adjustmentOptions(_ sender: Any?) {
+        guard let document = document else {
+            NSSound.beep()
+            return
+        }
+        editAdjustmentLayer(document.activeLayerIndex)
+    }
+
+    /// Reopens layer `idx`'s dialog pre-filled from its meta (the menu item
+    /// and the layers panel's thumbnail double-click both land here). OK
+    /// replaces only the meta as one undo step; Cancel leaves the document
+    /// untouched.
+    func editAdjustmentLayer(_ idx: Int) {
+        guard let document = document, let doc = document.doc,
+              doc.layerIsAdjustment(idx),
+              let payload = doc.adjustmentPayload(idx),
+              let op = payload.knownOp
+        else {
+            NSSound.beep()
+            return
+        }
+        // Editing a layer makes it the active one, like re-opening a text
+        // layer does.
+        if document.activeLayerIndex != idx {
+            document.activeLayerIndex = idx
+            syncPaintTarget()
+            layersPanel.reload()
+            updateStatus()
+            updateActiveLayerRect()
+        }
+        guard let sheet = AdjustmentLayerSheetController.make(
+            op: op, document: document, canvas: canvas,
+            mode: .edit(layer: idx, original: payload))
+        else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(sheet)
+    }
+
     @objc func toggleLayersPanel(_ sender: Any?) {
         layersPanelVisible.toggle()
         updatePanelVisibility()
@@ -2013,6 +2513,66 @@ final class EditorViewController: NSViewController {
         presentAsSheet(FeatherSheetController(canvas: canvas))
     }
 
+    // Select > Grow/Shrink/Border/Smooth Selection…: Feather's numeric
+    // dialog over the core's morphology ops. Like every selection change,
+    // not undoable — the result simply replaces the current selection.
+
+    @objc func growSelection(_ sender: Any?) {
+        presentSelectionMorphSheet(
+            title: "Grow selection", label: "Radius:",
+            hint: "Expands the selection outward by the radius, rounding "
+                + "corners into circular arcs.") { $0.grown(by: $1) }
+    }
+
+    @objc func shrinkSelection(_ sender: Any?) {
+        presentSelectionMorphSheet(
+            title: "Shrink selection", label: "Radius:",
+            hint: "Contracts the selection inward by the radius; a shrink "
+                + "past the middle deselects.") { $0.shrunk(by: $1) }
+    }
+
+    @objc func borderSelection(_ sender: Any?) {
+        presentSelectionMorphSheet(
+            title: "Border selection", label: "Width:",
+            hint: "Replaces the selection with a band of this width "
+                + "straddling its edge.") { $0.bordered(width: $1) }
+    }
+
+    @objc func smoothSelection(_ sender: Any?) {
+        presentSelectionMorphSheet(
+            title: "Smooth selection", label: "Radius:",
+            hint: "Rounds corners and evens out jagged edges; long straight "
+                + "edges stay put.") { $0.smoothed(by: $1) }
+    }
+
+    private func presentSelectionMorphSheet(
+        title: String, label: String, hint: String,
+        transform: @escaping (CanvasSelection, Double) -> CanvasSelection?
+    ) {
+        guard canvas.selection != nil else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(
+            SelectionMorphSheetController(
+                canvas: canvas, title: title, label: label, hint: hint,
+                transform: transform))
+    }
+
+    /// Select > Quick Mask Mode (or the bare Q on the canvas): the
+    /// selection becomes an editable coverage buffer under a rubylith tint
+    /// — brush adds, eraser removes — and converts back on exit. Pure view
+    /// state on the canvas: no document edit, no undo step, exactly like
+    /// the selection changes it stands in for.
+    @objc func toggleQuickMask(_ sender: Any?) {
+        guard document?.doc != nil else {
+            NSSound.beep()
+            return
+        }
+        canvas.toggleQuickMask()
+        updateStatus()
+    }
+
     /// Edit > Clear (⌫): erases the selected region out of the ACTIVE layer,
     /// in proportion to the selection's coverage — the pixels lose their
     /// color and become transparent, a feathered or anti-aliased edge fading
@@ -2023,6 +2583,9 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
+        // Validation disables the menu item on an adjustment layer; this
+        // backstop covers any path around it.
+        guard !refuseAdjustmentPixelEdit() else { return }
         let idx = document.activeLayerIndex
         let mask = selection.maskBytes()
         // Rewriting pixels invalidates a text layer's description, so this
@@ -2103,6 +2666,8 @@ extension EditorViewController: NSUserInterfaceValidations {
         #selector(selectFillTool(_:)): .fill,
         #selector(selectGradientTool(_:)): .gradient,
         #selector(selectTextTool(_:)): .text,
+        #selector(selectEyedropperTool(_:)): .eyedropper,
+        #selector(selectCropTool(_:)): .crop,
     ]
 
     /// True while a text-editing responder owns the keyboard: a field
@@ -2149,9 +2714,22 @@ extension EditorViewController: NSUserInterfaceValidations {
             let active = document?.activeLayerIndex ?? 0
             guard let info = document?.doc?.layerInfo(active) else { return false }
             return info.width > 0 && info.height > 0
+        case #selector(toggleQuickMask(_:)):
+            // The one Select-menu item that stays live inside the mode (it
+            // is the way out); checked while active.
+            if let menuItem = item as? NSMenuItem {
+                menuItem.state = canvas.quickMaskActive ? .on : .off
+            }
+            return true
+        case #selector(selectAll(_:)):
+            // Every other Select-menu item is disabled inside Quick Mask
+            // mode: the selection lives in the mode's buffer until exit.
+            return !canvas.quickMaskActive
         case #selector(cropToSelection(_:)), #selector(deselect(_:)),
-            #selector(invertSelection(_:)), #selector(featherSelection(_:)):
-            return canvas.selectionRect != nil
+            #selector(invertSelection(_:)), #selector(featherSelection(_:)),
+            #selector(growSelection(_:)), #selector(shrinkSelection(_:)),
+            #selector(borderSelection(_:)), #selector(smoothSelection(_:)):
+            return !canvas.quickMaskActive && canvas.selectionRect != nil
         case #selector(clearSelection(_:)):
             // Clear's key equivalent is a BARE ⌫: while it is enabled the
             // menu eats every Delete keystroke before the first responder
@@ -2161,9 +2739,29 @@ extension EditorViewController: NSUserInterfaceValidations {
             // canvas text session is already excluded by the session guard
             // above, and this also covers the window's field editors (the
             // options bar, the layer name field, the assistant's input),
-            // where ⌫ must keep deleting characters.
-            guard !isEditingText, canvas.selection != nil else { return false }
+            // where ⌫ must keep deleting characters. An adjustment layer has
+            // no pixels worth clearing.
+            guard !isEditingText, canvas.selection != nil, !activeLayerIsAdjustment
+            else { return false }
             return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
+        case #selector(showAdjustments(_:)), #selector(showBlur(_:)),
+            #selector(showHueRotate(_:)), #selector(showLevels(_:)),
+            #selector(showThreshold(_:)), #selector(showPosterize(_:)),
+            #selector(showPixelate(_:)), #selector(showAddNoise(_:)),
+            #selector(applyGrayscale(_:)), #selector(applyInvert(_:)),
+            #selector(applySepia(_:)), #selector(applySharpen(_:)),
+            #selector(applyEdgeDetect(_:)), #selector(applyEmboss(_:)):
+            // Destructive filters rewrite the active layer's PIXELS, which
+            // an adjustment layer doesn't meaningfully have; its parameters
+            // re-open through Adjustment Options… instead.
+            return !activeLayerIsAdjustment
+        case #selector(adjustmentOptions(_:)):
+            guard let document = document, let doc = document.doc else { return false }
+            let idx = document.activeLayerIndex
+            guard doc.layerIsAdjustment(idx),
+                  let op = doc.adjustmentPayload(idx)?.knownOp
+            else { return false }
+            return AdjustmentLayerSheetController.opHasDialog(op)
         case #selector(deleteLayer(_:)):
             return (document?.doc?.layerCount ?? 1) > 1
         case #selector(mergeDown(_:)):
@@ -2185,6 +2783,15 @@ extension EditorViewController: NSUserInterfaceValidations {
                 menuItem.state = activeLayerMaskEnabled ? .on : .off
             }
             return activeLayerHasMask
+        case #selector(toggleClippingMask(_:)):
+            // One item, retitled (Photoshop convention). The bottom layer has
+            // no layer below to clip to, so it stays disabled there; the
+            // no-document case is the guard at the top.
+            if let menuItem = item as? NSMenuItem {
+                menuItem.title =
+                    activeLayerClipped ? "Release Clipping Mask" : "Create Clipping Mask"
+            }
+            return (document?.activeLayerIndex ?? 0) >= 1
         case #selector(pasteAsNewLayer(_:)), #selector(paste(_:)):
             return NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
         case #selector(toggleLayersPanel(_:)):
@@ -2205,5 +2812,31 @@ extension EditorViewController: NSUserInterfaceValidations {
         default:
             return true
         }
+    }
+}
+
+// MARK: - Composite pixel sampling (eyedropper)
+
+extension RasterImage {
+    /// The straight (non-premultiplied) RGBA of one pixel, read in place
+    /// from the handle's pixel buffer (row 0 = top, matching the FFI
+    /// convention); nil outside the image. The buffer behind a handle never
+    /// changes, so this is safe and O(1) — used by the editor's eyedropper
+    /// and the agent's sample_color, both against the flattened composite.
+    func pixelRGBA(x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
+        let w = width
+        guard x >= 0, y >= 0, x < w, y < height,
+              let pixels = rz_image_pixels_rgba(ptr)
+        else { return nil }
+        let offset = (y * w + x) * 4
+        return (pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3])
+    }
+
+    /// Canonical hex form of a sampled pixel: #RRGGBB, with the alpha byte
+    /// appended (#RRGGBBAA) only when the pixel is not fully opaque —
+    /// matching the color syntax the paint tools accept.
+    static func hexString(_ rgba: (r: UInt8, g: UInt8, b: UInt8, a: UInt8)) -> String {
+        let base = String(format: "#%02X%02X%02X", rgba.r, rgba.g, rgba.b)
+        return rgba.a == 255 ? base : base + String(format: "%02X", rgba.a)
     }
 }
