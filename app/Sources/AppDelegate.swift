@@ -101,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(submenuItem(editMenu()))
         mainMenu.addItem(submenuItem(imageMenu()))
         mainMenu.addItem(submenuItem(layerMenu()))
+        mainMenu.addItem(submenuItem(selectMenu()))
         mainMenu.addItem(submenuItem(filtersMenu()))
         mainMenu.addItem(submenuItem(toolsMenu()))
         mainMenu.addItem(submenuItem(viewMenu()))
@@ -183,13 +184,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Copy", #selector(EditorViewController.copy(_:)), "c"))
         menu.addItem(
             item("Paste", Selector(("paste:")), "v"))
-        menu.addItem(.separator())
+        // Bare ⌫: U+0008 (NSBackspaceCharacter) is what AppKit matches the
+        // Delete key against and what it draws as ⌫ (U+007F is forward
+        // delete, ⌦). A modifier-less key equivalent is resolved ahead of the
+        // first responder, so EditorViewController.validateUserInterfaceItem
+        // keeps this item disabled unless there is something to clear and no
+        // text is being edited — otherwise it would swallow every Delete.
+        menu.addItem(
+            item("Clear", #selector(EditorViewController.clearSelection(_:)), "\u{8}", []))
+        return menu
+    }
+
+    /// Top-level Select menu (Photoshop's slot: after Layer, before Filters).
+    /// Enablement comes from EditorViewController.validateUserInterfaceItem,
+    /// keyed on the action selectors — so these items validate identically
+    /// wherever they live.
+    private func selectMenu() -> NSMenu {
+        let menu = NSMenu(title: "Select")
         menu.addItem(item("Select All", #selector(EditorViewController.selectAll(_:)), "a"))
         menu.addItem(item("Deselect", #selector(EditorViewController.deselect(_:)), "d"))
         menu.addItem(
             item(
                 "Invert Selection", #selector(EditorViewController.invertSelection(_:)), "i",
                 [.command, .shift]))
+        menu.addItem(.separator())
         menu.addItem(
             item("Feather Selection…", #selector(EditorViewController.featherSelection(_:))))
         return menu

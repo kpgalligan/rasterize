@@ -682,7 +682,7 @@ final class BlurSheetController: NSViewController {
 
 // MARK: - FeatherSheetController
 
-/// Edit > Feather Selection…: Gaussian-softens the current selection's
+/// Select > Feather Selection…: Gaussian-softens the current selection's
 /// coverage mask. Selections are not undoable and no pixels change, so
 /// there is no live preview — the marquee and dimming update on Apply.
 final class FeatherSheetController: NSViewController {

@@ -930,6 +930,40 @@ pub unsafe extern "C" fn rz_doc_gradient(
     }
 }
 
+/// Clears the selected region of layer `idx` to transparency, in PROPORTION
+/// to the selection's coverage: with coverage `c` at the pixel's canvas
+/// position, `alpha' = round(alpha * (255 - c) / 255)`, and a pixel whose
+/// alpha reaches 0 has its color zeroed while a partly surviving one keeps
+/// its RGB (straight alpha). `mask` is a canvas-sized coverage buffer;
+/// `w`/`h` must equal the canvas size. Only pixels change — the layer's
+/// mask, offset and properties survive. A mask selecting nothing succeeds
+/// with the pixels unchanged. NULL on NULL args, dimension mismatch, or
+/// out-of-range idx.
+///
+/// # Safety
+/// `doc` must be NULL or a valid live `RzDocument`; `mask` must be NULL or
+/// valid for at least `w * h` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_clear_selection(
+    doc: *const RzDocument,
+    idx: usize,
+    mask: *const u8,
+    w: u32,
+    h: u32,
+) -> *mut RzDocument {
+    unsafe {
+        doc_op(doc, |d| {
+            // Validate against the canvas dimensions before touching `mask`,
+            // so the raw read below is bounded by the canvas buffer size.
+            if w != d.width || h != d.height {
+                return None;
+            }
+            let len = (w as usize).checked_mul(h as usize)?;
+            d.clear_selection(idx, mask_slice(mask, len)?)
+        })
+    }
+}
+
 /// Gaussian-feathers a selection mask in place (width*height coverage
 /// bytes, row 0 top). Sampling clamps to the canvas edges, so a
 /// selection touching the border keeps full coverage there. Returns

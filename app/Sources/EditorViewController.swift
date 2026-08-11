@@ -1992,7 +1992,7 @@ final class EditorViewController: NSViewController {
         canvas.setSelection(nil)
     }
 
-    /// Edit > Invert Selection: the complement over the full canvas.
+    /// Select > Invert Selection: the complement over the full canvas.
     /// Selections are not undoable; the result simply replaces the
     /// current one (nil — a selection covering everything — deselects).
     @objc func invertSelection(_ sender: Any?) {
@@ -2003,7 +2003,7 @@ final class EditorViewController: NSViewController {
         canvas.setSelection(selection.inverted())
     }
 
-    /// Edit > Feather Selection…: radius sheet, then a Gaussian feather
+    /// Select > Feather Selection…: radius sheet, then a Gaussian feather
     /// of the selection's coverage mask.
     @objc func featherSelection(_ sender: Any?) {
         guard canvas.selection != nil else {
@@ -2011,6 +2011,25 @@ final class EditorViewController: NSViewController {
             return
         }
         presentAsSheet(FeatherSheetController(canvas: canvas))
+    }
+
+    /// Edit > Clear (⌫): erases the selected region out of the ACTIVE layer,
+    /// in proportion to the selection's coverage — the pixels lose their
+    /// color and become transparent, a feathered or anti-aliased edge fading
+    /// out across the fringe. Nothing selected means nothing to clear (the
+    /// menu item is disabled, so ⌫ stays free for whoever else wants it).
+    @objc func clearSelection(_ sender: Any?) {
+        guard let document = document, let selection = canvas.selection else {
+            NSSound.beep()
+            return
+        }
+        let idx = document.activeLayerIndex
+        let mask = selection.maskBytes()
+        // Rewriting pixels invalidates a text layer's description, so this
+        // goes through the rasterize prompt (Cancel abandons the edit).
+        document.applyRasterizingEdit("Clear", layer: idx) { doc in
+            doc.clearingSelection(idx, mask: mask)
+        }
     }
 
     @objc func copy(_ sender: Any?) {
@@ -2086,6 +2105,13 @@ extension EditorViewController: NSUserInterfaceValidations {
         #selector(selectTextTool(_:)): .text,
     ]
 
+    /// True while a text-editing responder owns the keyboard: a field
+    /// editor (every NSTextField in the window edits through one) or the
+    /// canvas text session's own text view — both are NSText subclasses.
+    private var isEditingText: Bool {
+        view.window?.firstResponder is NSText
+    }
+
     private static let zoomActions: Set<Selector> = [
         #selector(zoomInAction(_:)),
         #selector(zoomOutAction(_:)),
@@ -2126,6 +2152,18 @@ extension EditorViewController: NSUserInterfaceValidations {
         case #selector(cropToSelection(_:)), #selector(deselect(_:)),
             #selector(invertSelection(_:)), #selector(featherSelection(_:)):
             return canvas.selectionRect != nil
+        case #selector(clearSelection(_:)):
+            // Clear's key equivalent is a BARE ⌫: while it is enabled the
+            // menu eats every Delete keystroke before the first responder
+            // sees it (key equivalents are resolved ahead of keyDown). So it
+            // is enabled only with something to clear — a selection and an
+            // active layer — and never while text is being edited: the
+            // canvas text session is already excluded by the session guard
+            // above, and this also covers the window's field editors (the
+            // options bar, the layer name field, the assistant's input),
+            // where ⌫ must keep deleting characters.
+            guard !isEditingText, canvas.selection != nil else { return false }
+            return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
         case #selector(deleteLayer(_:)):
             return (document?.doc?.layerCount ?? 1) > 1
         case #selector(mergeDown(_:)):

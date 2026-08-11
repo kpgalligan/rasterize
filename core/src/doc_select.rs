@@ -1,9 +1,9 @@
 //! Selection-region and region-paint operations on the layered document:
-//! magic-wand masks, mask feathering, bucket fill, and two-color
-//! gradients.
+//! magic-wand masks, mask feathering, bucket fill, two-color gradients,
+//! and clearing a selected region to transparency.
 //!
-//! Conventions shared by all three: coordinates are canvas pixels (row 0
-//! top); similarity means every RGBA channel differs by at most
+//! Conventions shared by all of them: coordinates are canvas pixels (row
+//! 0 top); similarity means every RGBA channel differs by at most
 //! `tolerance`; selection masks are canvas-sized u8 coverage buffers
 //! (0 = outside, 255 = fully inside, intermediate values scale paint
 //! coverage at anti-aliased edges).
@@ -208,6 +208,63 @@ impl RzDocument {
             ];
             paint[3] *= f32::from(coverage) / 255.0;
             over_straight(paint, px);
+        }
+        self.with_layer_pixels(idx, pixels)
+    }
+
+    /// Clears the selected region of layer `idx` to transparency, in
+    /// PROPORTION to the selection's coverage. `mask` is the canvas-sized
+    /// coverage buffer `bucket_fill` and `gradient` take, mapped onto the
+    /// layer through its offset: a layer pixel takes the coverage `c` at
+    /// its own canvas position and its straight alpha becomes
+    /// `round(alpha * (255 - c) / 255)`, so full coverage erases it, half
+    /// coverage halves its alpha and zero coverage leaves it exactly as it
+    /// was — a feathered selection therefore cuts a soft-edged hole rather
+    /// than a hard one. A pixel whose alpha reaches 0 also has its RGB
+    /// zeroed; one that stays partly visible keeps its color untouched
+    /// (pixels are STRAIGHT alpha, so scaling color would darken the
+    /// surviving fringe). Layer pixels whose canvas position falls outside
+    /// the canvas are untouched (a selection never reaches there), and only
+    /// pixels change: the layer's mask, offset, name, opacity, blend mode,
+    /// visibility and `meta` all survive.
+    ///
+    /// None on a mask that is not canvas-sized or an out-of-range `idx`. A
+    /// mask that selects nothing is not an error: like `gradient` (which
+    /// has no seed to validate either) it succeeds, returning a document
+    /// whose pixels are unchanged.
+    pub fn clear_selection(&self, idx: usize, mask: &[u8]) -> Option<Self> {
+        if mask.len() != self.width as usize * self.height as usize {
+            return None;
+        }
+        let layer = self.layers.get(idx)?;
+        let (off_x, off_y) = layer.offset;
+        let mut pixels = (*layer.pixels).clone();
+        for (px_x, px_y, px) in pixels.enumerate_pixels_mut() {
+            let coverage = mask_coverage(
+                Some(mask),
+                self.width,
+                self.height,
+                off_x,
+                off_y,
+                px_x,
+                px_y,
+            );
+            // Unselected (and off-canvas) pixels keep every byte: the
+            // formula is the identity there anyway.
+            if coverage == 0 {
+                continue;
+            }
+            // round(alpha * (255 - coverage) / 255) in integers; the +127
+            // is the half step, and no product of two u8s can land exactly
+            // on a .5 tie (255 is odd).
+            let kept = u32::from(px.0[3]) * u32::from(255 - coverage);
+            let alpha = ((kept + 127) / 255) as u8;
+            if alpha == 0 {
+                // Fully cleared: remove all color too.
+                px.0 = [0, 0, 0, 0];
+            } else {
+                px.0[3] = alpha;
+            }
         }
         self.with_layer_pixels(idx, pixels)
     }

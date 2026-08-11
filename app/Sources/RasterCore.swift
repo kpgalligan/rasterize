@@ -505,6 +505,20 @@ final class RasterDocument {
         }
     }
 
+    /// Erases the selected region of layer `idx` in PROPORTION to the
+    /// selection's coverage: `mask` is a canvas-sized coverage buffer (the
+    /// one fill and gradient take), so full coverage erases a pixel, partial
+    /// coverage scales its alpha down — a feathered selection cuts a
+    /// soft-edged hole. Everything else about the layer survives.
+    func clearingSelection(_ idx: Int, mask: [UInt8]) -> RasterDocument? {
+        guard isValidIndex(idx), mask.count == width * height else { return nil }
+        return mask.withUnsafeBufferPointer { buffer in
+            wrap(
+                rz_doc_clear_selection(
+                    ptr, idx, buffer.baseAddress, UInt32(width), UInt32(height)))
+        }
+    }
+
     private func withMask<T>(_ mask: [UInt8]?, _ body: (UnsafePointer<UInt8>?) -> T) -> T {
         guard let mask = mask, mask.count == width * height else { return body(nil) }
         return mask.withUnsafeBufferPointer { body($0.baseAddress) }

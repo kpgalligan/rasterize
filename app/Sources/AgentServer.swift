@@ -120,6 +120,7 @@ final class AgentServer {
         case "modify_selection": return try modifySelection(a)
         case "fill": return try fill(a)
         case "gradient": return try gradient(a)
+        case "clear_selection": return try clearSelection(a)
         case "rotate": return try rotate(a)
         case "flip": return try flip(a)
         case "crop": return try crop(a)
@@ -1417,6 +1418,24 @@ final class AgentServer {
             ["ok": true, "layer": index], layer: index, rasterizedText: rasterized)
     }
 
+    /// clear_selection: erases the window's live selection out of a layer,
+    /// proportionally to its coverage (a feathered selection leaves a soft
+    /// edge). Nothing selected is a recoverable error, not a whole-layer wipe.
+    private func clearSelection(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        let index = try paintLayerIndex(a, document)
+        guard let mask = selectionMask(document) else {
+            throw ToolError(
+                message: "There is no selection to clear. Make one first with select_rect, "
+                    + "select_ellipse, select_polygon or select_magic_wand.")
+        }
+        let rasterized = try performPixelEdit(document, "Clear", pixelLayer: index) { doc in
+            doc.clearingSelection(index, mask: mask)
+        }
+        return try pixelEditResult(
+            ["ok": true, "layer": index], layer: index, rasterizedText: rasterized)
+    }
+
     /// sRGB straight-alpha bytes of a parsed color.
     private func colorRGBA(_ color: NSColor) throws -> [UInt8] {
         guard let c = color.usingColorSpace(.sRGB) else {
@@ -2124,6 +2143,18 @@ final class AgentServer {
                     "layer": index,
                     "document_id": docID,
                 ], required: ["x0", "y0", "x1", "y1", "start_color"]),
+            tool(
+                "clear_selection",
+                "Erases the active selection out of a layer: the selected pixels lose "
+                    + "their color and become transparent, in proportion to the selection's "
+                    + "coverage, so a feathered selection cuts a soft-edged hole. Only the "
+                    + "one layer changes — whatever sits below it shows through. Errors "
+                    + "when nothing is selected; make a selection with the select_* tools "
+                    + "first.",
+                [
+                    "layer": index,
+                    "document_id": docID,
+                ]),
             tool(
                 "rotate", "Rotates the whole document clockwise.",
                 [

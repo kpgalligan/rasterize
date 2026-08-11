@@ -57,10 +57,14 @@ decoding, encoding, and manipulation.
   cancels), and a magic wand (W) with tolerance + contiguous options that
   samples the flattened composite; combine selections with Shift (add),
   Option (subtract), or Shift+Option (intersect), invert (⇧⌘I) or soften
-  them with Edit > Feather Selection…, and the marching ants trace the
+  them with Select > Feather Selection…, and the marching ants trace the
   true selection contour — disjoint pieces and holes each get their own
   dashed loop; selections confine brush, eraser, fill, and gradient, dim
-  the outside, and define Crop
+  the outside, and define Crop. Delete (Edit > Clear, ⌫) clears the
+  selected region of the active layer to transparency in one undo step,
+  and does it proportionally where coverage is partial — a feathered
+  selection leaves a soft-edged hole, not a hard one (text layers ask to
+  rasterize first, as any destructive edit does)
 - Fill tool (K): bucket flood fill on the active layer with tolerance,
   and a Gradient tool (G): drag to paint linear or radial two-color
   gradients (default fades the paint color to transparent), both
@@ -110,7 +114,7 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 38 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 39 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG), layer operations, blend modes, layer masks (add revealing,
 hiding or from the selection; enable, apply, or delete), filters, geometry —
@@ -123,7 +127,9 @@ and `edit_text_layer` for re-editable text layers (`get_document` reports
 each layer's text parameters) and `add_text` for the rasterizing variant —
 selections (rect/ellipse/polygon/magic wand with add/subtract/intersect
 modes, plus invert and feather — shared with the UI and
-honored by every paint tool), bucket fill, gradients,
+honored by every paint tool), `clear_selection` to clear the window's
+current selection on a layer (partial coverage clears proportionally),
+bucket fill, gradients,
 undo/redo, and exporting. Agent edits run on the main thread through the same edit path
 as the UI: each tool call is one undo step, marks the document edited, and
 updates the open window live. With [goose](https://github.com/aaif-goose/goose):

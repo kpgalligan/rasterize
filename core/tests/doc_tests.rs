@@ -2229,6 +2229,264 @@ fn gradient_linear_radial_and_offsets() {
     unsafe { rz_doc_free(out3) };
 }
 
+// ------------------------------------------------ clearing a selection --
+
+/// `rz_doc_clear_selection` with the canvas-sized `mask`, asserting success
+/// and freeing the old handle.
+fn clear_sel(doc: *mut RzDocument, idx: usize, mask: &[u8]) -> *mut RzDocument {
+    let (w, h) = unsafe { (rz_doc_width(doc), rz_doc_height(doc)) };
+    assert_eq!(mask.len(), (w * h) as usize, "the mask is canvas-sized");
+    apply(doc, |d| unsafe {
+        rz_doc_clear_selection(d, idx, mask.as_ptr(), w, h)
+    })
+}
+
+/// The pinned formula: straight alpha scaled by the UNselected fraction.
+fn cleared_alpha(alpha: u8, coverage: u8) -> u8 {
+    (f32::from(alpha) * f32::from(255 - coverage) / 255.0).round() as u8
+}
+
+#[test]
+fn clear_selection_erases_covered_pixels_and_leaves_the_rest() {
+    let dir = TempDir::new().unwrap();
+    let doc = doc_from(&dir, "clear-full.png", &opaque_pattern(6, 4));
+    let before = layer_pixels(doc, 0);
+
+    // Fully selected rect [1, 4) x [1, 3).
+    let mask = rect_mask(6, 4, 1, 1, 4, 3);
+    let cleared = clear_sel(unsafe { rz_doc_clone(doc) }, 0, &mask);
+    let after = layer_pixels(cleared, 0);
+    for y in 0..4 {
+        for x in 0..6 {
+            let inside = (1..4).contains(&x) && (1..3).contains(&y);
+            let got = pixel(&after, 6, x, y);
+            if inside {
+                assert_eq!(got, [0, 0, 0, 0], "({x},{y}) cleared: alpha AND color");
+            } else {
+                assert_eq!(
+                    got,
+                    pixel(&before, 6, x, y),
+                    "({x},{y}) is outside the selection: byte-identical"
+                );
+            }
+        }
+    }
+    assert_eq!(layer_pixels(doc, 0), before, "the operation is pure");
+
+    // A mask that selects nothing is not an error: it succeeds unchanged.
+    let empty = vec![0u8; 24];
+    let untouched = clear_sel(unsafe { rz_doc_clone(doc) }, 0, &empty);
+    assert_eq!(layer_pixels(untouched, 0), before);
+
+    for d in [doc, cleared, untouched] {
+        unsafe { rz_doc_free(d) };
+    }
+}
+
+#[test]
+fn clear_selection_is_proportional_and_never_scales_color() {
+    let dir = TempDir::new().unwrap();
+    // One opaque-ish (alpha 200) row of distinct colors under a coverage ramp.
+    const RAMP: [u8; 5] = [0, 64, 128, 192, 255];
+    let img = RgbaImage::from_fn(5, 1, |x, _| {
+        Rgba([(x * 40 + 11) as u8, 90, (250 - x * 30) as u8, 200])
+    });
+    let doc = doc_from(&dir, "clear-ramp.png", &img);
+    let before = layer_pixels(doc, 0);
+    let cleared = clear_sel(doc, 0, &RAMP);
+    let after = layer_pixels(cleared, 0);
+
+    for (x, &c) in RAMP.iter().enumerate() {
+        let src = pixel(&before, 5, x as u32, 0);
+        let got = pixel(&after, 5, x as u32, 0);
+        let want = cleared_alpha(src[3], c);
+        assert_eq!(got[3], want, "coverage {c}: alpha {} -> {want}", src[3]);
+        if want == 0 {
+            assert_eq!(got, [0, 0, 0, 0], "coverage {c}: nothing of it remains");
+        } else {
+            assert_eq!(
+                [got[0], got[1], got[2]],
+                [src[0], src[1], src[2]],
+                "coverage {c}: STRAIGHT alpha, so the color must not be scaled"
+            );
+        }
+    }
+
+    // The pinned numbers, so a plausible-but-wrong formula cannot pass.
+    let alphas: Vec<u8> = (0..5).map(|x| pixel(&after, 5, x, 0)[3]).collect();
+    assert_eq!(
+        alphas,
+        vec![200, 150, 100, 49, 0],
+        "alpha * (255 - c) / 255"
+    );
+
+    unsafe { rz_doc_free(cleared) };
+}
+
+#[test]
+fn clear_selection_scales_a_semi_transparent_pixel() {
+    let dir = TempDir::new().unwrap();
+    let doc = doc_from(&dir, "clear-semi.png", &solid(2, 1, [10, 20, 30, 128]));
+    let cleared = clear_sel(doc, 0, &[128, 255]);
+    let px = layer_pixels(cleared, 0);
+    assert_eq!(
+        pixel(&px, 2, 0, 0),
+        [10, 20, 30, 64],
+        "alpha 128 under half coverage -> 64, color kept"
+    );
+    assert_eq!(pixel(&px, 2, 1, 0), [0, 0, 0, 0]);
+    unsafe { rz_doc_free(cleared) };
+}
+
+#[test]
+fn clear_selection_maps_canvas_coordinates_on_an_offset_layer() {
+    let dir = TempDir::new().unwrap();
+    // 5x3 canvas; an opaque 4x2 layer at (-1, 1) hangs off the left edge.
+    let doc = ffi_mask_fixture(&dir, "clear-offset", (5, 3), (4, 2), (-1, 1));
+    let before = layer_pixels(doc, 1);
+    // Distinctive per-canvas-pixel coverage so a mis-mapping cannot pass.
+    let sel = selection(5, 3, |x, y| (x * 50 + y * 17) as u8);
+    let cleared = clear_sel(unsafe { rz_doc_clone(doc) }, 1, &sel);
+    let after = layer_pixels(cleared, 1);
+
+    let mut changed = 0;
+    for ly in 0..2u32 {
+        for lx in 0..4u32 {
+            let cx = lx as i64 - 1;
+            let cy = ly as i64 + 1;
+            let src = pixel(&before, 4, lx, ly);
+            let got = pixel(&after, 4, lx, ly);
+            if cx < 0 {
+                assert_eq!(got, src, "layer ({lx},{ly}) is off-canvas: untouched");
+                continue;
+            }
+            let c = sel[cy as usize * 5 + cx as usize];
+            assert_eq!(
+                got[3],
+                cleared_alpha(src[3], c),
+                "layer ({lx},{ly}) -> canvas ({cx},{cy}), coverage {c}"
+            );
+            assert_eq!(
+                [got[0], got[1], got[2]],
+                [src[0], src[1], src[2]],
+                "partly surviving pixel keeps its color"
+            );
+            changed += usize::from(got[3] != src[3]);
+        }
+    }
+    assert!(changed >= 5, "the selection did reach the layer");
+    assert_eq!(
+        pixel(&after, 4, 0, 0),
+        BLUE,
+        "the off-canvas column stays fully opaque blue"
+    );
+
+    unsafe { rz_doc_free(cleared) };
+    unsafe { rz_doc_free(doc) };
+}
+
+#[test]
+fn clear_selection_keeps_the_layer_mask_meta_and_properties() {
+    let dir = TempDir::new().unwrap();
+    // A 4x2 layer at (1, 0) on a 4x2 canvas: its last column is off-canvas.
+    let doc = ffi_mask_fixture(&dir, "clear-props", (4, 2), (4, 2), (1, 0));
+    let doc = apply(doc, |d| unsafe { rz_doc_with_layer_opacity(d, 1, 0.5) });
+    let doc = apply(doc, |d| unsafe {
+        rz_doc_with_layer_blend_mode(d, 1, BLEND_MULTIPLY)
+    });
+    let doc = apply(doc, |d| unsafe { rz_doc_with_layer_visible(d, 1, false) });
+    let sel = selection(4, 2, |x, _| if x < 2 { 255 } else { 0 });
+    let doc = apply(doc, |d| unsafe {
+        rz_doc_adding_layer_mask(d, 1, MASK_FROM_SELECTION, sel.as_ptr(), 4, 2)
+    });
+    let doc = set_meta(doc, 1, TEXT_META);
+    let mask_before = ffi_mask_bytes(doc, 1);
+
+    let cleared = clear_sel(doc, 1, &[255u8; 8]);
+
+    assert_eq!(layer_name(cleared, 1), "Top");
+    assert_eq!(unsafe { rz_doc_layer_opacity(cleared, 1) }, 0.5);
+    assert_eq!(
+        unsafe { rz_doc_layer_blend_mode(cleared, 1) },
+        BLEND_MULTIPLY
+    );
+    assert!(!unsafe { rz_doc_layer_visible(cleared, 1) });
+    assert_eq!(layer_offset(cleared, 1), (1, 0));
+    assert_eq!(layer_dims(cleared, 1), (4, 2));
+    assert_eq!(ffi_mask_flags(cleared, 1), (true, true));
+    assert_eq!(
+        ffi_mask_bytes(cleared, 1),
+        mask_before,
+        "the layer's own mask is untouched"
+    );
+    assert_eq!(
+        ffi_meta(cleared, 1).as_deref(),
+        Some(TEXT_META),
+        "meta survives: the host decides text-layer policy, not the core"
+    );
+
+    // The pixels the selection reached are gone; the column past the canvas
+    // edge (layer x 3 -> canvas x 4) is not.
+    let px = layer_pixels(cleared, 1);
+    for y in 0..2 {
+        for x in 0..3 {
+            assert_eq!(pixel(&px, 4, x, y), [0, 0, 0, 0], "({x},{y}) cleared");
+        }
+        assert_eq!(pixel(&px, 4, 3, y), BLUE, "off-canvas column untouched");
+    }
+
+    unsafe { rz_doc_free(cleared) };
+}
+
+#[test]
+fn clear_selection_rejects_bad_index_size_and_null() {
+    let dir = TempDir::new().unwrap();
+    let doc = doc_from(&dir, "clear-errors.png", &opaque_pattern(4, 3));
+    let mask = [255u8; 12];
+    unsafe {
+        assert!(
+            rz_doc_clear_selection(ptr::null(), 0, mask.as_ptr(), 4, 3).is_null(),
+            "NULL document"
+        );
+        assert!(
+            rz_doc_clear_selection(doc, 0, ptr::null(), 4, 3).is_null(),
+            "NULL mask"
+        );
+        assert!(
+            rz_doc_clear_selection(doc, 1, mask.as_ptr(), 4, 3).is_null(),
+            "index past the top of the stack"
+        );
+        assert!(rz_doc_clear_selection(doc, usize::MAX, mask.as_ptr(), 4, 3).is_null());
+        // The dimensions are checked against the CANVAS before the buffer is
+        // read, so a wrong pair can only reject it, never widen the read.
+        assert!(
+            rz_doc_clear_selection(doc, 0, mask.as_ptr(), 3, 4).is_null(),
+            "transposed dimensions"
+        );
+        assert!(
+            rz_doc_clear_selection(doc, 0, mask.as_ptr(), 4, 2).is_null(),
+            "short mask"
+        );
+        assert!(rz_doc_clear_selection(doc, 0, mask.as_ptr(), 0, 0).is_null());
+    }
+    assert_eq!(
+        layer_pixels(doc, 0),
+        opaque_pattern(4, 3).into_raw(),
+        "a refused call leaves the input document untouched"
+    );
+
+    // The safe API refuses the same inputs.
+    let model = RzDocument::from_pixels(opaque_pattern(4, 3));
+    assert!(
+        model.clear_selection(0, &[255u8; 11]).is_none(),
+        "a mask that is not canvas-sized"
+    );
+    assert!(model.clear_selection(9, &[255u8; 12]).is_none());
+    assert!(model.clear_selection(0, &[255u8; 12]).is_some());
+
+    unsafe { rz_doc_free(doc) };
+}
+
 // ---------------------------------------------------- selection feather --
 
 /// w*h mask, 255 inside the half-open rect [x0, x1) x [y0, y1), 0 outside.

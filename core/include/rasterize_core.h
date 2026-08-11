@@ -437,6 +437,32 @@ RzDocument *rz_doc_gradient(const RzDocument *doc, size_t idx, float x0,
                             const uint8_t *end_rgba, RzGradientKind kind,
                             const uint8_t *mask);
 
+/* Clears the selected region of layer idx to transparency, in PROPORTION to
+ * the selection's coverage. `mask` is a CANVAS-sized coverage buffer as
+ * described above (w and h must equal the canvas size), mapped onto the layer
+ * through its offset: each layer pixel takes the coverage c at its own canvas
+ * position and its straight alpha becomes
+ *
+ *     alpha' = round(alpha * (255 - c) / 255)
+ *
+ * so full coverage erases the pixel, half coverage halves its alpha, and zero
+ * coverage leaves it byte-identical — a feathered or anti-aliased selection
+ * cuts a SOFT-edged hole, which is the point of the operation. A pixel whose
+ * alpha reaches 0 also has its COLOR zeroed (nothing of it remains); one that
+ * stays partly visible keeps its RGB exactly, since pixels are straight alpha
+ * and scaling color would darken the surviving fringe. Layer pixels lying
+ * outside the canvas are untouched (a selection never reaches past the
+ * canvas), and only pixels change: the layer's mask, offset, name, opacity,
+ * blend mode, visibility and metadata all survive.
+ *
+ * A mask that selects nothing is NOT an error — as with rz_doc_gradient there
+ * is no seed to validate, so the call succeeds and the pixels come back
+ * unchanged. NULL on a NULL doc or mask, w/h that are not the canvas size, or
+ * an out-of-range idx. */
+RzDocument *rz_doc_clear_selection(const RzDocument *doc, size_t idx,
+                                   const uint8_t *mask, uint32_t w,
+                                   uint32_t h);
+
 /* Gaussian-feathers a selection mask in place (width*height coverage
  * bytes, row 0 top). Sampling clamps to the canvas edges, so a
  * selection touching the border keeps full coverage there. false on
@@ -535,9 +561,9 @@ bool rz_doc_layer_mask_enabled(const RzDocument *doc, size_t idx);
  * Lifetime rules, all of them consequences of ONE principle — metadata is
  * attached to a layer's identity, not to its pixel values:
  *   - It rides along wherever the layer survives as itself: the pure per-layer
- *     setters, pixel replacement, painting/fill/gradient, mask operations,
- *     duplicating (the copy gets it too), reordering, adding and removing
- *     layers, whole-document rotate/flip/crop/canvas-resize/resize.
+ *     setters, pixel replacement, painting/fill/gradient/clear, mask
+ *     operations, duplicating (the copy gets it too), reordering, adding and
+ *     removing layers, whole-document rotate/flip/crop/canvas-resize/resize.
  *   - It is DROPPED exactly where a layer stops being itself, alongside the
  *     mask: rz_doc_merging_down clears it on the merged layer (the pixels are
  *     now two layers' worth, so nothing describes them) and rz_doc_flattening
