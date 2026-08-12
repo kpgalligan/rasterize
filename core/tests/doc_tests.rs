@@ -561,6 +561,7 @@ fn setters_are_pure_and_validate() {
         assert_eq!(rz_doc_layer_width(doc, 5), 0);
         assert_eq!(rz_doc_layer_height(doc, 5), 0);
         assert!(rz_doc_layer_image(doc, 5).is_null());
+        assert!(rz_doc_layer_canvas_image(doc, 5).is_null());
         assert!(rz_doc_layer_thumbnail(doc, 5, 10).is_null());
     }
     unsafe { rz_doc_free(doc) };
@@ -943,6 +944,82 @@ fn geometry_fixture(dir: &TempDir, tag: &str, offset: (i32, i32)) -> *mut RzDocu
     apply(doc, |d| unsafe {
         rz_doc_with_layer_offset(d, 1, offset.0, offset.1)
     })
+}
+
+/// The single-layer counterpart of flatten: raw pixels at the layer's
+/// offset, everything else transparent, and the compositing properties
+/// (opacity, blend mode, visibility) deliberately ignored.
+#[test]
+fn layer_canvas_image_places_raw_pixels() {
+    let dir = TempDir::new().unwrap();
+    // 7x5 canvas, 3x2 multiply layer at (2, 1).
+    let doc = geometry_fixture(&dir, "canvasimg", (2, 1));
+    let raw = layer_pixels(doc, 1);
+
+    let placed = unsafe { rz_doc_layer_canvas_image(doc, 1) };
+    assert!(!placed.is_null());
+    assert_eq!(
+        unsafe { (rz_image_width(placed), rz_image_height(placed)) },
+        (7, 5),
+        "canvas-sized, not layer-sized"
+    );
+    let px = img_pixels(placed);
+    for y in 0..5usize {
+        for x in 0..7usize {
+            let i = (y * 7 + x) * 4;
+            if (2..5).contains(&x) && (1..3).contains(&y) {
+                let j = ((y - 1) * 3 + (x - 2)) * 4;
+                assert_eq!(px[i..i + 4], raw[j..j + 4], "layer pixel at ({x}, {y})");
+            } else {
+                assert_eq!(
+                    px[i..i + 4],
+                    [0, 0, 0, 0],
+                    "clear outside the layer ({x}, {y})"
+                );
+            }
+        }
+    }
+    unsafe { rz_image_free(placed) };
+
+    // Opacity and visibility are compositing properties: the pixels a copy
+    // would take are the same with the layer at 25% and hidden.
+    let faded = apply(unsafe { rz_doc_clone(doc) }, |d| unsafe {
+        rz_doc_with_layer_opacity(d, 1, 0.25)
+    });
+    let hidden = apply(faded, |d| unsafe { rz_doc_with_layer_visible(d, 1, false) });
+    let unchanged = unsafe { rz_doc_layer_canvas_image(hidden, 1) };
+    assert!(!unchanged.is_null());
+    assert_eq!(
+        img_pixels(unchanged),
+        px,
+        "opacity and visibility must not apply"
+    );
+    unsafe {
+        rz_image_free(unchanged);
+        rz_doc_free(hidden);
+        rz_doc_free(doc);
+    }
+
+    // A layer hanging off the top-left corner keeps only what is on canvas.
+    let off = geometry_fixture(&dir, "canvasimg-off", (-1, -1));
+    let off_raw = layer_pixels(off, 1);
+    let clipped = unsafe { rz_doc_layer_canvas_image(off, 1) };
+    assert!(!clipped.is_null());
+    let cpx = img_pixels(clipped);
+    // Only the layer's bottom-right 2x1 corner is still on canvas: its
+    // pixels (1, 1) and (2, 1) land at canvas (0, 0) and (1, 0).
+    let layer_px = |x: usize, y: usize| {
+        let i = (y * 3 + x) * 4;
+        off_raw[i..i + 4].to_vec()
+    };
+    assert_eq!(cpx[0..4], layer_px(1, 1)[..]);
+    assert_eq!(cpx[4..8], layer_px(2, 1)[..]);
+    // Row 1 of the canvas is past the layer's 2-pixel height: clear.
+    assert_eq!(cpx[7 * 4..7 * 4 + 4], [0, 0, 0, 0]);
+    unsafe {
+        rz_image_free(clipped);
+        rz_doc_free(off);
+    }
 }
 
 #[test]
@@ -1678,6 +1755,7 @@ fn null_safety_sweep() {
         assert_eq!(rz_doc_layer_width(null_doc, 0), 0);
         assert_eq!(rz_doc_layer_height(null_doc, 0), 0);
         assert!(rz_doc_layer_image(null_doc, 0).is_null());
+        assert!(rz_doc_layer_canvas_image(null_doc, 0).is_null());
         assert!(rz_doc_layer_thumbnail(null_doc, 0, 16).is_null());
         assert!(rz_doc_flattened(null_doc).is_null());
 

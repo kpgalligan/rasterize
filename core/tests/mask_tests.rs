@@ -1133,6 +1133,21 @@ fn ffi_layer_image_and_thumbnail_ignore_the_mask() {
         layer_pixels(doc, 1),
         "rz_doc_layer_image stays unmasked"
     );
+    // Same for the canvas-placed variant, which is what Copy puts on the
+    // clipboard: a hide-all mask must not empty the copy.
+    let masked_canvas = unsafe { rz_doc_layer_canvas_image(hidden, 1) };
+    let plain_canvas = unsafe { rz_doc_layer_canvas_image(doc, 1) };
+    assert!(!masked_canvas.is_null() && !plain_canvas.is_null());
+    assert_eq!(
+        img_pixels(masked_canvas),
+        img_pixels(plain_canvas),
+        "rz_doc_layer_canvas_image stays unmasked"
+    );
+    unsafe {
+        rz_image_free(masked_canvas);
+        rz_image_free(plain_canvas);
+    }
+
     let masked_thumb = unsafe { rz_doc_layer_thumbnail(hidden, 1, 4) };
     let plain_thumb = unsafe { rz_doc_layer_thumbnail(doc, 1, 4) };
     assert!(!masked_thumb.is_null() && !plain_thumb.is_null());

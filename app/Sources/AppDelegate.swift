@@ -182,6 +182,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Redo", Selector(("redo:")), "z", [.command, .shift]))
         menu.addItem(.separator())
         menu.addItem(item("Copy", #selector(EditorViewController.copy(_:)), "c"))
+        // Photoshop's pair and its shortcut: Copy takes the active layer,
+        // Copy Merged the flattened composite.
+        menu.addItem(
+            item(
+                "Copy Merged", #selector(EditorViewController.copyMerged(_:)), "c",
+                [.command, .shift]))
         menu.addItem(
             item("Paste", Selector(("paste:")), "v"))
         // Bare ⌫: U+0008 (NSBackspaceCharacter) is what AppKit matches the

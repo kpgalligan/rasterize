@@ -2398,20 +2398,38 @@ final class EditorViewController: NSViewController {
         }
     }
 
+    /// Edit > Copy: the ACTIVE LAYER's pixels within the selection, the way
+    /// Photoshop's Copy works — raw layer pixels, so opacity, blend mode and
+    /// the layer mask stay out of it and the copy round-trips through Paste
+    /// as New Layer unchanged. Everything the layer does not reach inside the
+    /// selection comes out transparent.
     @objc func copy(_ sender: Any?) {
-        guard let projection = document?.projection else {
+        guard let doc = document?.doc else {
             NSSound.beep()
             return
         }
-        let source: RasterImage?
+        copyToPasteboard(doc.layerCanvasImage(document?.activeLayerIndex ?? 0))
+    }
+
+    /// Edit > Copy Merged: the same region of the flattened composite —
+    /// every visible layer, with opacity, blend modes, masks, clipping and
+    /// adjustment layers all applied, as one image.
+    @objc func copyMerged(_ sender: Any?) {
+        copyToPasteboard(document?.projection)
+    }
+
+    /// Shared tail of both copies: crop the canvas-sized source to the
+    /// selection's BOUNDS (the whole canvas without a selection) and write it
+    /// as TIFF + PNG. Non-rectangular selections copy their bounding box —
+    /// the pixels outside the shape come along, as they always have.
+    private func copyToPasteboard(_ source: RasterImage?) {
+        var image = source
         if let selection = canvas.selectionRect {
-            source = projection.cropped(
+            image = image?.cropped(
                 x: Int(selection.minX), y: Int(selection.minY),
                 w: Int(selection.width), h: Int(selection.height))
-        } else {
-            source = projection
         }
-        guard let cgImage = source?.makeCGImage() else {
+        guard let cgImage = image?.makeCGImage() else {
             NSSound.beep()
             return
         }
@@ -2605,6 +2623,11 @@ extension EditorViewController: NSUserInterfaceValidations {
                     activeLayerClipped ? "Release Clipping Mask" : "Create Clipping Mask"
             }
             return (document?.activeLayerIndex ?? 0) >= 1
+        case #selector(copy(_:)):
+            // Copy takes the ACTIVE LAYER's pixels, and an adjustment layer
+            // has none worth copying — its effect lives in the composite, so
+            // Copy Merged is the one that captures it and stays enabled.
+            return !activeLayerIsAdjustment
         case #selector(pasteAsNewLayer(_:)), #selector(paste(_:)):
             return NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
         case #selector(toggleLayersPanel(_:)):

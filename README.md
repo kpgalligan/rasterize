@@ -132,7 +132,14 @@ decoding, encoding, and manipulation.
   description on confirm, keeping the pixels. The native `.rz` format stores
   the description alongside the pixels, so text stays editable across
   save and open
-- Full undo/redo, copy to clipboard, recent files
+- **Copy** (⌘C) puts the active layer's own pixels within the selection on
+  the clipboard — raw, so layer opacity, blend mode and the layer mask stay
+  out of it and the copy round-trips through Paste as New Layer unchanged —
+  while **Copy Merged** (⇧⌘C) takes the same region of the flattened
+  composite, every visible layer with its opacity, blend modes, masks,
+  clipping and adjustment layers applied. Both copy the selection's bounding
+  box (the whole canvas with nothing selected) as TIFF and PNG
+- Full undo/redo, recent files
 - Drag image files onto a window to open them; File > New from Clipboard (⌘N)
 - Checkerboard backdrop for transparency
 

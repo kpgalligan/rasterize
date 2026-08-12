@@ -277,6 +277,27 @@ pub unsafe extern "C" fn rz_doc_layer_image(doc: *const RzDocument, idx: usize) 
     }
 }
 
+/// A layer's own pixels on a transparent CANVAS-sized image, placed at its
+/// offset — the single-layer counterpart of `rz_doc_flattened`. Opacity,
+/// blend mode, visibility and the layer mask are ignored: they describe how
+/// the layer composites, not what its pixels are. NULL on NULL doc or
+/// out-of-range idx.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_layer_canvas_image(
+    doc: *const RzDocument,
+    idx: usize,
+) -> *mut RzImage {
+    unsafe {
+        doc_get(doc, ptr::null_mut(), |d| {
+            let pixels = d.layer_canvas_image(idx)?;
+            Some(Box::into_raw(Box::new(RzImage { pixels })))
+        })
+    }
+}
+
 /// Aspect-fit thumbnail of a layer with longest side `max(1, max_side)`
 /// (Triangle filter; tiny layers are upscaled). NULL on NULL doc,
 /// out-of-range idx, an empty-sized layer, or an absurd target size.

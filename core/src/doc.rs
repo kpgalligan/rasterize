@@ -438,6 +438,36 @@ impl RzDocument {
         quantize(&acc, self.width, self.height)
     }
 
+    /// Layer `idx`'s OWN pixels on a transparent canvas-sized buffer, placed
+    /// at its offset and clipped to the canvas — the single-layer counterpart
+    /// of [`Self::flattened`], and what a layer-scoped copy puts on the
+    /// clipboard.
+    ///
+    /// Deliberately raw: opacity, blend mode, visibility and the layer mask
+    /// are COMPOSITING properties — they describe how the layer meets the
+    /// stack, not what its pixels are — so they play no part here and a
+    /// hidden layer still yields its pixels. Straight alpha throughout, so
+    /// nothing is un/premultiplied and the bytes copy across verbatim.
+    ///
+    /// None for an out-of-range `idx`; an empty canvas or a layer entirely
+    /// off-canvas simply yields a fully transparent buffer.
+    pub fn layer_canvas_image(&self, idx: usize) -> Option<RgbaImage> {
+        let layer = self.layers.get(idx)?;
+        let mut out = RgbaImage::new(self.width, self.height);
+        let (off_x, off_y) = layer.offset;
+        for (lx, ly, px) in layer.pixels.enumerate_pixels() {
+            // Layer space -> canvas space in i64: an offset near i32::MIN/MAX
+            // must not wrap into the canvas.
+            let cx = i64::from(off_x) + i64::from(lx);
+            let cy = i64::from(off_y) + i64::from(ly);
+            if cx < 0 || cy < 0 || cx >= i64::from(self.width) || cy >= i64::from(self.height) {
+                continue;
+            }
+            out.put_pixel(cx as u32, cy as u32, *px);
+        }
+        Some(out)
+    }
+
     /// Pure setter: replaces layer `idx`'s name.
     pub fn with_layer_name(&self, idx: usize, name: &str) -> Option<Self> {
         self.with_layer(idx, |l| l.name = name.to_string())

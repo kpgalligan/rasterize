@@ -222,6 +222,12 @@ uint32_t rz_doc_layer_height(const RzDocument *doc, size_t idx);
 /* Copy of a layer's pixels at the layer's own size. */
 RzImage *rz_doc_layer_image(const RzDocument *doc, size_t idx);
 
+/* A layer's own pixels on a transparent CANVAS-sized image, placed at its
+ * offset — the single-layer counterpart of rz_doc_flattened. Opacity, blend
+ * mode, visibility and the layer mask are ignored: they say how the layer
+ * composites, not what its pixels are. */
+RzImage *rz_doc_layer_canvas_image(const RzDocument *doc, size_t idx);
+
 /* Aspect-fit thumbnail of a layer, longest side == max_side (min 1). */
 RzImage *rz_doc_layer_thumbnail(const RzDocument *doc, size_t idx,
                                 uint32_t max_side);

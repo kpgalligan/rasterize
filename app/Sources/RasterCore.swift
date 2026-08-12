@@ -348,6 +348,15 @@ final class RasterDocument {
         return wrapImage(rz_doc_layer_image(ptr, idx))
     }
 
+    /// A layer's own pixels on a transparent canvas-sized image, placed at
+    /// its offset — `flattened()` for a single layer, and what Copy puts on
+    /// the clipboard. Opacity, blend mode, visibility and the mask are
+    /// ignored: they say how the layer composites, not what its pixels are.
+    func layerCanvasImage(_ idx: Int) -> RasterImage? {
+        guard isValidIndex(idx) else { return nil }
+        return wrapImage(rz_doc_layer_canvas_image(ptr, idx))
+    }
+
     /// Aspect-fit thumbnail of a layer, longest side == maxSide.
     func layerThumbnail(_ idx: Int, maxSide: Int) -> RasterImage? {
         guard isValidIndex(idx), maxSide > 0 else { return nil }
