@@ -657,6 +657,26 @@ extension AgentServer {
                     "document_id": docID,
                 ], required: ["x", "y"]),
             tool(
+                "select_subject",
+                "Selects the prominent foreground subjects — people, animals, "
+                    + "objects — that macOS's Vision segmentation finds in the flattened "
+                    + "composite. This is the same model behind Preview's Copy Subject, "
+                    + "so it needs no seed point and no tolerance, unlike "
+                    + "select_magic_wand. Mirrors Select > Select Subject. Omit instance "
+                    + "to select every subject at once; pass instance (1-based) for a "
+                    + "single one. Every result reports \"instances\", the number of "
+                    + "subjects found, so you can select each in turn and compare their "
+                    + "bounds to tell them apart.",
+                [
+                    "instance": [
+                        "type": "integer", "minimum": 1,
+                        "description": "Which single subject to select (1-based). "
+                            + "Omit to select all of them.",
+                    ],
+                    "mode": selectionMode,
+                    "document_id": docID,
+                ]),
+            tool(
                 "deselect", "Clears the selection.", ["document_id": docID]),
             tool(
                 "modify_selection",

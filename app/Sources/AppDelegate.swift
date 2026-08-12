@@ -214,6 +214,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "Invert Selection", #selector(EditorViewController.invertSelection(_:)), "i",
                 [.command, .shift]))
         menu.addItem(.separator())
+        // Vision segmentation; needs no selection to start from, so it sits
+        // with Select All rather than with the modify-the-selection block.
+        menu.addItem(
+            item("Select Subject", #selector(EditorViewController.selectSubject(_:))))
+        menu.addItem(.separator())
         menu.addItem(
             item("Feather Selection…", #selector(EditorViewController.featherSelection(_:))))
         menu.addItem(

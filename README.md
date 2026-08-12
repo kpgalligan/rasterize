@@ -89,7 +89,11 @@ decoding, encoding, and manipulation.
 - Selections beyond the rectangle: ellipse marquee (O), polygonal lasso
   (L — click vertices, double-click/Return/click-the-start closes, Escape
   cancels), and a magic wand (W) with tolerance + contiguous options that
-  samples the flattened composite; combine selections with Shift (add),
+  samples the flattened composite; Select > Select Subject hands the
+  composite to macOS's Vision segmentation — the model behind Preview's
+  Copy Subject — and turns the people, animals or objects it finds into a
+  selection with no seed point, no tolerance and a genuinely soft edge;
+  combine selections with Shift (add),
   Option (subtract), or Shift+Option (intersect), invert (⇧⌘I), soften
   them with Select > Feather Selection…, reshape them with Grow, Shrink,
   Border, and Smooth Selection… — true Euclidean-distance morphology at
@@ -193,7 +197,7 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 45 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 46 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG, and `sample_color` reads single pixels off the flattened
 composite — the eyedropper), layer operations, blend modes, layer masks (add
@@ -216,7 +220,10 @@ Live Photos (`add_live_photo_layer` places one as a layer and
 `get_document` reports each layer's clip, key frame and the moment it is
 showing) —
 selections (rect/ellipse/polygon/magic wand with add/subtract/intersect
-modes, plus `modify_selection`'s invert, feather, grow, shrink, border, and
+modes, plus `select_subject` for Vision's subject segmentation — it goes
+past the menu command in giving the agent the subjects individually, since
+`instance` picks one of them and every result reports how many were found,
+plus `modify_selection`'s invert, feather, grow, shrink, border, and
 smooth — shared with the UI and
 honored by every paint tool), `clear_selection` to clear the window's
 current selection on a layer (partial coverage clears proportionally),

@@ -113,7 +113,7 @@ stroke) extends naturally:
   destination's illumination survives. Real work, but §9 documents the
   mechanism and it is what separates "clone stamp" from "magic".
 
-## The distinctive one: subject selection via Vision
+## The distinctive one: subject selection via Vision — SHIPPED
 
 Our selection *is* a coverage mask, so a segmentation result drops
 straight into the existing model with no glue. macOS ships this, and the
@@ -125,11 +125,22 @@ people; `VNGeneratePersonSegmentationRequest` remains the one merged
 people mask. Instances are what make it a *tool* rather than a filter —
 click a subject, get that subject.
 
-Exposed as an MCP tool as well, it makes the built-in agent
-qualitatively more capable — "remove the background", "brighten just the
-person" become one-shot requests. No other editor pairs a segmentation
-primitive with an agent that can act on it. **Content-aware fill**
-(PatchMatch inpainting) is the natural follow-on and the bigger lift.
+Shipped as Select > Select Subject (`SubjectSelection.swift`), which
+selects every subject at once, and as the `select_subject` MCP tool, which
+also takes an `instance` and reports how many were found. It makes the
+built-in agent qualitatively more capable — "remove the background",
+"brighten just the person" are one-shot requests now. No other editor
+pairs a segmentation primitive with an agent that can act on it.
+
+**Still open, in order of value.** A *click a subject* tool: the model
+already separates instances and the agent can address them, but the UI
+has no pointer affordance, so a `EditorTool` case that hit-tests the
+click against each instance mask is the missing half — and it is what
+makes this feel like Preview rather than like a menu command. Then
+`VNGeneratePersonInstanceMaskRequest` when the subjects wanted are
+specifically people (up to four, separated) and the general saliency
+model grabs the wrong thing. **Content-aware fill** (PatchMatch
+inpainting) remains the natural follow-on and the bigger lift.
 
 ## Keep deferring
 

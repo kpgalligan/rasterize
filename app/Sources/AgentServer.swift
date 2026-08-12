@@ -159,6 +159,8 @@ final class AgentServer {
         "select_ellipse": selectEllipse,
         "select_polygon": selectPolygon,
         "select_magic_wand": selectMagicWand,
+        // Vision subject segmentation (AgentServer+SubjectSelection.swift)
+        "select_subject": selectSubject,
         "deselect": deselect,
         "modify_selection": modifySelection,
         "fill": fill,
@@ -1708,7 +1710,7 @@ final class AgentServer {
     }
 
     /// The select_* tools' optional "mode" argument (default replace).
-    private func selectionMode(_ a: [String: Any]) throws -> SelectionCombineMode {
+    func selectionMode(_ a: [String: Any]) throws -> SelectionCombineMode {
         switch stringArg(a, "mode") ?? "replace" {
         case "replace": return .replace
         case "add": return .add
@@ -1720,8 +1722,12 @@ final class AgentServer {
         }
     }
 
-    private func applySelection(
-        _ document: ImageDocument, _ shape: CanvasSelection.Shape, mode: SelectionCombineMode
+    /// `extra` is merged into the reported result, for tools that learned
+    /// something while making the shape (select_subject's instance count).
+    /// Internal, not private: the +Feature handler files apply selections.
+    func applySelection(
+        _ document: ImageDocument, _ shape: CanvasSelection.Shape,
+        mode: SelectionCombineMode, extra: [String: Any] = [:]
     ) throws -> String {
         guard let editorVC = editor(document) else {
             throw ToolError(message: "The document has no editor window to hold a selection.")
@@ -1734,30 +1740,36 @@ final class AgentServer {
             throw ToolError(message: "The selection would be empty.")
         }
         return try setCombined(
-            editorVC, CanvasSelection.combine(editorVC.agentSelection, with: selection, mode: mode))
+            editorVC, CanvasSelection.combine(editorVC.agentSelection, with: selection, mode: mode),
+            extra: extra)
     }
 
     /// Applies a combine/modify result: an empty (nil) result deselects,
     /// reported in-band rather than as an error.
     private func setCombined(
-        _ editorVC: EditorViewController, _ selection: CanvasSelection?
+        _ editorVC: EditorViewController, _ selection: CanvasSelection?,
+        extra: [String: Any] = [:]
     ) throws -> String {
+        // The tool's own keys never overwrite the shared ones, so a caller
+        // cannot disguise a failure as an "ok".
         guard let selection = selection else {
             editorVC.agentSetSelection(nil)
-            return try jsonResult([
-                "ok": true, "selection_empty": true,
-                "note": "The resulting selection is empty; the selection was cleared.",
-            ])
+            return try jsonResult(
+                extra.merging([
+                    "ok": true, "selection_empty": true,
+                    "note": "The resulting selection is empty; the selection was cleared.",
+                ]) { _, shared in shared })
         }
         editorVC.agentSetSelection(selection)
         let b = selection.bounds
-        return try jsonResult([
-            "ok": true,
-            "bounds": [
-                "x": Int(b.minX), "y": Int(b.minY),
-                "width": Int(b.width), "height": Int(b.height),
-            ],
-        ])
+        return try jsonResult(
+            extra.merging([
+                "ok": true,
+                "bounds": [
+                    "x": Int(b.minX), "y": Int(b.minY),
+                    "width": Int(b.width), "height": Int(b.height),
+                ],
+            ]) { _, shared in shared })
     }
 
     private func selectShape(

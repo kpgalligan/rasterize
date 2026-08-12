@@ -11,7 +11,8 @@ Applies to everything under `app/`. Build/verification commands and the FFI lock
 - `Tools.swift` — the single `EditorTool` enum plus per-tool facts (display and short names, SF Symbol, fallback glyph, cursor, bare key, selector) as computed properties, and `toolbarGroups`, the toolbar's left-to-right buttons.
 - `ToolPillControl.swift` — the toolbar's tool pill; renders `toolbarGroups`, and a group of more than one tool becomes one segment with a dropdown chevron.
 - `AgentCatalog.swift` — the MCP tool catalog; a debug-build startup check enforces that catalog names match the dispatch registry.
-- Feature model files (`TextLayer.swift`, `LayerTransform.swift`, `AdjustmentLayer.swift`, `LivePhotoLayer.swift` are the pattern): pure value types, geometry/math, `extension RasterDocument`.
+- Feature model files (`TextLayer.swift`, `LayerTransform.swift`, `AdjustmentLayer.swift`, `LivePhotoLayer.swift`, `SubjectSelection.swift` are the pattern): pure value types, geometry/math, `extension RasterDocument`.
+- `SubjectSelection.swift` — Vision segmentation behind Select > Select Subject. The platform-model seam: it produces a canvas-sized u8 coverage mask, so it feeds `CanvasSelection(shape: .mask(…))` with no new concepts. Measured before it was written — the request is ~200 ms once (model load), 25–50 ms after, and flat in image size — so it runs synchronously on the main thread; re-measure before assuming any future Vision request may do the same.
 - Shared chrome: `Theme.swift` (`DS` design tokens), `Controls.swift` (reusable controls), `EditorChrome.swift`; dialogs are `…SheetController`s built on the `makeSheetView` builders in `Sheets.swift`, live previews via `PreviewRenderer`.
 
 ## Rules

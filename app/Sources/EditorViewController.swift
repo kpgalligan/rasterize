@@ -2561,6 +2561,11 @@ extension EditorViewController: NSUserInterfaceValidations {
             // Every other Select-menu item is disabled inside Quick Mask
             // mode: the selection lives in the mode's buffer until exit.
             return !canvas.quickMaskActive
+        case #selector(selectSubject(_:)):
+            // Segmentation reads the composite, so an image is all it needs
+            // — unlike the modify-the-selection items, it makes a selection
+            // from nothing.
+            return !canvas.quickMaskActive && document?.doc != nil
         case #selector(deselect(_:)),
             #selector(invertSelection(_:)), #selector(featherSelection(_:)),
             #selector(growSelection(_:)), #selector(shrinkSelection(_:)),
