@@ -1060,6 +1060,21 @@ fn crop_shifts_offsets_and_resize_scales() {
         assert!(rz_doc_crop(doc, u32::MAX, 0, 2, 2).is_null());
     }
 
+    // Cropping to the whole canvas is the window the document already has:
+    // NULL, not an identical copy that would be a phantom undo step.
+    unsafe {
+        let (w, h) = (rz_doc_width(doc), rz_doc_height(doc));
+        assert!(rz_doc_crop(doc, 0, 0, w, h).is_null());
+        // One pixel narrower is a real crop, and still succeeds.
+        let narrower = rz_doc_crop(doc, 0, 0, w - 1, h);
+        assert!(!narrower.is_null());
+        assert_eq!(
+            (rz_doc_width(narrower), rz_doc_height(narrower)),
+            (w - 1, h)
+        );
+        rz_doc_free(narrower);
+    }
+
     // Resize by exactly 2x: canvas, layer dims, and offsets all double.
     let resized = unsafe { rz_doc_resize(doc, 14, 10, FILTER_NEAREST) };
     assert!(!resized.is_null());

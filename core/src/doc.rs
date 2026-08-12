@@ -762,6 +762,10 @@ impl RzDocument {
     /// retained rather than trimmed — so masks and meta ride along untouched:
     /// a mask is layer-space, and moving the window past it keeps it hiding
     /// exactly the same pixels.
+    ///
+    /// `None` for an empty or out-of-bounds rect, and for the whole canvas
+    /// (0, 0, width, height) — that window IS the current one, and returning
+    /// an identical copy would register a phantom undo step in the host.
     pub fn crop(&self, x: u32, y: u32, w: u32, h: u32) -> Option<Self> {
         if w == 0 || h == 0 {
             return None;
@@ -769,6 +773,9 @@ impl RzDocument {
         let x_end = x.checked_add(w)?;
         let y_end = y.checked_add(h)?;
         if x_end > self.width || y_end > self.height {
+            return None;
+        }
+        if x == 0 && y == 0 && w == self.width && h == self.height {
             return None;
         }
         let layers = self

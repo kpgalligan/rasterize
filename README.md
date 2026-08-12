@@ -72,14 +72,11 @@ decoding, encoding, and manipulation.
   first (as any destructive edit does). Selections are not transformable yet —
   a session always transforms the whole layer and hides the marquee while it
   runs
-- **Crop tool** (C): drag out a crop box and refine it by its eight handles
-  — Shift constrains a corner drag to the box's aspect, and the options bar
-  offers aspect presets (Free, Original, 1:1, 4:3, 3:2, 16:9, 9:16) plus
-  editable W/H fields; arrow keys nudge, Return or a double-click inside
-  the box commits, Escape cancels. The commit is the same canvas crop as
-  Image > Crop to Selection — the canvas shrinks to the box and layers keep
-  their pixels outside it, ready to be revealed again
-- Selection-based crop, Image Size (scale with filter choice, up to 100 MP),
+- **Crop** (Image > Crop, ⌘K): the canvas shrinks to the selection's
+  bounds and layers keep their pixels outside it, ready to be revealed
+  again. Available only while the selection covers less than the whole
+  image — anything else would be a no-op
+- Image Size (scale with filter choice, up to 100 MP),
   and Canvas Size with the Photoshop-style 3×3 anchor selector — grow or
   trim the canvas without scaling; layers keep their pixels and can be
   revealed again later
@@ -120,7 +117,10 @@ decoding, encoding, and manipulation.
   mode; strokes confine to an active selection) and on-canvas text
   (font/size/color and left/center/right alignment, ⌘Return commits,
   Escape cancels) — tools switch via toolbar, Tools menu, or
-  M/O/L/W/V/B/E/K/G/T/I/C
+  M/O/L/W/V/B/E/K/G/T/I. Related tools share one toolbar button: the four
+  selection tools sit on one, brush and eraser on another, each showing
+  whichever member is current with a chevron on its right that drops a menu
+  of the rest (with their keys). A group remembers the member last used
 - **Re-editable text layers**: committing text adds its own layer that
   remembers the string, font, size, color and alignment it was rendered
   from — click it again with the text tool to reopen the editor pre-filled,

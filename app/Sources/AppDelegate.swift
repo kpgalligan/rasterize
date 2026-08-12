@@ -239,8 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Flip Horizontal", #selector(EditorViewController.flipH(_:))))
         menu.addItem(item("Flip Vertical", #selector(EditorViewController.flipV(_:))))
         menu.addItem(.separator())
-        menu.addItem(
-            item("Crop to Selection", #selector(EditorViewController.cropToSelection(_:)), "k"))
+        menu.addItem(item("Crop", #selector(EditorViewController.cropToSelection(_:)), "k"))
         menu.addItem(
             item("Image Size…", #selector(EditorViewController.resizeImage(_:)), "i", [.command, .option]))
         menu.addItem(
@@ -374,7 +373,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Text Tool", #selector(EditorViewController.selectTextTool(_:))))
         menu.addItem(
             item("Eyedropper Tool", #selector(EditorViewController.selectEyedropperTool(_:))))
-        menu.addItem(item("Crop Tool", #selector(EditorViewController.selectCropTool(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Allow Agent Connections", #selector(toggleAgentServer(_:))))
         return menu

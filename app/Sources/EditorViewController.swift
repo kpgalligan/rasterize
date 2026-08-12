@@ -57,15 +57,6 @@ final class EditorViewController: NSViewController {
     // shared paint color.
     private let sampleSwatch = NSBox()
     private let sampleValueLabel = NSTextField(labelWithString: "Click to sample")
-    // Crop: the aspect preset constraining drags and resizes, and the W/H
-    // fields (transform-bar conventions) that resize the session's rect
-    // keeping its top-left corner fixed.
-    private let cropAspectLabel = NSTextField(labelWithString: "Aspect")
-    private let cropAspectPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let cropSizeWLabel = NSTextField(labelWithString: "W")
-    private let cropSizeWField = NSTextField(string: "")
-    private let cropSizeHLabel = NSTextField(labelWithString: "H")
-    private let cropSizeHField = NSTextField(string: "")
     // Free Transform: numerics bound both ways to the session's parameters,
     // plus the sampler the single commit-time resample will use.
     private let transformAngleLabel = NSTextField(labelWithString: "Angle°")
@@ -285,8 +276,6 @@ final class EditorViewController: NSViewController {
         canvas.onFillClick = { [weak self] point in self?.fillClicked(point) }
         canvas.onEyedropper = { [weak self] point in self?.sampleColor(at: point) }
         canvas.onGradientCommit = { [weak self] a, b in self?.gradientCommitted(a, b) }
-        canvas.onCropRectChange = { [weak self] _ in self?.updateCropFields() }
-        canvas.onCropCommit = { [weak self] rect in self?.cropCommitted(rect) }
         canvas.onBrushSizeKey = { [weak self] newSize in
             guard let self = self else { return }
             self.brushSize = newSize
@@ -343,35 +332,11 @@ final class EditorViewController: NSViewController {
         canvas.textFont = currentFont()
         canvas.textAlignment = textAlignment
 
-        // Toolbar: pill tool group left, ghost zoom cluster, crop pinned
-        // right, on a card bar with a subtle bottom border.
+        // Toolbar: pill tool group left, ghost zoom cluster, on a card bar
+        // with a subtle bottom border. The pill's contents — including
+        // which tools share a button — come from EditorTool.toolbarGroups.
         toolbarBar.translatesAutoresizingMaskIntoConstraints = false
-        toolPill = ToolPillControl(segments: [
-            .init(symbol: "cursorarrow", fallback: "S", label: "Select",
-                  action: #selector(selectSelectTool(_:))),
-            .init(symbol: "circle.dashed", fallback: "O", label: "Ellipse",
-                  action: #selector(selectEllipseTool(_:))),
-            .init(symbol: "lasso", fallback: "L", label: "Lasso",
-                  action: #selector(selectLassoTool(_:))),
-            .init(symbol: "wand.and.stars", fallback: "W", label: "Wand",
-                  action: #selector(selectWandTool(_:))),
-            .init(symbol: "arrow.up.and.down.and.arrow.left.and.right", fallback: "M",
-                  label: "Move", action: #selector(selectMoveTool(_:))),
-            .init(symbol: "paintbrush.pointed", fallback: "B", label: "Brush",
-                  action: #selector(selectBrushTool(_:))),
-            .init(symbol: "eraser", fallback: "E", label: "Eraser",
-                  action: #selector(selectEraserTool(_:))),
-            .init(symbol: "drop.fill", fallback: "K", label: "Fill",
-                  action: #selector(selectFillTool(_:))),
-            .init(symbol: "circle.lefthalf.filled", fallback: "G", label: "Grad",
-                  action: #selector(selectGradientTool(_:))),
-            .init(symbol: "textformat", fallback: "T", label: "Text",
-                  action: #selector(selectTextTool(_:))),
-            .init(symbol: "eyedropper", fallback: "I", label: "Pick",
-                  action: #selector(selectEyedropperTool(_:))),
-            .init(symbol: "crop", fallback: "C", label: "Crop",
-                  action: #selector(selectCropTool(_:))),
-        ])
+        toolPill = ToolPillControl(groups: EditorTool.toolbarGroups)
         toolPill.translatesAutoresizingMaskIntoConstraints = false
         let zoomOutButton = GhostButton(
             symbol: "minus.magnifyingglass", fallback: "−", caption: "Zoom Out",
@@ -385,12 +350,9 @@ final class EditorViewController: NSViewController {
         let actualButton = GhostButton(
             symbol: "1.magnifyingglass", fallback: "1", caption: "Actual",
             tooltip: "Actual Size", action: #selector(zoomActualAction(_:)))
-        let cropButton = GhostButton(
-            symbol: "crop", fallback: "⌗", caption: "Crop",
-            tooltip: "Crop to Selection", action: #selector(cropToSelection(_:)))
         let toolbarStack = NSStackView(views: [
             toolPill, zoomOutButton, zoomInButton, fitButton, actualButton,
-            NSView(), cropButton,
+            NSView(),
         ])
         toolbarStack.translatesAutoresizingMaskIntoConstraints = false
         toolbarStack.orientation = .horizontal
@@ -550,7 +512,7 @@ final class EditorViewController: NSViewController {
         for label in [
             sizeLabel, opacityLabel, fontLabel, transformAngleLabel, transformScaleXLabel,
             transformScaleYLabel, transformSizeLabel, transformSizeHLabel,
-            transformSamplerLabel, cropAspectLabel, cropSizeWLabel, cropSizeHLabel,
+            transformSamplerLabel,
         ] {
             label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
         }
@@ -739,31 +701,6 @@ final class EditorViewController: NSViewController {
         transformSamplerPopup.action = #selector(transformSamplerChanged(_:))
         transformSamplerPopup.widthAnchor.constraint(equalToConstant: 170).isActive = true
 
-        // Crop: aspect presets, plus W/H fields following the transform
-        // bar's conventions (whole pixels; the formatter only rules out
-        // empty/zero/negative input, the action clamps to the canvas).
-        cropAspectPopup.controlSize = .small
-        cropAspectPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        cropAspectPopup.addItems(withTitles: Self.cropAspectTitles)
-        cropAspectPopup.target = self
-        cropAspectPopup.action = #selector(cropAspectChanged(_:))
-        cropAspectPopup.widthAnchor.constraint(equalToConstant: 100).isActive = true
-
-        for field in [cropSizeWField, cropSizeHField] {
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .decimal
-            formatter.usesGroupingSeparator = false
-            formatter.maximumFractionDigits = 0
-            formatter.minimum = 1
-            field.formatter = formatter
-            field.controlSize = .small
-            field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-            field.target = self
-            field.widthAnchor.constraint(equalToConstant: 60).isActive = true
-        }
-        cropSizeWField.action = #selector(cropSizeWChanged(_:))
-        cropSizeHField.action = #selector(cropSizeHChanged(_:))
-
         let controls: [NSView] = [
             sizeLabel, sizeSlider, sizeField,
             opacityLabel, opacitySlider, opacityValueLabel,
@@ -771,8 +708,6 @@ final class EditorViewController: NSViewController {
             toleranceLabel, toleranceSlider, toleranceValueLabel, contiguousCheck,
             gradientShapePopup, gradientEndLabel, gradientEndWell,
             sampleSwatch, sampleValueLabel,
-            cropAspectLabel, cropAspectPopup,
-            cropSizeWLabel, cropSizeWField, cropSizeHLabel, cropSizeHField,
             fontLabel, fontPopup, fontSizeField, alignmentControl,
             transformAngleLabel, transformAngleField,
             transformScaleXLabel, transformScaleXField,
@@ -834,12 +769,6 @@ final class EditorViewController: NSViewController {
         }
         currentTool = tool
         canvas.tool = tool
-        // Entering the crop tool: hand the canvas the popup's constraint
-        // and blank the W/H fields (the tool switch cleared any old rect).
-        if tool == .crop {
-            syncCropAspect()
-            updateCropFields()
-        }
         // Only brush and eraser edit masks; picking one of the other paint
         // tools silently points the target back at the layer rather than
         // blocking the tool or painting the wrong thing.
@@ -905,9 +834,11 @@ final class EditorViewController: NSViewController {
         }
     }
 
-    /// Mirrors tool selection into the toolbar pill (display only).
+    /// Mirrors tool selection into the toolbar pill (display only). A
+    /// grouped segment also starts standing for this tool, so the group
+    /// remembers what was last used in it.
     func reflectSelectedTool(_ tool: EditorTool) {
-        toolPill?.setSelectedIndex(tool.rawValue)
+        toolPill?.setSelectedTool(tool)
     }
 
     @objc func selectSelectTool(_ sender: Any?) { selectTool(.select) }
@@ -921,7 +852,6 @@ final class EditorViewController: NSViewController {
     @objc func selectGradientTool(_ sender: Any?) { selectTool(.gradient) }
     @objc func selectTextTool(_ sender: Any?) { selectTool(.text) }
     @objc func selectEyedropperTool(_ sender: Any?) { selectTool(.eyedropper) }
-    @objc func selectCropTool(_ sender: Any?) { selectTool(.crop) }
 
     private func updateOptionsBar() {
         // A Free Transform session takes the whole bar over: it is modal on
@@ -954,13 +884,6 @@ final class EditorViewController: NSViewController {
         let eyedropperTool = !transforming && tool == .eyedropper
         sampleSwatch.isHidden = !eyedropperTool
         sampleValueLabel.isHidden = !eyedropperTool
-        let cropTool = !transforming && tool == .crop
-        for control in [
-            cropAspectLabel, cropAspectPopup, cropSizeWLabel, cropSizeWField,
-            cropSizeHLabel, cropSizeHField,
-        ] as [NSView] {
-            control.isHidden = !cropTool
-        }
         for control in [
             transformAngleLabel, transformAngleField, transformScaleXLabel, transformScaleXField,
             transformScaleYLabel, transformScaleYField, transformSizeLabel, transformSizeWField,
@@ -1078,99 +1001,6 @@ final class EditorViewController: NSViewController {
     private func currentFont() -> NSFont {
         NSFontManager.shared.font(withFamily: fontFamily, traits: [], weight: 5, size: fontSize)
             ?? .systemFont(ofSize: fontSize)
-    }
-
-    // MARK: - Crop tool
-
-    /// Aspect preset titles, in popup order. Free is unconstrained;
-    /// Original is the canvas's own aspect, computed at use time — a canvas
-    /// size change cancels the session (ImageCanvasView's image setter), so
-    /// "at session start" and "now" always agree.
-    private static let cropAspectTitles = [
-        "Free", "Original", "1:1", "4:3", "3:2", "16:9", "9:16",
-    ]
-
-    /// The popup's constraint as width / height; nil = free.
-    private func currentCropAspect() -> CGFloat? {
-        switch cropAspectPopup.indexOfSelectedItem {
-        case 1:
-            guard let doc = document?.doc, doc.width > 0, doc.height > 0 else { return nil }
-            return CGFloat(doc.width) / CGFloat(doc.height)
-        case 2: return 1
-        case 3: return 4.0 / 3.0
-        case 4: return 3.0 / 2.0
-        case 5: return 16.0 / 9.0
-        case 6: return 9.0 / 16.0
-        default: return nil
-        }
-    }
-
-    /// Pushes the popup's constraint to the canvas (tool entry, popup
-    /// changes, and document changes — Original tracks the new canvas).
-    private func syncCropAspect() {
-        canvas.cropAspect = currentCropAspect()
-    }
-
-    @objc private func cropAspectChanged(_ sender: Any?) {
-        syncCropAspect()
-    }
-
-    /// The rect → fields half of the binding (the fields' actions are the
-    /// other half); blank fields when no session is in progress.
-    private func updateCropFields() {
-        guard let rect = canvas.cropRect else {
-            cropSizeWField.stringValue = ""
-            cropSizeHField.stringValue = ""
-            return
-        }
-        cropSizeWField.stringValue = String(Int(rect.width.rounded()))
-        cropSizeHField.stringValue = String(Int(rect.height.rounded()))
-    }
-
-    @objc private func cropSizeWChanged(_ sender: Any?) {
-        resizeCropRect(width: CGFloat(cropSizeWField.doubleValue), height: nil)
-    }
-
-    @objc private func cropSizeHChanged(_ sender: Any?) {
-        resizeCropRect(width: nil, height: CGFloat(cropSizeHField.doubleValue))
-    }
-
-    /// Typing W or H resizes the crop rect keeping its TOP-LEFT corner
-    /// fixed, clamped to the canvas. Bad input (no session, non-positive)
-    /// just snaps the field back to the current value.
-    private func resizeCropRect(width: CGFloat?, height: CGFloat?) {
-        defer { updateCropFields() }
-        guard var rect = canvas.cropRect else { return }
-        if let width = width, width >= 1 {
-            rect.size.width = min(max(width.rounded(), 1), canvas.bounds.width - rect.minX)
-        }
-        if let height = height, height >= 1 {
-            rect.size.height = min(max(height.rounded(), 1), canvas.bounds.height - rect.minY)
-        }
-        canvas.setCropRect(rect)
-    }
-
-    /// Crop-tool commit (Return, or a double-click inside the rect): the
-    /// same core crop op as Image > Crop to Selection, with the same
-    /// semantics — the canvas shrinks to the rect and layers keep their
-    /// pixels outside it — as ONE undo step through applyEdit (which also
-    /// counts the edit change). The canvas has already cleared the session.
-    private func cropCommitted(_ rect: CGRect) {
-        guard let document = document else {
-            NSSound.beep()
-            return
-        }
-        let w = Int(rect.width)
-        let h = Int(rect.height)
-        guard w >= 1, h >= 1 else {
-            NSSound.beep()
-            return
-        }
-        let x = Int(rect.minX)
-        let y = Int(rect.minY)
-        document.applyEdit("Crop") { doc in
-            doc.cropped(x: x, y: y, w: w, h: h)
-        }
     }
 
     // MARK: - Text layers
@@ -1864,10 +1694,6 @@ final class EditorViewController: NSViewController {
         }
         canvas.needsDisplay = true
         syncPaintTarget()
-        // The canvas cancels a crop session itself when its size changed
-        // (the rect would be meaningless); the Original preset just needs to
-        // track the new canvas for the next drag.
-        syncCropAspect()
         updateStatus()
         updateActiveLayerRect()
         view.window?.subtitle = "\(doc.width) × \(doc.height) px"
@@ -2644,7 +2470,6 @@ extension EditorViewController: NSUserInterfaceValidations {
         #selector(selectGradientTool(_:)): .gradient,
         #selector(selectTextTool(_:)): .text,
         #selector(selectEyedropperTool(_:)): .eyedropper,
-        #selector(selectCropTool(_:)): .crop,
     ]
 
     /// True while a text-editing responder owns the keyboard: a field
@@ -2702,11 +2527,22 @@ extension EditorViewController: NSUserInterfaceValidations {
             // Every other Select-menu item is disabled inside Quick Mask
             // mode: the selection lives in the mode's buffer until exit.
             return !canvas.quickMaskActive
-        case #selector(cropToSelection(_:)), #selector(deselect(_:)),
+        case #selector(deselect(_:)),
             #selector(invertSelection(_:)), #selector(featherSelection(_:)),
             #selector(growSelection(_:)), #selector(shrinkSelection(_:)),
             #selector(borderSelection(_:)), #selector(smoothSelection(_:)):
             return !canvas.quickMaskActive && canvas.selectionRect != nil
+        case #selector(cropToSelection(_:)):
+            // Crop needs a selection that would actually shrink the canvas.
+            // Selection BOUNDS are what it crops to, so a selection already
+            // spanning the image — Select All, or a lasso whose extent
+            // covers it — leaves nothing to do; the core refuses that crop
+            // as a no-op, so the item would be dead anyway.
+            guard !canvas.quickMaskActive, let rect = canvas.selectionRect,
+                  let doc = document?.doc
+            else { return false }
+            return rect.integral
+                != CGRect(x: 0, y: 0, width: doc.width, height: doc.height)
         case #selector(clearSelection(_:)):
             // Clear's key equivalent is a BARE ⌫: while it is enabled the
             // menu eats every Delete keystroke before the first responder
