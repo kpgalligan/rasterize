@@ -30,12 +30,26 @@ final class FileDropView: NSView {
         }
     }
 
+    /// Dropping BOTH halves of a Live Photo — what Finder hands over when
+    /// the pair is selected — must open ONE document, not two: either file
+    /// opens the same Live Photo, so a clip whose still came along is
+    /// dropped here.
+    private func collapsingLivePhotoPairs(_ urls: [URL]) -> [URL] {
+        let stillNames = Set(
+            urls.filter { LivePhoto.stillExtensions.contains($0.pathExtension.lowercased()) }
+                .map { $0.deletingPathExtension().path })
+        return urls.filter { url in
+            !(LivePhoto.videoExtensions.contains(url.pathExtension.lowercased())
+                && stillNames.contains(url.deletingPathExtension().path))
+        }
+    }
+
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         readableImageURLs(from: sender).isEmpty ? [] : .copy
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        let urls = readableImageURLs(from: sender)
+        let urls = collapsingLivePhotoPairs(readableImageURLs(from: sender))
         for url in urls {
             NSDocumentController.shared.openDocument(
                 withContentsOf: url, display: true

@@ -11,7 +11,7 @@ decoding, encoding, and manipulation.
   and the non-separable Hue/Saturation/Color/Luminosity — grouped in the
   panel exactly like Photoshop's menu;
   layers panel with thumbnails, inline rename, drag-reorder, a right-click
-  row menu (Rename, Delete Layer), and
+  row menu (Rename, Select Frame… on a Live Photo layer, Delete Layer), and
   new/delete/duplicate/merge-down/flatten; Move tool (V) with arrow-key
   nudges; Paste as New Layer; PSD files import with their real layers; the
   native `.rz` format saves the full layer stack — masks, clipping flags,
@@ -50,8 +50,9 @@ decoding, encoding, and manipulation.
   groups. The layers panel indents a clipped layer behind a "↳" arrow;
   releasing (the same menu item, retitled) undoes it, pixels untouched
   either way
-- Open PNG, JPEG, Photoshop (PSD, layered), TIFF, BMP, GIF, WebP
-  — EXIF orientation is applied on open, so camera photos display upright
+- Open PNG, JPEG, Photoshop (PSD, layered), TIFF, BMP, GIF, WebP, HEIC/HEIF,
+  and Apple Live Photos — EXIF orientation is applied on open, so camera
+  photos display upright
 - Export a copy to PNG, JPEG (with quality control), TIFF, BMP, GIF, WebP;
   failed saves never truncate or delete an existing destination file
 - Smooth zoom (pinch, ⌘+/⌘-, fit, actual size) and pan
@@ -132,6 +133,23 @@ decoding, encoding, and manipulation.
   description on confirm, keeping the pixels. The native `.rz` format stores
   the description alongside the pixels, so text stays editable across
   save and open
+- **Live Photo layers**: open either half of an Apple Live Photo — the photo
+  (`IMG_0001.HEIC`) or its clip (`IMG_0001.MOV`), which Photos exports as a
+  pair sharing one name — and the layer shows the key frame, the
+  full-resolution photo itself, while remembering the whole clip behind it.
+  Layer > Place Live Photo… adds one to the document you already have.
+  Right-click the layer's row (or double-click it, or Layer > Select Live
+  Photo Frame…) for a timeline slider that scrubs the clip with a live
+  preview on the canvas: pick any moment, and Apply re-renders the layer
+  from that frame as one undo step, keeping its name, position, opacity,
+  blend mode and mask. Video frames are scaled to the photo's size so the
+  layer's geometry never shifts, and a Key Frame button walks back to the
+  full-resolution still. The layers panel badges these layers "▶". A
+  destructive edit (filter, adjustment, fill, gradient, brush, eraser) asks
+  before cutting the layer loose from its Live Photo, exactly as it does for
+  text; the description is stored in `.rz` files, so the frame stays
+  changeable across save and open as long as the original files are where
+  they were
 - **Copy** (⌘C) puts the active layer's own pixels within the selection on
   the clipboard — raw, so layer opacity, blend mode and the layer mask stay
   out of it and the copy round-trips through Paste as New Layer unchanged —
@@ -149,7 +167,10 @@ import; animated GIFs and multi-page TIFFs
 load their first frame/page only, so ⌘S on a GIF deliberately routes through
 Save As instead of overwriting the animation in place. Document-level rotate,
 flip and resize move a text layer's pixels but keep its description, so
-re-editing the text after one re-renders it upright at the layer's corner.
+re-editing the text after one re-renders it upright at the layer's corner —
+selecting a different Live Photo frame after one lands the same way. A Live
+Photo's files are referenced by path, not copied into the document: move or
+delete them and the layer keeps its pixels but can no longer change frame.
 
 ## Built-in assistant
 
@@ -172,7 +193,7 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 43 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 45 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG, and `sample_color` reads single pixels off the flattened
 composite — the eyedropper), layer operations, blend modes, layer masks (add
@@ -190,6 +211,10 @@ with size/color/opacity, and a
 and `edit_text_layer` for re-editable text layers with an `alignment`
 parameter (`get_document` reports each layer's text parameters) and
 `add_text` for the rasterizing variant —
+Live Photos (`add_live_photo_layer` places one as a layer and
+`set_live_photo_frame` re-renders it at another moment of its clip;
+`get_document` reports each layer's clip, key frame and the moment it is
+showing) —
 selections (rect/ellipse/polygon/magic wand with add/subtract/intersect
 modes, plus `modify_selection`'s invert, feather, grow, shrink, border, and
 smooth — shared with the UI and

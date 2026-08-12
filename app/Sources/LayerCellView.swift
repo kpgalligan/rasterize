@@ -266,7 +266,7 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
     func configure(
         info: RasterDocument.LayerInfo, thumbnail: NSImage?, hasMask: Bool,
         maskThumbnail: NSImage?, maskEnabled: Bool, isText: Bool, isAdjustment: Bool,
-        clipped: Bool, selected: Bool, paintTarget: PaintTarget
+        isLivePhoto: Bool, clipped: Bool, selected: Bool, paintTarget: PaintTarget
     ) {
         committedName = info.name
         nameField.stringValue = info.name
@@ -302,17 +302,21 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
         thumbView.alphaValue = info.visible ? 1.0 : 0.35
         // A text layer is still editable as text: say so on the thumbnail,
         // and the badge goes away the moment the description is dropped. An
-        // adjustment layer badges ◐ the same way (the two are mutually
-        // exclusive — one meta slot, one type). Either kind's double-click
-        // reopens its source; a plain raster layer has none.
-        thumbView.badge = isText ? "T" : (isAdjustment ? "◐" : nil)
-        thumbFrame.onDoubleClick =
-            (isText || isAdjustment) ? { [weak self] in self?.onEditSource?() } : nil
+        // adjustment layer badges ◐ and a live photo layer ▶ the same way
+        // (the three are mutually exclusive — one meta slot, one type). Any
+        // of them double-clicks back to its source; a plain raster layer has
+        // none.
+        let described = isText || isAdjustment || isLivePhoto
+        thumbView.badge = isText ? "T" : (isAdjustment ? "◐" : (isLivePhoto ? "▶" : nil))
+        thumbFrame.onDoubleClick = described ? { [weak self] in self?.onEditSource?() } : nil
         if isText {
             thumbFrame.toolTip =
                 "Text layer — double-click to edit the text (painting rasterizes it)"
         } else if isAdjustment {
             thumbFrame.toolTip = "Adjustment layer — double-click for options"
+        } else if isLivePhoto {
+            thumbFrame.toolTip =
+                "Live Photo layer — double-click to select a frame (painting rasterizes it)"
         } else {
             thumbFrame.toolTip = "Paint on the layer"
         }

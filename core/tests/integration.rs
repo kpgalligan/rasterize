@@ -205,6 +205,41 @@ fn crop_content_and_bounds() {
 }
 
 #[test]
+fn from_rgba_wraps_a_buffer() {
+    // The in-memory constructor is how pixels this crate cannot decode
+    // itself (a host-decoded HEIC still, a Live Photo video frame) become an
+    // image, so it must produce exactly what the file path produces.
+    let dir = tempfile::tempdir().unwrap();
+    let pattern = test_pattern(9, 5);
+    let raw = pattern.as_raw();
+    let img = unsafe { rz_image_from_rgba(raw.as_ptr(), 9, 5) };
+    assert!(!img.is_null());
+    assert_eq!(dims(img), (9, 5));
+    assert_eq!(pixels(img), *raw);
+
+    let opened = open_pattern(&dir, "pattern.png", &pattern);
+    assert_eq!(pixels(img), pixels(opened));
+
+    // The buffer is COPIED, so overwriting the caller's bytes afterwards
+    // cannot reach the handle.
+    let mut owned = raw.clone();
+    let copy = unsafe { rz_image_from_rgba(owned.as_ptr(), 9, 5) };
+    owned.iter_mut().for_each(|b| *b = 0);
+    assert_eq!(pixels(copy), *raw);
+
+    // Rejections. Each is caught before any slice is built from the
+    // dimensions, so the short buffer below is never read.
+    assert!(unsafe { rz_image_from_rgba(raw.as_ptr(), 0, 5) }.is_null());
+    assert!(unsafe { rz_image_from_rgba(raw.as_ptr(), 9, 0) }.is_null());
+    // 10000 * 10001 = 100_010_000 > 100_000_000, the cap resize enforces.
+    assert!(unsafe { rz_image_from_rgba(raw.as_ptr(), 10_000, 10_001) }.is_null());
+
+    for p in [img, opened, copy] {
+        free(p);
+    }
+}
+
+#[test]
 fn resize_filters_and_limits() {
     let dir = tempfile::tempdir().unwrap();
     let img = open_pattern(&dir, "pattern.png", &test_pattern(64, 48));
@@ -550,6 +585,7 @@ fn null_safety_everywhere() {
     assert!(unsafe { rz_image_sepia(null) }.is_null());
     assert!(unsafe { rz_image_blur(null, 1.0) }.is_null());
     assert!(unsafe { rz_image_sharpen(null, 1.0) }.is_null());
+    assert!(unsafe { rz_image_from_rgba(ptr::null(), 1, 1) }.is_null());
 
     // Saving a NULL image fails cleanly with a message.
     let path = CString::new("/tmp/should-not-be-created.png").unwrap();

@@ -43,6 +43,12 @@ final class ImageDocument: NSDocument {
         "com.microsoft.bmp",
         "com.compuserve.gif",
         "org.webmproject.webp",
+        // Decoded by the PLATFORM, not the core: HEIC/HEIF stills (the half
+        // of a Live Photo the camera writes), and the QuickTime clip that is
+        // its other half — opening either one opens the Live Photo.
+        "public.heic",
+        "public.heif",
+        "com.apple.quicktime-movie",
     ]
 
     private static let writableTypeIdentifiers: [String] = [
@@ -116,11 +122,38 @@ final class ImageDocument: NSDocument {
     // MARK: - Reading and writing
 
     override func read(from url: URL, ofType typeName: String) throws {
-        // rz_doc_open transparently handles .rz, layered PSD, and flat
-        // images (single "Background" layer).
-        doc = try RasterDocument.open(url: url)
+        doc = try Self.openDocument(at: url)
         activeLayerIndex = max(doc.layerCount - 1, 0) // topmost
         refreshProjection()
+    }
+
+    /// The app's open path, most specific first:
+    ///
+    /// 1. A LIVE PHOTO — either half of a still+clip pair, or a bare movie —
+    ///    becomes one layer showing its key frame and carrying the
+    ///    description Select Frame… re-renders from.
+    /// 2. The core's own `rz_doc_open`, which transparently handles `.rz`,
+    ///    layered PSD, and the flat formats (single "Background" layer).
+    /// 3. Formats the core has no decoder for (HEIC, HEIF) fall back to the
+    ///    platform's, as one flat layer.
+    ///
+    /// A file that none of the three can read reports the CORE's error, which
+    /// names the file and the reason.
+    private static func openDocument(at url: URL) throws -> RasterDocument {
+        if let source = LivePhoto.locate(url), let payload = LivePhoto.inspect(source),
+           let livePhoto = RasterDocument.from(
+            livePhoto: payload, name: LivePhoto.layerName(for: source))
+        {
+            return livePhoto
+        }
+        do {
+            return try RasterDocument.open(url: url)
+        } catch {
+            guard let image = RasterImage.decoded(from: url),
+                  let decoded = RasterDocument.from(image: image)
+            else { throw error }
+            return decoded
+        }
     }
 
     override func revert(toContentsOf url: URL, ofType typeName: String) throws {
@@ -217,10 +250,10 @@ final class ImageDocument: NSDocument {
 
     /// applyEdit for an edit that rewrites a layer's pixels DESTRUCTIVELY —
     /// painting, filling, filtering, adjusting. A plain raster layer goes
-    /// straight through. On a text layer the raster would stop being the
-    /// rendering of its description, so the user is asked first: Cancel
-    /// abandons the edit entirely, Rasterize drops the description inside the
-    /// SAME edit, keeping it one undo step.
+    /// straight through. On a DESCRIBED layer — text, a Live Photo frame —
+    /// the raster would stop being the rendering of its description, so the
+    /// user is asked first: Cancel abandons the edit entirely, Rasterize
+    /// drops the description inside the SAME edit, keeping it one undo step.
     ///
     /// Whole-document geometry (rotate, flip, image/canvas size) deliberately
     /// does NOT come through here: it moves a layer without contradicting
@@ -236,24 +269,41 @@ final class ImageDocument: NSDocument {
             NSSound.beep()
             return
         }
-        let describesText = current.textPayload(idx) != nil
-        guard confirmTextRasterize(layer: idx) else { return }
+        let described = layerDescribesSource(idx)
+        guard confirmRasterize(layer: idx) else { return }
         applyEdit(actionName) { doc in
             guard let updated = transform(doc) else { return nil }
-            guard describesText else { return updated }
+            guard described else { return updated }
             return updated.withLayerMeta(idx, nil) ?? updated
         }
     }
 
+    /// True when layer `idx`'s pixels are the RENDERING of a description the
+    /// app can re-open — a text layer's string, a live photo layer's frame —
+    /// which is exactly what a destructive edit would contradict. (An
+    /// adjustment layer has no pixels of its own to contradict, so it is
+    /// deliberately not one of these.) The paths that cannot use
+    /// applyRasterizingEdit — the live-edit brush, the Free Transform commit
+    /// — ask this, then clear the metadata themselves.
+    func layerDescribesSource(_ idx: Int) -> Bool {
+        guard let doc = doc else { return false }
+        return doc.textPayload(idx) != nil || doc.livePhotoPayload(idx) != nil
+    }
+
     /// Asks — once, app-modally — whether a destructive edit may drop layer
-    /// `idx`'s text description. True means the edit may proceed: either the
-    /// layer carries no description, or the user confirmed. Callers that do
-    /// not run through applyRasterizingEdit (the live-edit brush path) must
-    /// clear the metadata themselves once this returns true.
-    func confirmTextRasterize(layer idx: Int) -> Bool {
-        guard let doc = doc, doc.textPayload(idx) != nil else { return true }
-        return TextLayer.confirmRasterize(
-            layerName: doc.layerInfo(idx)?.name ?? "this layer")
+    /// `idx`'s description, in the words of whichever kind it is. True means
+    /// the edit may proceed: either the layer carries no description, or the
+    /// user confirmed.
+    func confirmRasterize(layer idx: Int) -> Bool {
+        guard let doc = doc else { return true }
+        let name = doc.layerInfo(idx)?.name ?? "this layer"
+        if doc.textPayload(idx) != nil {
+            return TextLayer.confirmRasterize(layerName: name)
+        }
+        if doc.livePhotoPayload(idx) != nil {
+            return LivePhoto.confirmRasterize(layerName: name)
+        }
+        return true
     }
 
     /// Undo/redo target. Restores the snapshot AND the active-layer index

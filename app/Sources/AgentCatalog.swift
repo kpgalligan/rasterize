@@ -553,6 +553,61 @@ extension AgentServer {
                     "document_id": docID,
                 ]),
             tool(
+                "add_live_photo_layer",
+                "Adds an Apple LIVE PHOTO as a new layer above the active one and selects "
+                    + "it. A Live Photo is a photo plus a short video sharing one name in one "
+                    + "folder (IMG_0001.HEIC and IMG_0001.MOV) — pass the path of either "
+                    + "half. The layer shows the key frame (the photo itself, at full "
+                    + "resolution) and remembers which moment it is showing, so "
+                    + "set_live_photo_frame can pick another one later; get_document reports "
+                    + "that as a live_photo object. NOTE: painting on the layer afterwards "
+                    + "(brush, eraser, fill, gradient, add_text, apply_filter) drops the link "
+                    + "and leaves plain pixels.",
+                [
+                    "path": [
+                        "type": "string",
+                        "description": "Absolute or ~ path to either half of the Live Photo.",
+                    ],
+                    "time": [
+                        "type": "number",
+                        "description": "Moment to show, in seconds from the start of the "
+                            + "video (default: the key frame). Clamped to the video's "
+                            + "length.",
+                    ],
+                    "name": [
+                        "type": "string",
+                        "description": "Layer name (default: the file's name).",
+                    ],
+                    "layer": [
+                        "type": "integer",
+                        "description": "Insert above this layer index; omit for the active "
+                            + "layer.",
+                    ],
+                    "document_id": docID,
+                ], required: ["path"]),
+            tool(
+                "set_live_photo_frame",
+                "Shows a different moment of a live photo layer's video — the layer's pixels "
+                    + "are re-rendered from that frame as one undo step, and everything else "
+                    + "about the layer (name, position, opacity, blend mode, mask) is kept. "
+                    + "Frames are scaled to the layer's size, and the key frame is the "
+                    + "full-resolution photo itself, so times away from it are softer. "
+                    + "Errors when the target layer is not a live photo layer "
+                    + "(add_live_photo_layer makes one) or when its video file has been "
+                    + "moved away. Returns the moment that actually landed: the time is "
+                    + "clamped to the video and snaps to the key frame when it lands within "
+                    + "a frame of it.",
+                [
+                    "time": [
+                        "type": "number",
+                        "description": "Seconds from the start of the video; "
+                            + "get_document's live_photo object reports duration and "
+                            + "key_time.",
+                    ],
+                    "layer": index,
+                    "document_id": docID,
+                ], required: ["time"]),
+            tool(
                 "select_rect",
                 "Selects a rectangle (canvas coordinates). Selections confine "
                     + "brush/eraser strokes, fill, and gradient, and define Crop.",

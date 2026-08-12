@@ -9,7 +9,8 @@ use std::ffi::{c_char, c_int, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use crate::ffi_util::{boxed, fallible_op, filter_from_c, pure_op, read_cstr};
+use crate::doc::MAX_PIXELS;
+use crate::ffi_util::{boxed, fallible_op, filter_from_c, produce_op, pure_op, read_cstr};
 use crate::{ops, Format, RzImage};
 
 /// Opens the image file at `path` (UTF-8), sniffing the container format;
@@ -38,6 +39,32 @@ pub unsafe extern "C" fn rz_image_open(
             boxed,
         )
     }
+}
+
+/// Builds an image from a caller-owned STRAIGHT (non-premultiplied) RGBA8
+/// buffer — row 0 = top, exactly `w * h * 4` bytes — copying it. The
+/// in-memory twin of [`rz_image_open`], for pixels this library cannot decode
+/// itself (the host's HEIC still, a Live Photo video frame). Returns NULL on
+/// a NULL buffer, a zero dimension, or a size past the 100 MP cap.
+///
+/// # Safety
+/// `src` must be NULL or a valid pointer to at least `w * h * 4` readable
+/// bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_image_from_rgba(src: *const u8, w: u32, h: u32) -> *mut RzImage {
+    // The dimensions ARE the buffer's length here (no image-side size to
+    // check them against), so they are bounded before a slice is built from
+    // them, exactly as rz_doc_with_layer_pixels_rgba bounds its own.
+    if src.is_null() || w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
+        return ptr::null_mut();
+    }
+    produce_op(|| {
+        // Length computed from the same dimensions that size the image, with
+        // checked arithmetic — never a separate length argument.
+        let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+        let src = unsafe { std::slice::from_raw_parts(src, len) };
+        RzImage::from_rgba(w, h, src.to_vec())
+    })
 }
 
 /// Deep copy. Returns NULL only if `img` is NULL.

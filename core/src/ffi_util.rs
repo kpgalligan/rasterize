@@ -78,6 +78,17 @@ pub(crate) unsafe fn fallible_op<T, R>(
     }
 }
 
+/// Runs a producer that takes no handle, boxing what it makes: `None` or a
+/// panic yield NULL. The constructor twin of [`pure_op`] — for exports whose
+/// only inputs are plain values (`rz_image_from_rgba`) — and the one place
+/// the produce-or-NULL mapping is written.
+pub(crate) fn produce_op<T>(op: impl FnOnce() -> Option<T>) -> *mut T {
+    match catch_unwind(AssertUnwindSafe(op)) {
+        Ok(Some(result)) => boxed(result),
+        _ => ptr::null_mut(),
+    }
+}
+
 /// Runs a pure operation against `img`, boxing the produced image.
 /// NULL input, `None`, or a panic all yield NULL.
 ///
@@ -91,10 +102,7 @@ where
         return ptr::null_mut();
     }
     let image = unsafe { &*img };
-    match catch_unwind(AssertUnwindSafe(|| op(image))) {
-        Ok(Some(result)) => boxed(result),
-        _ => ptr::null_mut(),
-    }
+    produce_op(|| op(image))
 }
 
 /// Maps a raw `RzResizeFilter` value — the ONE mapping shared by

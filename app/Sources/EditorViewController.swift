@@ -10,10 +10,14 @@ enum PaintTarget {
 }
 
 final class EditorViewController: NSViewController {
-    private weak var document: ImageDocument?
+    // Not private: the per-feature extension files (EditorViewController+…)
+    // are handlers of this controller and need the document they act on.
+    weak var document: ImageDocument?
 
     private let scrollView = NSScrollView()
-    private let canvas = ImageCanvasView()
+    // Not private, like `document` above: the extension files need the two
+    // things every editor command works against.
+    let canvas = ImageCanvasView()
     private var didRunInitialZoom = false
 
     // Design chrome: 58px toolbar, floating zoom pill, 30px status bar with
@@ -228,16 +232,17 @@ final class EditorViewController: NSViewController {
             // A mask stroke already committed itself (onCommitMaskOverlay)
             // and never opened a live-edit session.
             guard !wasMask else { return }
-            // A stroke that actually landed on a text layer contradicts the
-            // description its pixels were rendered from. Ask at mouse-up
-            // rather than mouse-down: a modal alert during mouse-down would
-            // swallow the drag. Rasterize drops the description inside this
-            // same gesture (one undo step); Cancel rolls the stroke back to
-            // the pre-stroke snapshot, which makes endLiveEdit a same-handle
-            // no-op — no undo step, no pixels changed.
+            // A stroke that actually landed on a DESCRIBED layer — text, a
+            // Live Photo frame — contradicts the description its pixels were
+            // rendered from. Ask at mouse-up rather than mouse-down: a modal
+            // alert during mouse-down would swallow the drag. Rasterize drops
+            // the description inside this same gesture (one undo step);
+            // Cancel rolls the stroke back to the pre-stroke snapshot, which
+            // makes endLiveEdit a same-handle no-op — no undo step, no pixels
+            // changed.
             let idx = document.activeLayerIndex
-            if let base = base, document.doc !== base, document.doc?.textPayload(idx) != nil {
-                if document.confirmTextRasterize(layer: idx) {
+            if let base = base, document.doc !== base, document.layerDescribesSource(idx) {
+                if document.confirmRasterize(layer: idx) {
                     if let cleared = document.doc?.withLayerMeta(idx, nil) {
                         document.updateLiveEdit(cleared)
                     }
@@ -397,6 +402,9 @@ final class EditorViewController: NSViewController {
         }
         layersPanel.onTextEdit = { [weak self] idx in
             self?.editTextLayer(idx)
+        }
+        layersPanel.onLivePhotoEdit = { [weak self] idx in
+            self?.editLivePhotoLayer(idx)
         }
         layersPanel.onShowAssistant = { [weak self] in
             self?.panelTab = 1
@@ -1162,12 +1170,9 @@ final class EditorViewController: NSViewController {
             return moved.withLayerMeta(idx, meta)
         }
         guard document.doc !== before else { return }
-        document.activeLayerIndex = min(below + 1, document.doc.layerCount - 1)
-        // The active layer moved: any mask paint target goes with it.
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        // The active layer moves to the new text layer; any mask paint target
+        // goes with it.
+        setActiveLayer(min(below + 1, document.doc.layerCount - 1))
     }
 
     // MARK: - Free Transform
@@ -1506,12 +1511,13 @@ final class EditorViewController: NSViewController {
             return true
         }
         let idx = session.layer
-        // A free transform rewrites the pixels a text layer's description was
-        // rendered from. Same prompt as every other rasterizing edit, but
-        // taken here rather than through applyRasterizingEdit: Cancel has to
-        // keep the session open instead of abandoning the whole gesture.
-        let describesText = doc.textPayload(idx) != nil
-        if describesText, !document.confirmTextRasterize(layer: idx) { return false }
+        // A free transform rewrites the pixels a described layer — text, a
+        // Live Photo frame — was rendered from. Same prompt as every other
+        // rasterizing edit, but taken here rather than through
+        // applyRasterizingEdit: Cancel has to keep the session open instead
+        // of abandoning the whole gesture.
+        let describesSource = document.layerDescribesSource(idx)
+        if describesSource, !document.confirmRasterize(layer: idx) { return false }
         let matrix = session.transform.matrix
         let sampler = session.sampler
         let before = document.doc
@@ -1520,7 +1526,7 @@ final class EditorViewController: NSViewController {
             guard let transformed = doc.transformingLayer(idx, matrix, sampler: sampler) else {
                 return nil
             }
-            guard describesText else { return transformed }
+            guard describesSource else { return transformed }
             return transformed.withLayerMeta(idx, nil) ?? transformed
         }
         isCommittingTransform = false
@@ -2133,6 +2139,22 @@ final class EditorViewController: NSViewController {
         editAdjustmentLayer(document.activeLayerIndex)
     }
 
+    /// Makes `idx` the layer edits target and refreshes everything that
+    /// follows it — the paint target, the panel, the status line, the
+    /// on-canvas layer boundary. Like the panel's own selection this only
+    /// retargets future edits: no undo step, no dirty flag. A no-op when
+    /// `idx` is already active or out of range.
+    func setActiveLayer(_ idx: Int) {
+        guard let document = document, let doc = document.doc,
+              idx >= 0, idx < doc.layerCount, idx != document.activeLayerIndex
+        else { return }
+        document.activeLayerIndex = idx
+        syncPaintTarget()
+        layersPanel.reload()
+        updateStatus()
+        updateActiveLayerRect()
+    }
+
     /// Reopens layer `idx`'s dialog pre-filled from its meta (the menu item
     /// and the layers panel's thumbnail double-click both land here). OK
     /// replaces only the meta as one undo step; Cancel leaves the document
@@ -2148,13 +2170,7 @@ final class EditorViewController: NSViewController {
         }
         // Editing a layer makes it the active one, like re-opening a text
         // layer does.
-        if document.activeLayerIndex != idx {
-            document.activeLayerIndex = idx
-            syncPaintTarget()
-            layersPanel.reload()
-            updateStatus()
-            updateActiveLayerRect()
-        }
+        setActiveLayer(idx)
         guard let sheet = AdjustmentLayerSheetController.make(
             op: op, document: document, canvas: canvas,
             mode: .edit(layer: idx, original: payload))
@@ -2586,6 +2602,13 @@ extension EditorViewController: NSUserInterfaceValidations {
             // an adjustment layer doesn't meaningfully have; its parameters
             // re-open through Adjustment Options… instead.
             return !activeLayerIsAdjustment
+        case #selector(selectLivePhotoFrame(_:)):
+            // Only a layer that still says which Live Photo it came from can
+            // show a different frame of it; a missing clip is reported when
+            // the picker opens, not by disabling the item, so the reason is
+            // visible rather than mysterious.
+            guard let document = document, let doc = document.doc else { return false }
+            return doc.livePhotoPayload(document.activeLayerIndex) != nil
         case #selector(adjustmentOptions(_:)):
             guard let document = document, let doc = document.doc else { return false }
             let idx = document.activeLayerIndex

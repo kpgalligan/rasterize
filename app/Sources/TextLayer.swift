@@ -248,7 +248,7 @@ enum TextLayer {
             return true
         }
         guard drawn else { return nil }
-        unpremultiply(&pixels)
+        Bitmap.unpremultiply(&pixels)
         return TextLayerRaster(
             pixels: pixels, width: width, height: height,
             offsetX: Int(floor(inkX)) - Int(pad), offsetY: Int(floor(inkY)) - Int(pad))
@@ -287,26 +287,6 @@ enum TextLayer {
     static func editorOrigin(offsetX: Int, offsetY: Int, payload: TextLayerPayload) -> CGPoint {
         let pad = CGFloat(padding(forSize: payload.size))
         return CGPoint(x: CGFloat(offsetX) + pad, y: CGFloat(offsetY) + pad)
-    }
-
-    /// Straight-alpha conversion of a premultiplied RGBA8 buffer: layer
-    /// pixels cross the FFI with straight alpha (only the painting overlay is
-    /// premultiplied). Fully transparent pixels carry no color at all.
-    private static func unpremultiply(_ pixels: inout [UInt8]) {
-        for i in stride(from: 0, to: pixels.count, by: 4) {
-            let alpha = Int(pixels[i + 3])
-            if alpha == 255 { continue }
-            if alpha == 0 {
-                pixels[i] = 0
-                pixels[i + 1] = 0
-                pixels[i + 2] = 0
-                continue
-            }
-            for channel in 0..<3 {
-                let value = (Int(pixels[i + channel]) * 255 + alpha / 2) / alpha
-                pixels[i + channel] = UInt8(min(value, 255))
-            }
-        }
     }
 
     // MARK: - Naming

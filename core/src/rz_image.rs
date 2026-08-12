@@ -14,6 +14,8 @@ use image::codecs::tiff::TiffEncoder;
 use image::codecs::webp::WebPEncoder;
 use image::{ExtendedColorType, ImageDecoder, ImageEncoder, RgbaImage};
 
+use crate::doc::MAX_PIXELS;
+
 /// Opaque image handle exposed through the FFI. Holds a non-premultiplied
 /// RGBA8 buffer (row-major, no row padding).
 pub struct RzImage {
@@ -47,6 +49,19 @@ impl Format {
 }
 
 impl RzImage {
+    /// Wraps a caller-supplied STRAIGHT (non-premultiplied) RGBA8 buffer —
+    /// row-major, row 0 = top, exactly `w * h * 4` bytes — as an image: the
+    /// in-memory twin of [`RzImage::open`], for pixels this crate cannot
+    /// decode itself (a macOS HEIC still, a Live Photo video frame). None for
+    /// a zero dimension, a size past [`MAX_PIXELS`], or a buffer whose length
+    /// disagrees with the dimensions.
+    pub(crate) fn from_rgba(w: u32, h: u32, data: Vec<u8>) -> Option<Self> {
+        if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
+            return None;
+        }
+        RgbaImage::from_raw(w, h, data).map(|pixels| RzImage { pixels })
+    }
+
     /// Reads and decodes the file at `path`. Files starting with the `8BPS`
     /// magic are decoded as Photoshop documents and flattened to their
     /// composite image; everything else goes through content sniffing in the

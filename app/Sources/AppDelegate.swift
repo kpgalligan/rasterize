@@ -258,6 +258,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(
             item("New Layer", #selector(EditorViewController.newLayer(_:)), "n", [.command, .shift]))
         menu.addItem(submenuItem(newAdjustmentLayerMenu()))
+        // Imports a Live Photo as a layer showing its key frame; Select Live
+        // Photo Frame… below then scrubs that layer's timeline.
+        menu.addItem(
+            item("Place Live Photo…", #selector(EditorViewController.placeLivePhoto(_:))))
         menu.addItem(item("Duplicate Layer", #selector(EditorViewController.duplicateLayer(_:)), "j"))
         menu.addItem(item("Delete Layer", #selector(EditorViewController.deleteLayer(_:))))
         menu.addItem(.separator())
@@ -277,6 +281,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // adjustment layer whose op has one (validation in the editor).
         menu.addItem(
             item("Adjustment Options…", #selector(EditorViewController.adjustmentOptions(_:))))
+        // Enabled only on a layer that still carries its Live Photo
+        // description (validation in the editor).
+        menu.addItem(
+            item(
+                "Select Live Photo Frame…",
+                #selector(EditorViewController.selectLivePhotoFrame(_:))))
         menu.addItem(.separator())
         menu.addItem(
             item("Merge Down", #selector(EditorViewController.mergeDown(_:)), "e", [.command, .shift]))

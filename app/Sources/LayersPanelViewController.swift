@@ -29,6 +29,11 @@ final class LayersPanelViewController: NSViewController {
     /// layer's description on the canvas.
     var onTextEdit: ((Int) -> Void)?
 
+    /// Called when the user double-clicks a live photo layer, or picks
+    /// Select Frame… from its row menu (layer index attached): the editor
+    /// opens that layer's frame picker.
+    var onLivePhotoEdit: ((Int) -> Void)?
+
     /// What brush/eraser currently edit on the active layer, pushed in by the
     /// editor and drawn as a focus ring around the matching thumbnail.
     private(set) var paintTarget: PaintTarget = .layer
@@ -489,6 +494,7 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
             maskEnabled: doc.layerMaskEnabled(idx),
             isText: doc.textPayload(idx) != nil,
             isAdjustment: doc.layerIsAdjustment(idx),
+            isLivePhoto: doc.livePhotoPayload(idx) != nil,
             clipped: doc.layerClipped(idx),
             selected: idx == document.activeLayerIndex, paintTarget: paintTarget)
         cell.onSelectTarget = { [weak self] target in
@@ -591,7 +597,7 @@ extension LayersPanelViewController: NSMenuDelegate {
     }
 
     /// Routes "edit this layer's source" to the editor by layer kind — the
-    /// two are mutually exclusive (one meta slot), and a plain raster layer
+    /// kinds are mutually exclusive (one meta slot), and a plain raster layer
     /// has no source to reopen, so the gesture is simply inert there. Both
     /// the row's double-click and the thumbnail's own land here.
     private func editLayerSource(_ idx: Int) {
@@ -600,6 +606,8 @@ extension LayersPanelViewController: NSMenuDelegate {
             onAdjustmentEdit?(idx)
         } else if doc.textPayload(idx) != nil {
             onTextEdit?(idx)
+        } else if doc.livePhotoPayload(idx) != nil {
+            onLivePhotoEdit?(idx)
         }
     }
 
@@ -618,6 +626,15 @@ extension LayersPanelViewController: NSMenuDelegate {
             title: "Rename", action: #selector(renameClickedLayer(_:)), keyEquivalent: "")
         rename.target = self
         menu.addItem(rename)
+        // Only on a live photo layer, where it is the row's own version of
+        // the double-click: no other row kind has a frame to select.
+        if document?.doc?.livePhotoPayload(layerIndex(forRow: row)) != nil {
+            let frame = NSMenuItem(
+                title: "Select Frame…", action: #selector(selectClickedLayerFrame(_:)),
+                keyEquivalent: "")
+            frame.target = self
+            menu.addItem(frame)
+        }
         menu.addItem(.separator())
         // The SAME nil-target action the footer button and the Layer menu
         // send, so it inherits the editor's validation: disabled on the last
@@ -626,6 +643,16 @@ extension LayersPanelViewController: NSMenuDelegate {
             NSMenuItem(
                 title: "Delete Layer",
                 action: #selector(EditorViewController.deleteLayer(_:)), keyEquivalent: ""))
+    }
+
+    /// Select Frame…: the clicked row's Live Photo timeline, the same picker
+    /// its double-click opens. `clickedRow` still names the right row here
+    /// (it stays valid until the next click), and menuNeedsUpdate has already
+    /// selected it.
+    @objc private func selectClickedLayerFrame(_ sender: Any?) {
+        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
+        guard row >= 0, row < tableView.numberOfRows else { return }
+        onLivePhotoEdit?(layerIndex(forRow: row))
     }
 
     /// Rename: put the keyboard in the row's name field with the name

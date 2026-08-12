@@ -36,6 +36,22 @@ final class RasterImage {
         return RasterImage(owning: handle)
     }
 
+    /// Wraps an in-memory STRAIGHT-alpha (non-premultiplied) RGBA8 buffer,
+    /// row 0 = top, exactly `width * height * 4` bytes — the same convention
+    /// as `withLayerPixels(_:rgba:width:height:)`, and the way pixels the
+    /// core cannot decode itself (a HEIC still, a Live Photo video frame)
+    /// become an image without a round trip through a temporary file. nil for
+    /// a bad size or a buffer whose length disagrees with it.
+    static func from(rgba pixels: [UInt8], width: Int, height: Int) -> RasterImage? {
+        guard width > 0, height > 0, pixels.count == width * height * 4,
+              width * height <= maxResizePixels
+        else { return nil }
+        return pixels.withUnsafeBufferPointer { buffer in
+            rz_image_from_rgba(buffer.baseAddress, UInt32(width), UInt32(height))
+                .map { RasterImage(owning: $0) }
+        }
+    }
+
     var width: Int { Int(rz_image_width(ptr)) }
     var height: Int { Int(rz_image_height(ptr)) }
     var pixelSize: NSSize { NSSize(width: width, height: height) }

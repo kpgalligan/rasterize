@@ -39,6 +39,14 @@ typedef enum {
  * with rz_string_free. */
 RzImage *rz_image_open(const char *path, char **err_out);
 
+/* Build an image from `src`: w*h*4 bytes of STRAIGHT (non-premultiplied)
+ * RGBA8, row-major, top row first, no row padding — the in-memory twin of
+ * rz_image_open, for pixels this library cannot decode itself (a HEIC still
+ * decoded by the host, a Live Photo video frame). The buffer is copied and
+ * stays the caller's. Returns NULL if src is NULL, if w or h is 0, or if
+ * w*h > 100000000. */
+RzImage *rz_image_from_rgba(const uint8_t *src, uint32_t w, uint32_t h);
+
 /* Deep copy. Returns NULL only if img is NULL. */
 RzImage *rz_image_clone(const RzImage *img);
 

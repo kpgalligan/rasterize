@@ -22,8 +22,20 @@ final class AgentServer {
     private var documentIDs: [ObjectIdentifier: Int] = [:]
     private var nextDocumentID = 1
 
-    private struct ToolError: Error {
+    // Not private, like the helpers below it: the per-feature extension
+    // files (AgentServer+…) build their handlers from the same pieces, and
+    // handlers unreachable from this file's dispatch table would be dead.
+    struct ToolError: Error {
         let message: String
+    }
+
+    /// What a pixel edit dropped from a layer, for the report back: a layer
+    /// whose pixels are the RENDERING of a description — a text layer's
+    /// string, a live photo layer's frame — stops being that the moment
+    /// something paints over them.
+    private enum DroppedDescription: String {
+        case text
+        case livePhoto = "live photo"
     }
 
     // MARK: - Lifecycle
@@ -139,6 +151,9 @@ final class AgentServer {
         // Text layers
         "add_text_layer": addTextLayer,
         "edit_text_layer": editTextLayer,
+        // Live photo layers (AgentServer+LivePhoto.swift)
+        "add_live_photo_layer": addLivePhotoLayer,
+        "set_live_photo_frame": setLivePhotoFrame,
         // Selection, fill, gradient
         "select_rect": selectRect,
         "select_ellipse": selectEllipse,
@@ -235,7 +250,7 @@ final class AgentServer {
 
     /// The document a call targets: document_id when given, else the
     /// current (main window's) document, else the only open one.
-    private func target(_ a: [String: Any]) throws -> ImageDocument {
+    func target(_ a: [String: Any]) throws -> ImageDocument {
         let documents = openDocuments()
         if let wanted = intArg(a, "document_id") {
             guard let match = documents.first(where: { id(for: $0) == wanted }) else {
@@ -332,6 +347,11 @@ final class AgentServer {
             layer["is_adjustment"] = isAdjustment
             if isAdjustment, let payload = doc.adjustmentPayload(index) {
                 layer["adjustment"] = ["op": payload.op, "params": payload.params]
+            }
+            // A LIVE PHOTO layer shows one frame of a clip and remembers
+            // which; those are the layers set_live_photo_frame can re-render.
+            if let payload = doc.livePhotoPayload(index) {
+                layer["live_photo"] = Self.livePhotoFields(payload)
             }
             return layer
         }
@@ -450,7 +470,7 @@ final class AgentServer {
     /// group would otherwise stay open across tool calls, merging every
     /// agent edit into one undo step. The transform runs first so a
     /// failed edit never opens a group.
-    private func performGroupedEdit(
+    func performGroupedEdit(
         _ document: ImageDocument, _ actionName: String,
         _ transform: (RasterDocument) -> RasterDocument?
     ) throws {
@@ -479,36 +499,56 @@ final class AgentServer {
     /// recovery-oriented equivalent: undo restores the text layer.
     ///
     /// `pixelLayer` is the layer whose own pixels the edit rewrites, or nil
-    /// when it writes somewhere else (a layer MASK), which leaves a text
-    /// description valid. Returns true when a description was dropped.
+    /// when it writes somewhere else (a layer MASK), which leaves a
+    /// description valid. Returns the kind of description that was dropped.
     @discardableResult
     private func performPixelEdit(
         _ document: ImageDocument, _ actionName: String, pixelLayer: Int?,
         _ transform: (RasterDocument) -> RasterDocument?
-    ) throws -> Bool {
-        let rasterizesText =
-            pixelLayer.map { document.doc?.textPayload($0) != nil } ?? false
+    ) throws -> DroppedDescription? {
+        let dropped = pixelLayer.flatMap { Self.description(of: document, layer: $0) }
         try performGroupedEdit(document, actionName) { doc in
             guard let updated = transform(doc) else { return nil }
-            guard rasterizesText, let layer = pixelLayer else { return updated }
+            guard dropped != nil, let layer = pixelLayer else { return updated }
             return updated.withLayerMeta(layer, nil) ?? updated
         }
-        return rasterizesText
+        return dropped
+    }
+
+    /// The kind of description layer `idx` carries, or nil for plain pixels
+    /// (the app-side mirror of ImageDocument.layerDescribesSource).
+    private static func description(
+        of document: ImageDocument, layer idx: Int
+    ) -> DroppedDescription? {
+        guard let doc = document.doc else { return nil }
+        if doc.textPayload(idx) != nil { return .text }
+        if doc.livePhotoPayload(idx) != nil { return .livePhoto }
+        return nil
     }
 
     /// A pixel-edit result, with the rasterization report appended when the
-    /// edit dropped a text layer's description.
+    /// edit dropped a layer's description.
     private func pixelEditResult(
-        _ fields: [String: Any], layer: Int, rasterizedText: Bool
+        _ fields: [String: Any], layer: Int, rasterized: DroppedDescription?
     ) throws -> String {
         var result = fields
-        if rasterizedText {
+        switch rasterized {
+        case .text:
             result["rasterized_text"] = true
             result["note"] =
                 "This edit painted over layer \(layer)'s pixels, so the layer is no longer "
                 + "editable as text: the string, font, size, color and alignment it was "
                 + "rendered from were dropped and edit_text_layer no longer works on it. The "
                 + "pixels are intact; undo restores the text layer."
+        case .livePhoto:
+            result["rasterized_live_photo"] = true
+            result["note"] =
+                "This edit painted over layer \(layer)'s pixels, so the layer is no longer "
+                + "linked to its Live Photo: the clip, the moment it was showing and "
+                + "set_live_photo_frame are gone from it. The pixels are intact; undo "
+                + "restores the link."
+        case nil:
+            break
         }
         return try jsonResult(result)
     }
@@ -875,10 +915,10 @@ final class AgentServer {
         }
 
         // performPixelEdit is the pixel-rewrite chokepoint: a transform
-        // resamples the pixels a text layer's description was rendered from,
-        // so the description is dropped in the SAME edit (one undo step) and
+        // resamples the pixels a described layer was rendered from, so the
+        // description is dropped in the SAME edit (one undo step) and
         // reported back — the agent must never raise the UI's modal prompt.
-        let rasterized: Bool
+        let rasterized: DroppedDescription?
         do {
             rasterized = try performPixelEdit(
                 document, "Transform Layer", pixelLayer: index
@@ -916,7 +956,7 @@ final class AgentServer {
                     "pivot_y": Self.transformNumber(Double(pivot.y)),
                     "sampler": sampler.name,
                 ],
-            ], layer: index, rasterizedText: rasterized)
+            ], layer: index, rasterized: rasterized)
     }
 
     // MARK: - Filters and geometry
@@ -940,7 +980,7 @@ final class AgentServer {
         }
         return try pixelEditResult(
             ["ok": true, "filter": filter, "layer": index],
-            layer: index, rasterizedText: rasterized)
+            layer: index, rasterized: rasterized)
     }
 
     private func filtered(
@@ -1235,14 +1275,14 @@ final class AgentServer {
     /// instead (white reveals, black hides, the overlay's own alpha is
     /// the blend — `mode` and `alpha` do not apply there).
     ///
-    /// Returns true when painting the layer's pixels dropped a text
-    /// description (see performPixelEdit); a MASK stroke never does.
+    /// Returns the kind of description painting the layer's pixels dropped
+    /// (see performPixelEdit); a MASK stroke never drops one.
     @discardableResult
     private func paintOverlay(
         _ document: ImageDocument, layer: Int, actionName: String,
         mode: RzCompositeMode, alpha: Double, toMask: Bool = false,
         draw: (CGContext) -> Void
-    ) throws -> Bool {
+    ) throws -> DroppedDescription? {
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
         let width = doc.width
         let height = doc.height
@@ -1409,7 +1449,7 @@ final class AgentServer {
                 "Layer \(layer) is an adjustment layer (no pixels to paint), so the stroke "
                 + "was routed to its mask."
         }
-        return try pixelEditResult(fields, layer: layer, rasterizedText: rasterized)
+        return try pixelEditResult(fields, layer: layer, rasterized: rasterized)
     }
 
     private func addText(_ a: [String: Any]) throws -> String {
@@ -1455,7 +1495,7 @@ final class AgentServer {
                     "width": Int(measured.width.rounded(.up)),
                     "height": Int(measured.height.rounded(.up)),
                 ],
-            ], layer: layer, rasterizedText: rasterized)
+            ], layer: layer, rasterized: rasterized)
     }
 
     // MARK: - Text layers
@@ -1824,7 +1864,7 @@ final class AgentServer {
                 contiguous: contiguous, mask: mask)
         }
         return try pixelEditResult(
-            ["ok": true, "layer": index], layer: index, rasterizedText: rasterized)
+            ["ok": true, "layer": index], layer: index, rasterized: rasterized)
     }
 
     private func gradient(_ a: [String: Any]) throws -> String {
@@ -1856,7 +1896,7 @@ final class AgentServer {
                 start: start, end: end, kind: kind, mask: mask)
         }
         return try pixelEditResult(
-            ["ok": true, "layer": index], layer: index, rasterizedText: rasterized)
+            ["ok": true, "layer": index], layer: index, rasterized: rasterized)
     }
 
     /// clear_selection: erases the window's live selection out of a layer,
@@ -1875,7 +1915,7 @@ final class AgentServer {
             doc.clearingSelection(index, mask: mask)
         }
         return try pixelEditResult(
-            ["ok": true, "layer": index], layer: index, rasterizedText: rasterized)
+            ["ok": true, "layer": index], layer: index, rasterized: rasterized)
     }
 
     /// sRGB straight-alpha bytes of a parsed color.
@@ -2020,11 +2060,11 @@ final class AgentServer {
 
     // MARK: - Argument helpers
 
-    private func intArg(_ a: [String: Any], _ key: String) -> Int? {
+    func intArg(_ a: [String: Any], _ key: String) -> Int? {
         (a[key] as? NSNumber)?.intValue ?? (a[key] as? String).flatMap(Int.init)
     }
 
-    private func doubleArg(_ a: [String: Any], _ key: String) -> Double? {
+    func doubleArg(_ a: [String: Any], _ key: String) -> Double? {
         (a[key] as? NSNumber)?.doubleValue ?? (a[key] as? String).flatMap(Double.init)
     }
 
@@ -2038,11 +2078,11 @@ final class AgentServer {
         }
     }
 
-    private func stringArg(_ a: [String: Any], _ key: String) -> String? {
+    func stringArg(_ a: [String: Any], _ key: String) -> String? {
         a[key] as? String
     }
 
-    private func requiredString(_ a: [String: Any], _ key: String) throws -> String {
+    func requiredString(_ a: [String: Any], _ key: String) throws -> String {
         guard let value = stringArg(a, key), !value.isEmpty else {
             throw ToolError(message: "Missing required argument: \(key)")
         }
@@ -2051,13 +2091,13 @@ final class AgentServer {
 
     // MARK: - Result encoding
 
-    private func callResult(content: [[String: Any]], isError: Bool) throws -> String {
+    func callResult(content: [[String: Any]], isError: Bool) throws -> String {
         let data = try JSONSerialization.data(
             withJSONObject: ["content": content, "isError": isError])
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func jsonResult(_ object: [String: Any]) throws -> String {
+    func jsonResult(_ object: [String: Any]) throws -> String {
         let data = try JSONSerialization.data(withJSONObject: object)
         return try callResult(
             content: [["type": "text", "text": String(decoding: data, as: UTF8.self)]],

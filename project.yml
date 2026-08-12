@@ -94,6 +94,19 @@ targets:
             CFBundleTypeRole: Editor
             NSDocumentClass: Rasterize.ImageDocument
             LSHandlerRank: Alternate
+          # A Live Photo is a still plus a QuickTime clip sharing one name;
+          # opening either half opens the pair (ImageDocument.openDocument).
+          # HEIC/HEIF are decoded by the platform, not the Rust core.
+          - CFBundleTypeName: HEIF Image
+            LSItemContentTypes: [public.heic, public.heif]
+            CFBundleTypeRole: Editor
+            NSDocumentClass: Rasterize.ImageDocument
+            LSHandlerRank: Alternate
+          - CFBundleTypeName: QuickTime Movie
+            LSItemContentTypes: [com.apple.quicktime-movie]
+            CFBundleTypeRole: Editor
+            NSDocumentClass: Rasterize.ImageDocument
+            LSHandlerRank: Alternate
     preBuildScripts:
       - name: Build Rust Core
         script: |

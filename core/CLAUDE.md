@@ -5,7 +5,7 @@ Applies to everything under `core/`. Build commands, the FFI three-file lockstep
 ## Module map
 
 - `lib.rs` — module declarations and re-exports only. No implementation code.
-- `rz_image.rs` — flat `RzImage`, format sniffing, file open/save/encode. (Named `rz_image`, not `image`, to avoid ambiguity with the `image` crate.)
+- `rz_image.rs` — flat `RzImage`, format sniffing, file open/save/encode, and `from_rgba` (the in-memory twin of `open`, for pixels only the host can decode). (Named `rz_image`, not `image`, to avoid ambiguity with the `image` crate.)
 - `doc.rs` — layer model, compositing/projection, document ops, layer masks. **Full — no new concerns.** A new feature area gets a new module.
 - `blend.rs` — `BlendMode` + all blend math, the shared source-over/erase pixel primitives, `LUMA_*` constants.
 - `rzdc.rs` — the native `.rz` file format. The doc comment on `encode_native` **is** the format spec.
