@@ -21,7 +21,7 @@ make run        # build and launch
 - Single Rust test: `cd core && cargo test --release --test doc_tests magic_wand` (test-file name, then a name filter). Run `cargo fmt` in `core/` and keep `make lint` clean before finishing Rust work.
 - There are no Swift unit tests; app-side verification is `make typecheck` plus driving a built app (see below).
 - SourceKit/IDE per-file Swift diagnostics are **noise** — they lack the bridging-header context and report false errors. Trust only `make typecheck` (must end with 0 errors).
-- `Rasterize.xcodeproj` is generated; `project.yml` (xcodegen) is the source of truth. Never commit the project file. Both xcodegen and `make typecheck` glob `app/Sources/`, so a new Swift file needs no registration anywhere. Target is arm64, macOS 13 — avoid macOS 14+ APIs (e.g. `NSBezierPath.cgPath`; use the `cgPathCompat` bridge in `app/Sources/Selection.swift`).
+- `Rasterize.xcodeproj` is generated; `project.yml` (xcodegen) is the source of truth. Never commit the project file. Both xcodegen and `make typecheck` glob `app/Sources/`, so a new Swift file needs no registration anywhere. Target is arm64, macOS 15 (Sequoia) — raised from 13 for Vision's `VNGenerateForegroundInstanceMaskRequest` (subject lifting), which is macOS 14+. The floor is deliberately generous: prefer the modern API over a back-compat bridge, and don't add `if #available` gates below 15.
 
 ## Architecture
 

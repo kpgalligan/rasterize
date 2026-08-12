@@ -240,7 +240,7 @@ struct CanvasSelection {
             return mask
         }
         var bytes = [UInt8](repeating: 0, count: canvasWidth * canvasHeight)
-        guard let cgPath = path?.cgPathCompat else { return bytes }
+        guard let cgPath = path?.cgPath else { return bytes }
         bytes.withUnsafeMutableBufferPointer { buffer in
             guard
                 let context = CGContext(
@@ -262,7 +262,7 @@ struct CanvasSelection {
     /// Clips `context` — whose coordinates are canvas top-left-origin
     /// (flipped) — to the selected region.
     func clip(_ context: CGContext) {
-        if let cgPath = path?.cgPathCompat {
+        if let cgPath = path?.cgPath {
             context.addPath(cgPath)
             context.clip()
             return
@@ -398,26 +398,5 @@ struct CanvasSelection {
             bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
             provider: provider, decode: nil, shouldInterpolate: false,
             intent: .defaultIntent)
-    }
-}
-
-extension NSBezierPath {
-    /// CGPath bridge for macOS 13 (NSBezierPath.cgPath is macOS 14+).
-    var cgPathCompat: CGPath {
-        let path = CGMutablePath()
-        var points = [NSPoint](repeating: .zero, count: 3)
-        for i in 0..<elementCount {
-            switch element(at: i, associatedPoints: &points) {
-            case .moveTo: path.move(to: points[0])
-            case .lineTo: path.addLine(to: points[0])
-            case .curveTo, .cubicCurveTo:
-                path.addCurve(to: points[2], control1: points[0], control2: points[1])
-            case .quadraticCurveTo:
-                path.addQuadCurve(to: points[1], control: points[0])
-            case .closePath: path.closeSubpath()
-            @unknown default: break
-            }
-        }
-        return path
     }
 }

@@ -116,11 +116,14 @@ stroke) extends naturally:
 ## The distinctive one: subject selection via Vision
 
 Our selection *is* a coverage mask, so a segmentation result drops
-straight into the existing model with no glue. macOS ships this:
-`VNGeneratePersonSegmentationRequest` works on the current deployment
-target; full subject lifting
-(`VNGenerateForegroundInstanceMaskRequest`) needs macOS 14, so it is a
-raise-the-floor-or-gate-it decision.
+straight into the existing model with no glue. macOS ships this, and the
+deployment floor was raised to 15 to reach all of it:
+`VNGenerateForegroundInstanceMaskRequest` (subject lifting — the API
+behind Preview's *Copy Subject*) returns each salient subject as its own
+instance, and `VNGeneratePersonInstanceMaskRequest` separates up to four
+people; `VNGeneratePersonSegmentationRequest` remains the one merged
+people mask. Instances are what make it a *tool* rather than a filter —
+click a subject, get that subject.
 
 Exposed as an MCP tool as well, it makes the built-in agent
 qualitatively more capable — "remove the background", "brighten just the
