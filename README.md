@@ -92,7 +92,10 @@ decoding, encoding, and manipulation.
   samples the flattened composite; Select > Select Subject hands the
   composite to macOS's Vision segmentation — the model behind Preview's
   Copy Subject — and turns the people, animals or objects it finds into a
-  selection with no seed point, no tolerance and a genuinely soft edge;
+  selection with no seed point, no tolerance and a genuinely soft edge,
+  while the Subject tool (S) does it one subject at a time: press and the
+  subject under the pointer is outlined, drag between subjects to change
+  which, release to select it;
   combine selections with Shift (add),
   Option (subtract), or Shift+Option (intersect), invert (⇧⌘I), soften
   them with Select > Feather Selection…, reshape them with Grow, Shrink,

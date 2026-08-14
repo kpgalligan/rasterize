@@ -132,11 +132,21 @@ built-in agent qualitatively more capable — "remove the background",
 "brighten just the person" are one-shot requests now. No other editor
 pairs a segmentation primitive with an agent that can act on it.
 
-**Still open, in order of value.** A *click a subject* tool: the model
-already separates instances and the agent can address them, but the UI
-has no pointer affordance, so a `EditorTool` case that hit-tests the
-click against each instance mask is the missing half — and it is what
-makes this feel like Preview rather than like a menu command. Then
+The click-a-subject half shipped too, as the Subject tool (S): press and
+the subject under the pointer is outlined, drag to change which, release
+to select it. It rests on a fact worth keeping: `VNInstanceMaskObservation`
+carries `instanceMask`, a per-pixel map of instance IDS produced as a
+by-product of the request, so the hit test is ONE BYTE READ rather than a
+mask per subject. That map is a fixed 512×512 square whatever the image's
+shape, and it is a straight squash, not a letterboxed fit — measured
+against the full-resolution masks over aspect ratios 0.31 to 3.2, agreeing
+to within one cell every time. Hence outlining on every mouse-moved event
+costs nothing; only landing on a new subject pays for a mask.
+
+**Still open, in order of value.** The animated shimmer Apple draws along
+its outline: ours is static, and the canvas has no animation timer at all
+(the marquee is a fixed two-pass dash), so this is genuinely new drawing
+machinery rather than a tweak. Then
 `VNGeneratePersonInstanceMaskRequest` when the subjects wanted are
 specifically people (up to four, separated) and the general saliency
 model grabs the wrong thing. **Content-aware fill** (PatchMatch

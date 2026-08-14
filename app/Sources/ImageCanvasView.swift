@@ -46,9 +46,18 @@ final class ImageCanvasView: NSView {
             {
                 discardQuickMask()
             }
+            // An outline describes the composite it was traced from; the
+            // analysis behind it re-runs on identity, but the drawn path has
+            // to go now (an agent edit can land mid-press).
+            subjectSession.cancel()
             needsDisplay = true
         }
     }
+
+    /// The Subject tool's press-and-hold: the segmentation it caches and
+    /// the outline currently under the pointer. Logic lives in
+    /// SubjectSelection.swift; this view only points it at events.
+    var subjectSession = SubjectSession()
 
     /// When non-nil, drawn instead of `image` (live-preview sheets).
     var previewImage: CGImage? {
@@ -115,6 +124,7 @@ final class ImageCanvasView: NSView {
         didSet {
             cancelStroke()
             cancelLasso()
+            subjectSession.cancel()
             gradientAnchor = nil
             gradientCurrent = nil
             eyedropperDragActive = false
@@ -445,6 +455,10 @@ final class ImageCanvasView: NSView {
             drawGradientPreview(from: anchor, to: current)
         }
 
+        if let outline = subjectSession.outline, !isTransforming {
+            drawSubjectOutline(outline)
+        }
+
         if let textView = activeTextView {
             drawTextSessionBorder(textView.frame)
         }
@@ -659,6 +673,30 @@ final class ImageCanvasView: NSView {
                     width: radius * 2, height: radius * 2)
             ).fill()
         }
+    }
+
+    /// The subject under the pointer while the Subject tool is held.
+    ///
+    /// SOLID, unlike every other overlay here, and that is the point: a
+    /// dashed line would read as a committed selection, and this one is a
+    /// proposal that vanishes if the mouse comes up somewhere else. Drawn
+    /// dark-then-light so it survives both a white shirt and a black one.
+    private func drawSubjectOutline(_ path: NSBezierPath) {
+        let scale = magnification
+        // setLineDash is sticky on NSBezierPath and this same path object
+        // becomes the marquee once the selection commits, so the dash the
+        // marquee left behind has to be cleared rather than inherited.
+        path.setLineDash(nil, count: 0, phase: 0)
+        // Each pass carries the contrast on one kind of image — the dark
+        // halo on a light subject, the light core on a dark one — so both
+        // have to be heavy enough to read alone, not merely to edge the
+        // other. A thin pair vanishes into a pale background.
+        path.lineWidth = 5 / scale
+        NSColor.black.withAlphaComponent(0.65).setStroke()
+        path.stroke()
+        path.lineWidth = 2.5 / scale
+        NSColor.white.setStroke()
+        path.stroke()
     }
 
     /// Subtle dashed outline (selection stroke style, thinner) marking the
@@ -966,6 +1004,15 @@ final class ImageCanvasView: NSView {
             }
         case .wand:
             onWandClick?(point, Self.combineMode(for: event))
+        case .subject:
+            // Same modifier conventions as the marquee gestures, decided
+            // at mouse-down and held for the whole press.
+            dragCombineMode = Self.combineMode(for: event)
+            dragBaseSelection = selection
+            if subjectSession.hover(point, in: image) { needsDisplay = true }
+            // Nothing salient in the picture at all is worth saying;
+            // merely missing a subject is an ordinary miss, and silent.
+            if subjectSession.subjectCount == 0 { NSSound.beep() }
         case .fill:
             onFillClick?(point)
         case .gradient:
@@ -1008,6 +1055,10 @@ final class ImageCanvasView: NSView {
                 shapeSelection(.ellipse(rect(from: anchor, to: clamp(point: raw)))))
         case .lasso, .wand, .fill, .eyedropper:
             break
+        case .subject:
+            // The hit test is a byte read, so dragging across the photo
+            // re-outlines whichever subject is under the pointer.
+            if subjectSession.hover(clamp(point: raw), in: image) { needsDisplay = true }
         case .gradient:
             guard gradientAnchor != nil else { return }
             gradientCurrent = clamp(point: raw)
@@ -1061,6 +1112,17 @@ final class ImageCanvasView: NSView {
             }
         case .lasso, .wand, .fill, .eyedropper:
             break
+        case .subject:
+            let mode = dragCombineMode
+            let base = dragBaseSelection
+            dragBaseSelection = nil
+            // Releasing over the background keeps the selection as it was
+            // rather than clearing it: with this tool a miss is usually
+            // the segmentation's, not the user's.
+            if let found = subjectSession.end() {
+                commitSelection(found, mode: mode, base: base)
+            }
+            needsDisplay = true
         case .gradient:
             guard let anchor = gradientAnchor else { return }
             let end = clamp(point: convert(event.locationInWindow, from: nil))

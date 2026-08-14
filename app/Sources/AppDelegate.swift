@@ -385,6 +385,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Ellipse Select Tool", #selector(EditorViewController.selectEllipseTool(_:))))
         menu.addItem(item("Lasso Tool", #selector(EditorViewController.selectLassoTool(_:))))
         menu.addItem(item("Magic Wand Tool", #selector(EditorViewController.selectWandTool(_:))))
+        menu.addItem(
+            item("Subject Select Tool", #selector(EditorViewController.selectSubjectTool(_:))))
         menu.addItem(item("Move Tool", #selector(EditorViewController.selectMoveTool(_:))))
         menu.addItem(item("Brush Tool", #selector(EditorViewController.selectBrushTool(_:))))
         menu.addItem(item("Eraser Tool", #selector(EditorViewController.selectEraserTool(_:))))

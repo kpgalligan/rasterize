@@ -853,6 +853,7 @@ final class EditorViewController: NSViewController {
     @objc func selectEllipseTool(_ sender: Any?) { selectTool(.ellipseSelect) }
     @objc func selectLassoTool(_ sender: Any?) { selectTool(.lasso) }
     @objc func selectWandTool(_ sender: Any?) { selectTool(.wand) }
+    @objc func selectSubjectTool(_ sender: Any?) { selectTool(.subject) }
     @objc func selectMoveTool(_ sender: Any?) { selectTool(.move) }
     @objc func selectBrushTool(_ sender: Any?) { selectTool(.brush) }
     @objc func selectEraserTool(_ sender: Any?) { selectTool(.eraser) }
@@ -900,8 +901,12 @@ final class EditorViewController: NSViewController {
             control.isHidden = !transforming
         }
 
+        // Tools with nothing to configure hide the bar rather than show an
+        // empty one. Subject select is deliberately among them: the whole
+        // point of it is that there is no tolerance to tune.
         let barHidden = !transforming
-            && (tool == .select || tool == .ellipseSelect || tool == .lasso || tool == .move)
+            && (tool == .select || tool == .ellipseSelect || tool == .lasso || tool == .move
+                || tool == .subject)
         optionsBar.isHidden = barHidden
         scrollTopToRoot.isActive = false
         scrollTopToOptions.isActive = false
@@ -2497,6 +2502,7 @@ extension EditorViewController: NSUserInterfaceValidations {
         #selector(selectEllipseTool(_:)): .ellipseSelect,
         #selector(selectLassoTool(_:)): .lasso,
         #selector(selectWandTool(_:)): .wand,
+        #selector(selectSubjectTool(_:)): .subject,
         #selector(selectMoveTool(_:)): .move,
         #selector(selectBrushTool(_:)): .brush,
         #selector(selectEraserTool(_:)): .eraser,

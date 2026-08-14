@@ -1,16 +1,18 @@
 import AppKit
 
-/// The agent's subject segmentation, mirroring Select > Select Subject
-/// (EditorViewController+SubjectSelection). The model is
-/// SubjectSelection.swift.
+/// The agent's subject segmentation, mirroring both UI paths: Select >
+/// Select Subject (EditorViewController+SubjectSelection), which takes every
+/// subject at once, and the Subject tool's press-and-hold
+/// (SubjectSession in SubjectSelection.swift), which takes the one under the
+/// pointer. The model is SubjectSelection.swift.
 extension AgentServer {
     /// Selects the foreground subjects Vision finds in the composite.
     ///
-    /// Goes beyond the menu command in one way, because a model has no
-    /// canvas to click on: `instance` picks a single subject out of the
-    /// several the segmentation separated, and every result reports the
-    /// total, so "select just the person on the left" becomes select all →
-    /// read the count → try each instance and compare bounds.
+    /// `instance` is this tool's equivalent of clicking a particular subject
+    /// on the canvas — a model has no pointer, so it addresses subjects by
+    /// number instead, and every result reports the total so "select just
+    /// the person on the left" becomes select all → read the count → try
+    /// each instance and compare bounds.
     func selectSubject(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         guard let doc = document.doc else {

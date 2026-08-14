@@ -9,6 +9,7 @@ enum EditorTool: Int, CaseIterable {
     case ellipseSelect
     case lasso
     case wand
+    case subject
     case move
     case brush
     case eraser
@@ -24,6 +25,7 @@ enum EditorTool: Int, CaseIterable {
         case .ellipseSelect: return "Ellipse Select"
         case .lasso: return "Lasso"
         case .wand: return "Magic Wand"
+        case .subject: return "Subject Select"
         case .move: return "Move"
         case .brush: return "Brush"
         case .eraser: return "Eraser"
@@ -42,6 +44,7 @@ enum EditorTool: Int, CaseIterable {
         case .ellipseSelect: return "Ellipse"
         case .lasso: return "Lasso"
         case .wand: return "Wand"
+        case .subject: return "Subject"
         case .move: return "Move"
         case .brush: return "Brush"
         case .eraser: return "Eraser"
@@ -59,6 +62,7 @@ enum EditorTool: Int, CaseIterable {
         case .ellipseSelect: return "circle.dashed"
         case .lasso: return "lasso"
         case .wand: return "wand.and.stars"
+        case .subject: return "person.and.background.dotted"
         case .move: return "arrow.up.and.down.and.arrow.left.and.right"
         case .brush: return "paintbrush.pointed"
         case .eraser: return "eraser"
@@ -76,6 +80,10 @@ enum EditorTool: Int, CaseIterable {
         case .ellipseSelect: return "O"
         case .lasso: return "L"
         case .wand: return "W"
+        // S, O, L and W are taken by the rest of this tool's toolbar
+        // group, where a dropdown draws them side by side, so Subject
+        // takes the next distinctive letter of its own name.
+        case .subject: return "U"
         case .move: return "M"
         case .brush: return "B"
         case .eraser: return "E"
@@ -95,6 +103,7 @@ enum EditorTool: Int, CaseIterable {
         case .ellipseSelect: return #selector(EditorViewController.selectEllipseTool(_:))
         case .lasso: return #selector(EditorViewController.selectLassoTool(_:))
         case .wand: return #selector(EditorViewController.selectWandTool(_:))
+        case .subject: return #selector(EditorViewController.selectSubjectTool(_:))
         case .move: return #selector(EditorViewController.selectMoveTool(_:))
         case .brush: return #selector(EditorViewController.selectBrushTool(_:))
         case .eraser: return #selector(EditorViewController.selectEraserTool(_:))
@@ -109,8 +118,8 @@ enum EditorTool: Int, CaseIterable {
     /// hand closes mid-drag; the canvas swaps that state in itself.
     var cursor: NSCursor {
         switch self {
-        case .select, .ellipseSelect, .lasso, .wand, .fill, .gradient, .brush, .eraser,
-            .eyedropper:
+        case .select, .ellipseSelect, .lasso, .wand, .subject, .fill, .gradient, .brush,
+            .eraser, .eyedropper:
             return .crosshair
         case .move:
             return .openHand
@@ -127,6 +136,7 @@ enum EditorTool: Int, CaseIterable {
         case .ellipseSelect: return "o"
         case .lasso: return "l"
         case .wand: return "w"
+        case .subject: return "s"
         case .move: return "v"
         case .brush: return "b"
         case .eraser: return "e"
@@ -157,7 +167,7 @@ enum EditorTool: Int, CaseIterable {
     /// toolbar asserts it); grouping is the toolbar's business alone —
     /// menus, keys, the canvas and the agent all address tools directly.
     static let toolbarGroups: [[EditorTool]] = [
-        [.select, .ellipseSelect, .lasso, .wand],
+        [.select, .ellipseSelect, .lasso, .wand, .subject],
         [.move],
         [.brush, .eraser],
         [.fill],
