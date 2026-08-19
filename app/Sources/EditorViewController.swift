@@ -2419,6 +2419,31 @@ final class EditorViewController: NSViewController {
         }
     }
 
+    /// Edit > Cut (⌘X): Copy then Clear as one step — the ACTIVE LAYER's
+    /// pixels within the selection go to the clipboard exactly as Copy takes
+    /// them, then the selected region is cleared out of the layer as one
+    /// undoable "Cut" edit. The copy lands first, and only a copy that
+    /// succeeded lets the clear proceed, so pixels are never deleted without
+    /// having been captured; a Cancel on the rasterize prompt then degrades
+    /// to a plain Copy.
+    @objc func cut(_ sender: Any?) {
+        guard let document = document, let doc = document.doc,
+              let selection = canvas.selection
+        else {
+            NSSound.beep()
+            return
+        }
+        // Validation disables the menu item on an adjustment layer; this
+        // backstop covers any path around it.
+        guard !refuseAdjustmentPixelEdit() else { return }
+        let idx = document.activeLayerIndex
+        guard copyToPasteboard(doc.layerCanvasImage(idx)) else { return }
+        let mask = selection.maskBytes()
+        document.applyRasterizingEdit("Cut", layer: idx) { doc in
+            doc.clearingSelection(idx, mask: mask)
+        }
+    }
+
     /// Edit > Copy: the ACTIVE LAYER's pixels within the selection, the way
     /// Photoshop's Copy works — raw layer pixels, so opacity, blend mode and
     /// the layer mask stay out of it and the copy round-trips through Paste
@@ -2439,20 +2464,27 @@ final class EditorViewController: NSViewController {
         copyToPasteboard(document?.projection)
     }
 
-    /// Shared tail of both copies: crop the canvas-sized source to the
-    /// selection's BOUNDS (the whole canvas without a selection) and write it
-    /// as TIFF + PNG. Non-rectangular selections copy their bounding box —
-    /// the pixels outside the shape come along, as they always have.
-    private func copyToPasteboard(_ source: RasterImage?) {
+    /// Shared tail of Cut and both copies: multiply the canvas-sized
+    /// source's alpha by the selection's coverage — only the SELECTED pixels
+    /// come along, so anything inside the bounding box but outside the shape
+    /// goes transparent, and a feathered or anti-aliased edge fades out
+    /// across the fringe, exactly as Clear removes it — then crop to the
+    /// selection's BOUNDS (the whole canvas without a selection) and write
+    /// TIFF + PNG. True when the clipboard was written — Cut clears only on
+    /// success.
+    @discardableResult
+    private func copyToPasteboard(_ source: RasterImage?) -> Bool {
         var image = source
-        if let selection = canvas.selectionRect {
+        if let selection = canvas.selection {
+            let bounds = selection.bounds
+            image = image?.masked(by: selection.maskBytes())
             image = image?.cropped(
-                x: Int(selection.minX), y: Int(selection.minY),
-                w: Int(selection.width), h: Int(selection.height))
+                x: Int(bounds.minX), y: Int(bounds.minY),
+                w: Int(bounds.width), h: Int(bounds.height))
         }
         guard let cgImage = image?.makeCGImage() else {
             NSSound.beep()
-            return
+            return false
         }
         let rep = NSBitmapImageRep(cgImage: cgImage)
         let item = NSPasteboardItem()
@@ -2462,9 +2494,16 @@ final class EditorViewController: NSViewController {
         if let pngData = rep.representation(using: .png, properties: [:]) {
             item.setData(pngData, forType: .png)
         }
+        // The success return is load-bearing (Cut deletes on it), so an item
+        // both encodes failed to fill, or a write the pasteboard refuses,
+        // must report failure — not fall through as a silent success.
+        guard !item.types.isEmpty else {
+            NSSound.beep()
+            return false
+        }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.writeObjects([item])
+        return pasteboard.writeObjects([item])
     }
 }
 
@@ -2601,6 +2640,13 @@ extension EditorViewController: NSUserInterfaceValidations {
             // no pixels worth clearing.
             guard !isEditingText, canvas.selection != nil, !activeLayerIsAdjustment
             else { return false }
+            return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
+        case #selector(cut(_:)):
+            // Cut is Copy + Clear in one step, so it needs what Clear needs:
+            // a selection and an active layer with pixels. No text-editing
+            // guard — ⌘X reaches a field editor first, which claims cut:
+            // itself, exactly as ⌘C does for copy.
+            guard canvas.selection != nil, !activeLayerIsAdjustment else { return false }
             return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
         case #selector(showAdjustments(_:)), #selector(showBlur(_:)),
             #selector(showHueRotate(_:)), #selector(showLevels(_:)),

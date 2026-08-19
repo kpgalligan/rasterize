@@ -149,6 +149,18 @@ final class RasterImage {
         return wrap(rz_image_composite(ptr, data, UInt32(width), UInt32(height), mode, Float(alpha)))
     }
 
+    /// Multiplies each pixel's alpha by a full-frame u8 coverage mask (the
+    /// selection convention: 0 hides, 255 keeps, intermediate values scale
+    /// proportionally). `coverage` must be exactly width*height bytes, row 0
+    /// = top — the buffer `CanvasSelection.maskBytes()` produces.
+    func masked(by coverage: [UInt8]) -> RasterImage? {
+        let (w, h) = (width, height)
+        guard coverage.count == w * h else { return nil }
+        return coverage.withUnsafeBufferPointer { buffer in
+            wrap(rz_image_apply_mask(ptr, buffer.baseAddress, UInt32(w), UInt32(h)))
+        }
+    }
+
     func save(to url: URL, format: RzFormat, jpegQuality: Int) throws {
         var err: UnsafeMutablePointer<CChar>? = nil
         let quality = UInt8(min(max(jpegQuality, 1), 100))

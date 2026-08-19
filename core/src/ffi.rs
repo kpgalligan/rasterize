@@ -354,6 +354,41 @@ pub unsafe extern "C" fn rz_image_composite(
     }
 }
 
+/// Multiplies each pixel's alpha by a full-frame u8 coverage mask (`mask`,
+/// `w * h` bytes, row-major, one byte per pixel — the selection convention:
+/// 0 hides, 255 keeps, intermediate values scale proportionally). Color
+/// bytes pass through, except where the scaled alpha lands on 0, which
+/// clears the pixel to transparent black; full-coverage (255) pixels pass
+/// through byte-for-byte, an already transparent pixel's latent color
+/// included. Returns NULL if `img` or `mask` is NULL or on a dimension
+/// mismatch.
+///
+/// # Safety
+/// `img` must be NULL or a valid pointer to a live `RzImage`; `mask` must be
+/// NULL or a valid pointer to at least `w * h` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_image_apply_mask(
+    img: *const RzImage,
+    mask: *const u8,
+    w: u32,
+    h: u32,
+) -> *mut RzImage {
+    if img.is_null() || mask.is_null() {
+        return ptr::null_mut();
+    }
+    let image = unsafe { &*img };
+    produce_op(|| {
+        // Validate against the image dimensions before touching `mask`, so
+        // the raw read below is bounded by the image's own size.
+        if w != image.pixels.width() || h != image.pixels.height() {
+            return None;
+        }
+        let len = (w as usize).checked_mul(h as usize)?;
+        let mask = unsafe { std::slice::from_raw_parts(mask, len) };
+        ops::apply_mask(&image.pixels, mask).map(|pixels| RzImage { pixels })
+    })
+}
+
 /// Gaussian blur; NULL if `sigma` is not finite or not positive.
 ///
 /// # Safety

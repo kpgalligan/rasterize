@@ -162,8 +162,15 @@ decoding, encoding, and manipulation.
   out of it and the copy round-trips through Paste as New Layer unchanged —
   while **Copy Merged** (⇧⌘C) takes the same region of the flattened
   composite, every visible layer with its opacity, blend modes, masks,
-  clipping and adjustment layers applied. Both copy the selection's bounding
-  box (the whole canvas with nothing selected) as TIFF and PNG
+  clipping and adjustment layers applied. Both copy only the SELECTED pixels:
+  the clipboard image spans the selection's bounds (the whole canvas with
+  nothing selected), but anything inside those bounds and outside the shape
+  comes out transparent, and a feathered or anti-aliased edge fades out
+  proportionally — a lasso or Select Subject outline copies exactly what it
+  encloses. Written as TIFF and PNG. **Cut** (⌘X) is Copy then Clear in one
+  step: it needs a selection, puts the same pixels on the clipboard, and
+  clears the selected region of the active layer to transparency as a single
+  undo step
 - Full undo/redo, recent files
 - Drag image files onto a window to open them; File > New from Clipboard (⌘N)
 - Checkerboard backdrop for transparency

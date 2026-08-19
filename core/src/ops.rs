@@ -175,6 +175,44 @@ pub(crate) fn composite(
     Some(out)
 }
 
+/// Multiplies each pixel's alpha by a full-frame u8 coverage mask (`mask`,
+/// row-major, one byte per pixel — the selection convention: 0 hides, 255
+/// keeps, intermediate values scale proportionally, so an anti-aliased or
+/// feathered edge fades out across the fringe). The keep-side twin of
+/// `RzDocument::clear_selection`, and the same integer rounding: only ALPHA
+/// scales (pixels are straight alpha, so scaling color would darken the
+/// surviving fringe); where the scaled alpha lands on 0 the color drops too.
+/// Full-coverage (255) pixels pass through byte-for-byte — an all-255 mask
+/// returns an identical copy, like a full-image `crop` — so an already
+/// transparent pixel keeps its latent color there, and only there.
+///
+/// Returns `None` if `mask` is not exactly `width * height` bytes.
+pub(crate) fn apply_mask(img: &RgbaImage, mask: &[u8]) -> Option<RgbaImage> {
+    let (w, h) = img.dimensions();
+    let expected = (w as usize).checked_mul(h as usize)?;
+    if mask.len() != expected {
+        return None;
+    }
+    let mut out = img.clone();
+    for (px, cov) in out.pixels_mut().zip(mask.iter()) {
+        if *cov == 255 {
+            continue;
+        }
+        // round(alpha * coverage / 255) in integers; the +127 is the half
+        // step, and no product of two u8s can land exactly on a .5 tie
+        // (255 is odd).
+        let kept = u32::from(px.0[3]) * u32::from(*cov);
+        let alpha = ((kept + 127) / 255) as u8;
+        if alpha == 0 {
+            // Fully hidden: remove all color too.
+            px.0 = [0, 0, 0, 0];
+        } else {
+            px.0[3] = alpha;
+        }
+    }
+    Some(out)
+}
+
 /// Gaussian blur. Returns `None` if `sigma` is not finite or not positive.
 pub(crate) fn blur(img: &RgbaImage, sigma: f32) -> Option<RgbaImage> {
     if !sigma.is_finite() || sigma <= 0.0 {

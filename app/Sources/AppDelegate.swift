@@ -181,6 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Undo", Selector(("undo:")), "z"))
         menu.addItem(item("Redo", Selector(("redo:")), "z", [.command, .shift]))
         menu.addItem(.separator())
+        menu.addItem(item("Cut", #selector(EditorViewController.cut(_:)), "x"))
         menu.addItem(item("Copy", #selector(EditorViewController.copy(_:)), "c"))
         // Photoshop's pair and its shortcut: Copy takes the active layer,
         // Copy Merged the flattened composite.

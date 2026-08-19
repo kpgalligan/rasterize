@@ -108,6 +108,18 @@ RzImage *rz_image_composite(const RzImage *img, const uint8_t *src,
                             uint32_t w, uint32_t h, RzCompositeMode mode,
                             float alpha);
 
+/* Multiplies each pixel's alpha by a full-frame u8 coverage mask, returning
+ * a NEW image. `mask` points to w*h bytes, row-major, top row first, one
+ * byte per pixel — the selection convention: 0 hides, 255 keeps,
+ * intermediate values scale alpha proportionally; w and h must equal the
+ * image's dimensions exactly. Color bytes pass through, except where the
+ * scaled alpha lands on 0, which clears the pixel to transparent black;
+ * full-coverage (255) pixels pass through byte-for-byte, an already
+ * transparent pixel's latent color included. Returns NULL if img or mask is
+ * NULL or on dimension mismatch. */
+RzImage *rz_image_apply_mask(const RzImage *img, const uint8_t *mask,
+                             uint32_t w, uint32_t h);
+
 /* Gaussian blur. NULL if sigma <= 0 or not finite. */
 RzImage *rz_image_blur(const RzImage *img, float sigma);
 

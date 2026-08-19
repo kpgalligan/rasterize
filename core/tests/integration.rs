@@ -205,6 +205,42 @@ fn crop_content_and_bounds() {
 }
 
 #[test]
+fn apply_mask_scales_alpha_by_coverage() {
+    // Four pixels masked by 0 / 64 / 128 / 255 coverage. Expected alphas are
+    // hand-computed round(alpha * coverage / 255) values, independent of the
+    // implementation's integer formula.
+    let raw: Vec<u8> = vec![
+        200, 10, 10, 255, // coverage 0: fully hidden
+        10, 200, 10, 100, // coverage 64: round(100 * 64 / 255) = 25
+        10, 10, 200, 255, // coverage 128: round(255 * 128 / 255) = 128
+        250, 250, 250, 255, // coverage 255: untouched
+    ];
+    let img = unsafe { rz_image_from_rgba(raw.as_ptr(), 4, 1) };
+    assert!(!img.is_null());
+    let mask: [u8; 4] = [0, 64, 128, 255];
+    let out = unsafe { rz_image_apply_mask(img, mask.as_ptr(), 4, 1) };
+    assert!(!out.is_null());
+    assert_eq!(dims(out), (4, 1));
+    assert_eq!(
+        pixels(out),
+        vec![
+            0, 0, 0, 0, // color drops with the last of the alpha
+            10, 200, 10, 25, // straight alpha: color bytes survive the fade
+            10, 10, 200, 128, //
+            250, 250, 250, 255, // full coverage passes through exactly
+        ]
+    );
+    free(out);
+
+    // Dimensions must match the image exactly.
+    assert!(unsafe { rz_image_apply_mask(img, mask.as_ptr(), 2, 2) }.is_null());
+    assert!(unsafe { rz_image_apply_mask(img, mask.as_ptr(), 4, 2) }.is_null());
+    // NULL mask -> NULL.
+    assert!(unsafe { rz_image_apply_mask(img, ptr::null(), 4, 1) }.is_null());
+    free(img);
+}
+
+#[test]
 fn from_rgba_wraps_a_buffer() {
     // The in-memory constructor is how pixels this crate cannot decode
     // itself (a host-decoded HEIC still, a Live Photo video frame) become an
@@ -578,6 +614,7 @@ fn null_safety_everywhere() {
     assert!(unsafe { rz_image_flip_horizontal(null) }.is_null());
     assert!(unsafe { rz_image_flip_vertical(null) }.is_null());
     assert!(unsafe { rz_image_crop(null, 0, 0, 1, 1) }.is_null());
+    assert!(unsafe { rz_image_apply_mask(null, ptr::null(), 1, 1) }.is_null());
     assert!(unsafe { rz_image_resize(null, 1, 1, FILTER_NEAREST) }.is_null());
     assert!(unsafe { rz_image_adjust(null, 0.0, 0.0, 0.0) }.is_null());
     assert!(unsafe { rz_image_grayscale(null) }.is_null());
