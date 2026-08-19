@@ -2,24 +2,30 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Per-side rules live next to the code they govern and are loaded on demand — read them before writing code on that side:
+
+- `core/CLAUDE.md` — Rust rules: module map, FFI export conventions, errors, purity, format versioning, tests.
+- `app/CLAUDE.md` — Swift rules: file placement (which files are frozen), tools, undo/dirty tracking, agent parity, hygiene.
+
 ## Commands
 
 ```sh
 make app        # cargo build --release + xcodegen + xcodebuild → build/Build/Products/Release/Rasterize.app
 make test       # Rust core tests (cd core && cargo test --release)
+make lint       # cargo clippy --all-targets -- -D warnings (core/)
 make typecheck  # fast swiftc -typecheck of app sources — the ONLY authoritative Swift check
 make project    # regenerate Rasterize.xcodeproj from project.yml
 make run        # build and launch
 ```
 
-- Single Rust test: `cd core && cargo test --release --test doc_tests magic_wand` (test-file name, then a name filter). Run `cargo fmt` in `core/` before finishing Rust work.
+- Single Rust test: `cd core && cargo test --release --test doc_tests magic_wand` (test-file name, then a name filter). Run `cargo fmt` in `core/` and keep `make lint` clean before finishing Rust work.
 - There are no Swift unit tests; app-side verification is `make typecheck` plus driving a built app (see below).
 - SourceKit/IDE per-file Swift diagnostics are **noise** — they lack the bridging-header context and report false errors. Trust only `make typecheck` (must end with 0 errors).
-- `Rasterize.xcodeproj` is generated; `project.yml` (xcodegen) is the source of truth. Never commit the project file. Target is arm64, macOS 13 — avoid macOS 14+ APIs (e.g. `NSBezierPath.cgPath`; use the `cgPathCompat` bridge in `app/Sources/Selection.swift`).
+- `Rasterize.xcodeproj` is generated; `project.yml` (xcodegen) is the source of truth. Never commit the project file. Both xcodegen and `make typecheck` glob `app/Sources/`, so a new Swift file needs no registration anywhere. Target is arm64, macOS 15 (Sequoia) — raised from 13 for Vision's `VNGenerateForegroundInstanceMaskRequest` (subject lifting), which is macOS 14+. The floor is deliberately generous: prefer the modern API over a back-compat bridge, and don't add `if #available` gates below 15.
 
 ## Architecture
 
-Swift/AppKit UI (programmatic, no storyboards) over a Rust staticlib core. All pixel work happens in Rust; Swift owns windows, tools, undo, and agent tool dispatch.
+Swift/AppKit UI (programmatic, no storyboards) over a Rust staticlib core. All pixel work happens in Rust; Swift owns windows, tools, undo, and agent tool dispatch. Design studies and the feature roadmap live in `designs/` (`gimp-image-manipulation-capabilities.md`, `high-leverage-roadmap.md`, `next-features.md`) — check them before designing a feature from scratch.
 
 ### FFI contract
 
@@ -28,25 +34,20 @@ Swift/AppKit UI (programmatic, no storyboards) over a Rust staticlib core. All p
 - Opaque handles: `RzImage` (one image) and `RzDocument` (canvas + bottom-first layer stack). Pixels are straight (non-premultiplied) RGBA8, row 0 = top.
 - **All operations are pure** — they return a new handle and never mutate the input. Undo/redo on the Swift side is therefore just a stack of handles (bounded by `NSUndoManager.levelsOfUndo`).
 - Every FFI function wraps its body in `catch_unwind`, tolerates NULL inputs, and reports errors through an `err_out` heap CString freed with `rz_string_free`. Strings returned to the host come from `rz_agent_string_create`-style `CString::into_raw` and are freed by the matching free function.
+- Selections cross the boundary as canvas-sized u8 coverage masks (0 outside, 255 inside, intermediate = anti-aliased edge) — the same convention on both sides. Painting strokes (brush/eraser/text, UI and agent alike) rasterize into a canvas-sized **premultiplied** RGBA8 overlay handed to `rz_doc_painting_layer` — the one place premultiplied alpha crosses the FFI.
 
-### Rust core (`core/src/`)
+### Where a feature lands — the standard recipe
 
-- `doc.rs` / `doc_select.rs` / `ops.rs` / `ops_filters.rs` — document model, selections/fill/gradient, image ops, filters. `ffi*.rs` files are thin FFI shims over these. Layer `meta` is an opaque blob the core stores/copies/serializes without interpreting, EXCEPT that the compositor recognizes `{"type":"adjust", …}` (`core/src/adjust.rs`) as an adjustment layer at composite time.
-- `agent.rs` — embedded MCP server (streamable HTTP, tools-only, stateless, single JSON responses). It is **generic**: the host registers a JSON tool catalog and a C callback; the protocol layer knows nothing about images.
-- `assistant.rs` — the built-in chat agent: a tool-use loop over the Anthropic Messages API (`ureq`, non-streaming; `api_base` is the provider seam) emitting JSON events per turn, with cancellation at tool/API boundaries and pruning of old canvas renders from history.
+Every shipped feature follows the same shape (visible in each feature commit); putting a step's code anywhere else is what bloats files:
 
-### Swift app (`app/Sources/`)
-
-- `RasterCore.swift` — Swift wrappers over the handles; `deinit` frees the Rust allocation.
-- `ImageDocument.swift` — NSDocument subclass. It **overrides `updateChangeCount` to drop AppKit's automatic undo-based counting** (which fires inconsistently for off-event edits) and counts deterministically via `countEditChange()` in the edit paths. Any new edit path must call `countEditChange()` or the dirty flag breaks.
-- `EditorViewController.swift` + `ImageCanvasView.swift` — tools, options bar, canvas drawing. `AppDelegate.swift` menus mirror the tool set.
-- `Selection.swift` — the shared selection model: geometric shapes keep an exact `NSBezierPath` for marquee/clipping; the magic wand uses a canvas-sized u8 coverage mask (0 outside, 255 inside, intermediate = anti-aliased edge). The same convention (canvas-sized mask) is what the core's fill/gradient FFI accepts.
-- `AgentServer.swift` — registers the MCP tool catalog and executes calls against live documents, trampolining to the main thread (`DispatchQueue.main.sync`). Tool failures return in-band (`isError: true`) so models can self-correct. The UI and the agent share one selection: agent-set selections show the marquee; user selections confine agent strokes.
-- Painting strokes (brush/eraser/text, UI and agent alike) rasterize into a canvas-sized **premultiplied** RGBA8 overlay handed to `rz_doc_painting_layer` — the one place premultiplied alpha crosses the FFI.
-
-### Pitfall: programmatic undo grouping
-
-Undo registrations made outside an AppKit event (agent edits, async callbacks) land in an implicit event group that never closes, silently merging consecutive edits into one undo step. The fix — explicit `beginUndoGrouping`/`endUndoGrouping` plus flushing (`while groupingLevel > 0 { endUndoGrouping() }`) — lives in `AgentServer.performEdit`; follow that pattern for any new off-event edit path.
+1. Pure model + ops in a **new Rust module** with its own `impl RzDocument` block (the `doc_select.rs` / `doc_transform.rs` pattern), plus per-area tests in a new `core/tests/*.rs` file.
+2. FFI three-file lockstep: `ffi_*.rs` shim → header → `RasterCore.swift`.
+3. Swift model/value types + `extension RasterDocument` in a **small dedicated file** (the `TextLayer.swift` / `LayerTransform.swift` / `AdjustmentLayer.swift` pattern).
+4. Canvas gesture handling as a session struct plus `on*` closures in `ImageCanvasView` — wiring only, logic in the feature's file.
+5. Controller logic in an `EditorViewController+<Feature>.swift` extension file; menu items in `AppDelegate` (nil-target selectors through the responder chain); validation cases in `validateUserInterfaceItem`.
+6. MCP parity: `AgentServer` handler + catalog entry (see `app/CLAUDE.md`), with a comment naming the UI path it mirrors.
+7. Dialogs as a `…SheetController` built on the shared `makeSheetView` builders in `Sheets.swift`.
+8. Verify: `make test`, `make typecheck`, then drive the built app over MCP (below). Update README.
 
 ## Driving a built app for verification
 

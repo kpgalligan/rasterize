@@ -1,34 +1,12 @@
 //! C FFI for the additional filters (`rz_image_hue_rotate` etc.), following
 //! the conventions of `ffi`.
 //!
-//! Every function is panic-safe: bodies run under [`catch_unwind`] so no
-//! unwinding ever crosses the FFI boundary. NULL images and invalid
-//! arguments yield NULL results.
+//! Every function is panic-safe: bodies run under the shared
+//! [`pure_op`] wrapper (`ffi_util`) so no unwinding ever crosses the FFI
+//! boundary. NULL images and invalid arguments yield NULL results.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::ptr;
-
+use crate::ffi_util::pure_op;
 use crate::{ops_filters, RzImage};
-
-/// Runs a pure operation against `img`, boxing the produced image.
-/// NULL input, `None`, or a panic all yield NULL. (Private copy of the
-/// equivalent helper in `ffi`.)
-///
-/// # Safety
-/// `img` must be NULL or a valid pointer to a live `RzImage`.
-unsafe fn pure_op<F>(img: *const RzImage, op: F) -> *mut RzImage
-where
-    F: FnOnce(&RzImage) -> Option<RzImage>,
-{
-    if img.is_null() {
-        return ptr::null_mut();
-    }
-    let image = unsafe { &*img };
-    match catch_unwind(AssertUnwindSafe(|| op(image))) {
-        Ok(Some(result)) => Box::into_raw(Box::new(result)),
-        _ => ptr::null_mut(),
-    }
-}
 
 /// Rotates hue by `degrees` via the standard hue-rotation matrix. Any finite
 /// value is accepted; NULL on NaN (or infinities). Alpha untouched.

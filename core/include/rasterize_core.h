@@ -39,6 +39,14 @@ typedef enum {
  * with rz_string_free. */
 RzImage *rz_image_open(const char *path, char **err_out);
 
+/* Build an image from `src`: w*h*4 bytes of STRAIGHT (non-premultiplied)
+ * RGBA8, row-major, top row first, no row padding — the in-memory twin of
+ * rz_image_open, for pixels this library cannot decode itself (a HEIC still
+ * decoded by the host, a Live Photo video frame). The buffer is copied and
+ * stays the caller's. Returns NULL if src is NULL, if w or h is 0, or if
+ * w*h > 100000000. */
+RzImage *rz_image_from_rgba(const uint8_t *src, uint32_t w, uint32_t h);
+
 /* Deep copy. Returns NULL only if img is NULL. */
 RzImage *rz_image_clone(const RzImage *img);
 
@@ -99,6 +107,18 @@ typedef enum {
 RzImage *rz_image_composite(const RzImage *img, const uint8_t *src,
                             uint32_t w, uint32_t h, RzCompositeMode mode,
                             float alpha);
+
+/* Multiplies each pixel's alpha by a full-frame u8 coverage mask, returning
+ * a NEW image. `mask` points to w*h bytes, row-major, top row first, one
+ * byte per pixel — the selection convention: 0 hides, 255 keeps,
+ * intermediate values scale alpha proportionally; w and h must equal the
+ * image's dimensions exactly. Color bytes pass through, except where the
+ * scaled alpha lands on 0, which clears the pixel to transparent black;
+ * full-coverage (255) pixels pass through byte-for-byte, an already
+ * transparent pixel's latent color included. Returns NULL if img or mask is
+ * NULL or on dimension mismatch. */
+RzImage *rz_image_apply_mask(const RzImage *img, const uint8_t *mask,
+                             uint32_t w, uint32_t h);
 
 /* Gaussian blur. NULL if sigma <= 0 or not finite. */
 RzImage *rz_image_blur(const RzImage *img, float sigma);
@@ -221,6 +241,12 @@ uint32_t rz_doc_layer_height(const RzDocument *doc, size_t idx);
 
 /* Copy of a layer's pixels at the layer's own size. */
 RzImage *rz_doc_layer_image(const RzDocument *doc, size_t idx);
+
+/* A layer's own pixels on a transparent CANVAS-sized image, placed at its
+ * offset — the single-layer counterpart of rz_doc_flattened. Opacity, blend
+ * mode, visibility and the layer mask are ignored: they say how the layer
+ * composites, not what its pixels are. */
+RzImage *rz_doc_layer_canvas_image(const RzDocument *doc, size_t idx);
 
 /* Aspect-fit thumbnail of a layer, longest side == max_side (min 1). */
 RzImage *rz_doc_layer_thumbnail(const RzDocument *doc, size_t idx,

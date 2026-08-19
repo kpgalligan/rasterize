@@ -11,6 +11,7 @@
 use image::RgbaImage;
 use std::collections::VecDeque;
 
+use crate::blend::source_over_rgba8;
 use crate::doc::RzDocument;
 
 /// Per-channel similarity: every RGBA channel within `tolerance`.
@@ -59,7 +60,12 @@ fn grow_region(pixels: &RgbaImage, seed: (u32, u32), tolerance: u8, contiguous: 
 }
 
 /// Straight-alpha source-over of `src` (normalized RGBA) onto a straight
-/// RGBA8 pixel.
+/// RGBA8 pixel, through the shared [`source_over_rgba8`] kernel. The master
+/// premultiplied variant is `blend::paint_pixel`; this wrapper differs from
+/// it in its degenerate-alpha handling (a genuine behavioral difference,
+/// kept as-is): `paint_pixel` zeroes only the alpha byte below its 1e-6
+/// output-alpha threshold, while this clears the whole pixel at exactly
+/// zero — unreachable here, since `sa > 0` forces `out_a > 0`.
 fn over_straight(src: [f32; 4], dst: &mut image::Rgba<u8>) {
     let sa = src[3];
     if sa <= 0.0 {
@@ -71,12 +77,7 @@ fn over_straight(src: [f32; 4], dst: &mut image::Rgba<u8>) {
         dst.0 = [0, 0, 0, 0];
         return;
     }
-    for c in 0..3 {
-        let dc = f32::from(dst.0[c]) / 255.0;
-        let out = (src[c] * sa + dc * da * (1.0 - sa)) / out_a;
-        dst.0[c] = (out.clamp(0.0, 1.0) * 255.0).round() as u8;
-    }
-    dst.0[3] = (out_a.clamp(0.0, 1.0) * 255.0).round() as u8;
+    source_over_rgba8(&mut dst.0, [src[0] * sa, src[1] * sa, src[2] * sa], sa);
 }
 
 impl RzDocument {
@@ -96,6 +97,10 @@ impl RzDocument {
     /// `mask` (canvas-sized coverage, None for no selection) gates and
     /// scales the paint; a seed outside the canvas, the layer, or the
     /// mask yields None.
+    // The parameter list deliberately mirrors `rz_doc_bucket_fill`'s C
+    // signature one-for-one; bundling them into a struct would only move
+    // the count somewhere else.
+    #[allow(clippy::too_many_arguments)]
     pub fn bucket_fill(
         &self,
         idx: usize,
@@ -426,8 +431,8 @@ fn coverage_byte(x: f32) -> u8 {
 
 /// The signed Euclidean distance from every pixel center to the mask's 50%
 /// contour (see the section comment above): positive inside (coverage
-/// >= 128), negative outside, `+inf`/`-inf` when the binarized mask has no
-/// outside (resp. inside) pixels at all.
+/// `>= 128`), negative outside, `+inf`/`-inf` when the binarized mask has
+/// no outside (resp. inside) pixels at all.
 fn signed_distance_field(mask: &[u8], w: usize, h: usize) -> Vec<f32> {
     let len = w * h;
     let mut to_outside = vec![0f32; len];
@@ -521,12 +526,12 @@ fn edt_1d(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f32]) {
         return;
     }
     let mut k = 0usize;
-    for q in 0..n {
+    for (q, dq) in d.iter_mut().enumerate().take(n) {
         while z[k + 1] < q as f32 {
             k += 1;
         }
         let p = v[k];
-        d[q] = (q as f32 - p as f32).powi(2) + f[p];
+        *dq = (q as f32 - p as f32).powi(2) + f[p];
     }
 }
 

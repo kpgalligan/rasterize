@@ -36,6 +36,22 @@ final class RasterImage {
         return RasterImage(owning: handle)
     }
 
+    /// Wraps an in-memory STRAIGHT-alpha (non-premultiplied) RGBA8 buffer,
+    /// row 0 = top, exactly `width * height * 4` bytes — the same convention
+    /// as `withLayerPixels(_:rgba:width:height:)`, and the way pixels the
+    /// core cannot decode itself (a HEIC still, a Live Photo video frame)
+    /// become an image without a round trip through a temporary file. nil for
+    /// a bad size or a buffer whose length disagrees with it.
+    static func from(rgba pixels: [UInt8], width: Int, height: Int) -> RasterImage? {
+        guard width > 0, height > 0, pixels.count == width * height * 4,
+              width * height <= maxResizePixels
+        else { return nil }
+        return pixels.withUnsafeBufferPointer { buffer in
+            rz_image_from_rgba(buffer.baseAddress, UInt32(width), UInt32(height))
+                .map { RasterImage(owning: $0) }
+        }
+    }
+
     var width: Int { Int(rz_image_width(ptr)) }
     var height: Int { Int(rz_image_height(ptr)) }
     var pixelSize: NSSize { NSSize(width: width, height: height) }
@@ -133,6 +149,18 @@ final class RasterImage {
         return wrap(rz_image_composite(ptr, data, UInt32(width), UInt32(height), mode, Float(alpha)))
     }
 
+    /// Multiplies each pixel's alpha by a full-frame u8 coverage mask (the
+    /// selection convention: 0 hides, 255 keeps, intermediate values scale
+    /// proportionally). `coverage` must be exactly width*height bytes, row 0
+    /// = top — the buffer `CanvasSelection.maskBytes()` produces.
+    func masked(by coverage: [UInt8]) -> RasterImage? {
+        let (w, h) = (width, height)
+        guard coverage.count == w * h else { return nil }
+        return coverage.withUnsafeBufferPointer { buffer in
+            wrap(rz_image_apply_mask(ptr, buffer.baseAddress, UInt32(w), UInt32(h)))
+        }
+    }
+
     func save(to url: URL, format: RzFormat, jpegQuality: Int) throws {
         var err: UnsafeMutablePointer<CChar>? = nil
         let quality = UInt8(min(max(jpegQuality, 1), 100))
@@ -177,6 +205,32 @@ final class RasterImage {
             decode: nil,
             shouldInterpolate: true,
             intent: .defaultIntent)
+    }
+}
+
+// MARK: - Composite pixel sampling (eyedropper)
+
+extension RasterImage {
+    /// The straight (non-premultiplied) RGBA of one pixel, read in place
+    /// from the handle's pixel buffer (row 0 = top, matching the FFI
+    /// convention); nil outside the image. The buffer behind a handle never
+    /// changes, so this is safe and O(1) — used by the editor's eyedropper
+    /// and the agent's sample_color, both against the flattened composite.
+    func pixelRGBA(x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
+        let w = width
+        guard x >= 0, y >= 0, x < w, y < height,
+              let pixels = rz_image_pixels_rgba(ptr)
+        else { return nil }
+        let offset = (y * w + x) * 4
+        return (pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3])
+    }
+
+    /// Canonical hex form of a sampled pixel: #RRGGBB, with the alpha byte
+    /// appended (#RRGGBBAA) only when the pixel is not fully opaque —
+    /// matching the color syntax the paint tools accept.
+    static func hexString(_ rgba: (r: UInt8, g: UInt8, b: UInt8, a: UInt8)) -> String {
+        let base = String(format: "#%02X%02X%02X", rgba.r, rgba.g, rgba.b)
+        return rgba.a == 255 ? base : base + String(format: "%02X", rgba.a)
     }
 }
 
@@ -320,6 +374,15 @@ final class RasterDocument {
     func layerImage(_ idx: Int) -> RasterImage? {
         guard isValidIndex(idx) else { return nil }
         return wrapImage(rz_doc_layer_image(ptr, idx))
+    }
+
+    /// A layer's own pixels on a transparent canvas-sized image, placed at
+    /// its offset — `flattened()` for a single layer, and what Copy puts on
+    /// the clipboard. Opacity, blend mode, visibility and the mask are
+    /// ignored: they say how the layer composites, not what its pixels are.
+    func layerCanvasImage(_ idx: Int) -> RasterImage? {
+        guard isValidIndex(idx) else { return nil }
+        return wrapImage(rz_doc_layer_canvas_image(ptr, idx))
     }
 
     /// Aspect-fit thumbnail of a layer, longest side == maxSide.

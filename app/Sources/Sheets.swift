@@ -53,13 +53,17 @@ final class PreviewRenderer {
 }
 
 // MARK: - Shared layout helpers
+//
+// Module-wide, not file-private: a dialog too big to live here is its own
+// …SheetController file (LivePhotoFrameSheetController), and it must be
+// built from these same pieces or the sheets stop matching each other.
 
-private let sheetWidth: CGFloat = 420
-private let sheetInset: CGFloat = 22
+let sheetWidth: CGFloat = 420
+let sheetInset: CGFloat = 22
 
 /// Assembles a design-system sheet: 420px card, 15px/700 title, optional
 /// 12px muted hint, content, then the button row.
-private func makeSheetView(
+func makeSheetView(
     title: String? = nil, hint: String? = nil, content: NSView, buttonRow: NSStackView
 ) -> NSView {
     let container = NSView(frame: NSRect(x: 0, y: 0, width: sheetWidth, height: 240))
@@ -106,7 +110,7 @@ private func makeSheetView(
     return container
 }
 
-private func makeButtonRow(
+func makeButtonRow(
     cancel: NSButton, apply: NSButton, leading: [NSView] = []
 ) -> NSStackView {
     cancel.keyEquivalent = "\u{1b}"
@@ -121,7 +125,7 @@ private func makeButtonRow(
 }
 
 /// 13px row label for the sheet grids' 106px right-aligned label column.
-private func fieldLabel(_ text: String) -> NSTextField {
+func fieldLabel(_ text: String) -> NSTextField {
     let label = NSTextField(labelWithString: text)
     label.font = DS.sans(13)
     label.textColor = DS.textStrong
@@ -129,18 +133,18 @@ private func fieldLabel(_ text: String) -> NSTextField {
 }
 
 /// Bottom-left 10px mono footnote carried in the button row's leading slot.
-private func sheetFootnote(_ text: String) -> NSTextField {
+func sheetFootnote(_ text: String) -> NSTextField {
     let label = NSTextField(labelWithString: text)
     label.font = DS.mono(10)
     label.textColor = DS.textFaint
     return label
 }
 
-private func sheetCancelButton(target: AnyObject, action: Selector) -> NSButton {
+func sheetCancelButton(target: AnyObject, action: Selector) -> NSButton {
     StickerButton(title: "Cancel", style: .secondary, target: target, action: action)
 }
 
-private func sheetApplyButton(target: AnyObject, action: Selector) -> NSButton {
+func sheetApplyButton(target: AnyObject, action: Selector) -> NSButton {
     StickerButton(title: "Apply", style: .primary, target: target, action: action)
 }
 

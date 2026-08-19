@@ -11,6 +11,9 @@ use rasterize_core::ffi::*;
 use rasterize_core::RzImage;
 use tempfile::TempDir;
 
+mod common;
+use common::*;
+
 const FMT_PNG: c_int = 0;
 const FMT_JPEG: c_int = 1;
 const FMT_TIFF: c_int = 2;
@@ -18,90 +21,17 @@ const FMT_BMP: c_int = 3;
 const FMT_GIF: c_int = 4;
 const FMT_WEBP: c_int = 5;
 
-const FILTER_NEAREST: c_int = 0;
-const FILTER_BILINEAR: c_int = 1;
-const FILTER_CATMULL_ROM: c_int = 2;
-const FILTER_LANCZOS3: c_int = 3;
-
 // ---------------------------------------------------------------- helpers --
 
-fn cpath(p: &Path) -> CString {
-    CString::new(p.to_str().expect("utf-8 path")).expect("no interior NUL")
-}
-
-/// 64x48-style gradient with an alpha ramp (fully opaque top row, fully
-/// transparent bottom row).
-fn test_pattern(w: u32, h: u32) -> RgbaImage {
-    RgbaImage::from_fn(w, h, |x, y| {
-        let r = (x * 255 / (w - 1).max(1)) as u8;
-        let g = (y * 255 / (h - 1).max(1)) as u8;
-        let b = ((x + y) % 256) as u8;
-        let a = 255 - (y * 255 / (h - 1).max(1)) as u8;
-        Rgba([r, g, b, a])
-    })
-}
-
+/// NOT the shared `common::opaque_pattern` (a different pattern): this one is
+/// `test_pattern` with its alpha ramp flattened to 255, and shadows the
+/// common helper on purpose so these tests keep their historical pixels.
 fn opaque_pattern(w: u32, h: u32) -> RgbaImage {
     let mut img = test_pattern(w, h);
     for px in img.pixels_mut() {
         px[3] = 255;
     }
     img
-}
-
-fn open_ok(path: &Path) -> *mut RzImage {
-    let c = cpath(path);
-    let mut err: *mut c_char = ptr::null_mut();
-    let img = unsafe { rz_image_open(c.as_ptr(), &mut err) };
-    assert!(
-        !img.is_null(),
-        "open of {path:?} failed: {}",
-        take_err_string(err)
-    );
-    assert!(err.is_null(), "err_out set on success");
-    img
-}
-
-/// Writes `img` as a PNG (via the image crate) and opens it back through the
-/// FFI; the only way to materialize an RzImage from synthesized pixels.
-fn open_pattern(dir: &TempDir, name: &str, img: &RgbaImage) -> *mut RzImage {
-    let path = dir.path().join(name);
-    img.save(&path).expect("save pattern png");
-    open_ok(&path)
-}
-
-fn take_err_string(err: *mut c_char) -> String {
-    if err.is_null() {
-        return "<no error message>".into();
-    }
-    let s = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { rz_string_free(err) };
-    s
-}
-
-fn dims(img: *const RzImage) -> (u32, u32) {
-    unsafe { (rz_image_width(img), rz_image_height(img)) }
-}
-
-fn pixels(img: *const RzImage) -> Vec<u8> {
-    let (w, h) = dims(img);
-    let p = unsafe { rz_image_pixels_rgba(img) };
-    assert!(!p.is_null(), "pixels pointer NULL for valid image");
-    unsafe { std::slice::from_raw_parts(p, (w * h * 4) as usize) }.to_vec()
-}
-
-fn pixel_at(img: *const RzImage, x: u32, y: u32) -> [u8; 4] {
-    let (w, h) = dims(img);
-    assert!(x < w && y < h);
-    let v = pixels(img);
-    let i = ((y * w + x) * 4) as usize;
-    [v[i], v[i + 1], v[i + 2], v[i + 3]]
-}
-
-fn free(img: *mut RzImage) {
-    unsafe { rz_image_free(img) }
 }
 
 fn save_ok(img: *const RzImage, path: &Path, fmt: c_int, quality: u8) {
@@ -272,6 +202,77 @@ fn crop_content_and_bounds() {
         assert!(p.is_null(), "crop({x},{y},{w},{h}) should be NULL");
     }
     free(img);
+}
+
+#[test]
+fn apply_mask_scales_alpha_by_coverage() {
+    // Four pixels masked by 0 / 64 / 128 / 255 coverage. Expected alphas are
+    // hand-computed round(alpha * coverage / 255) values, independent of the
+    // implementation's integer formula.
+    let raw: Vec<u8> = vec![
+        200, 10, 10, 255, // coverage 0: fully hidden
+        10, 200, 10, 100, // coverage 64: round(100 * 64 / 255) = 25
+        10, 10, 200, 255, // coverage 128: round(255 * 128 / 255) = 128
+        250, 250, 250, 255, // coverage 255: untouched
+    ];
+    let img = unsafe { rz_image_from_rgba(raw.as_ptr(), 4, 1) };
+    assert!(!img.is_null());
+    let mask: [u8; 4] = [0, 64, 128, 255];
+    let out = unsafe { rz_image_apply_mask(img, mask.as_ptr(), 4, 1) };
+    assert!(!out.is_null());
+    assert_eq!(dims(out), (4, 1));
+    assert_eq!(
+        pixels(out),
+        vec![
+            0, 0, 0, 0, // color drops with the last of the alpha
+            10, 200, 10, 25, // straight alpha: color bytes survive the fade
+            10, 10, 200, 128, //
+            250, 250, 250, 255, // full coverage passes through exactly
+        ]
+    );
+    free(out);
+
+    // Dimensions must match the image exactly.
+    assert!(unsafe { rz_image_apply_mask(img, mask.as_ptr(), 2, 2) }.is_null());
+    assert!(unsafe { rz_image_apply_mask(img, mask.as_ptr(), 4, 2) }.is_null());
+    // NULL mask -> NULL.
+    assert!(unsafe { rz_image_apply_mask(img, ptr::null(), 4, 1) }.is_null());
+    free(img);
+}
+
+#[test]
+fn from_rgba_wraps_a_buffer() {
+    // The in-memory constructor is how pixels this crate cannot decode
+    // itself (a host-decoded HEIC still, a Live Photo video frame) become an
+    // image, so it must produce exactly what the file path produces.
+    let dir = tempfile::tempdir().unwrap();
+    let pattern = test_pattern(9, 5);
+    let raw = pattern.as_raw();
+    let img = unsafe { rz_image_from_rgba(raw.as_ptr(), 9, 5) };
+    assert!(!img.is_null());
+    assert_eq!(dims(img), (9, 5));
+    assert_eq!(pixels(img), *raw);
+
+    let opened = open_pattern(&dir, "pattern.png", &pattern);
+    assert_eq!(pixels(img), pixels(opened));
+
+    // The buffer is COPIED, so overwriting the caller's bytes afterwards
+    // cannot reach the handle.
+    let mut owned = raw.clone();
+    let copy = unsafe { rz_image_from_rgba(owned.as_ptr(), 9, 5) };
+    owned.iter_mut().for_each(|b| *b = 0);
+    assert_eq!(pixels(copy), *raw);
+
+    // Rejections. Each is caught before any slice is built from the
+    // dimensions, so the short buffer below is never read.
+    assert!(unsafe { rz_image_from_rgba(raw.as_ptr(), 0, 5) }.is_null());
+    assert!(unsafe { rz_image_from_rgba(raw.as_ptr(), 9, 0) }.is_null());
+    // 10000 * 10001 = 100_010_000 > 100_000_000, the cap resize enforces.
+    assert!(unsafe { rz_image_from_rgba(raw.as_ptr(), 10_000, 10_001) }.is_null());
+
+    for p in [img, opened, copy] {
+        free(p);
+    }
 }
 
 #[test]
@@ -613,6 +614,7 @@ fn null_safety_everywhere() {
     assert!(unsafe { rz_image_flip_horizontal(null) }.is_null());
     assert!(unsafe { rz_image_flip_vertical(null) }.is_null());
     assert!(unsafe { rz_image_crop(null, 0, 0, 1, 1) }.is_null());
+    assert!(unsafe { rz_image_apply_mask(null, ptr::null(), 1, 1) }.is_null());
     assert!(unsafe { rz_image_resize(null, 1, 1, FILTER_NEAREST) }.is_null());
     assert!(unsafe { rz_image_adjust(null, 0.0, 0.0, 0.0) }.is_null());
     assert!(unsafe { rz_image_grayscale(null) }.is_null());
@@ -620,6 +622,7 @@ fn null_safety_everywhere() {
     assert!(unsafe { rz_image_sepia(null) }.is_null());
     assert!(unsafe { rz_image_blur(null, 1.0) }.is_null());
     assert!(unsafe { rz_image_sharpen(null, 1.0) }.is_null());
+    assert!(unsafe { rz_image_from_rgba(ptr::null(), 1, 1) }.is_null());
 
     // Saving a NULL image fails cleanly with a message.
     let path = CString::new("/tmp/should-not-be-created.png").unwrap();

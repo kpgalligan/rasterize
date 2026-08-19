@@ -1,355 +1,5 @@
 import AppKit
 
-/// Rounded accent-tinted selection behind the active layer's row.
-final class LayerRowView: NSTableRowView {
-    override func drawSelection(in dirtyRect: NSRect) {
-        guard selectionHighlightStyle != .none else { return }
-        let rect = bounds.insetBy(dx: 6, dy: 2)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
-        DS.selectionFill.setFill()
-        path.fill()
-    }
-}
-
-/// A framed thumbnail well. It handles its own clicks (choosing the paint
-/// target) and deliberately swallows them, so clicking a thumbnail never
-/// starts the table's row drag; the handler selects the layer itself.
-final class ThumbnailWellView: NSView {
-    var onClick: (() -> Void)?
-    /// Optional second level: a double-click (an adjustment layer's re-edit
-    /// affordance — the name field keeps click-to-rename, so re-edit lives
-    /// on the thumbnail). Unset, a double-click's second press falls through
-    /// to onClick like any other.
-    var onDoubleClick: (() -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2, let onDoubleClick = onDoubleClick {
-            onDoubleClick()
-            return
-        }
-        guard let onClick = onClick else {
-            super.mouseDown(with: event)
-            return
-        }
-        onClick()
-    }
-}
-
-/// Draws a thumbnail aspect-fit (never upscaled) inside a well, plus — for a
-/// DISABLED layer mask — a diagonal slash across it, and — for a layer that
-/// carries a description — a corner badge naming its kind ("T" for text,
-/// "◐" for an adjustment layer; a layer is one OR the other, never both).
-final class ThumbnailImageView: NSView {
-    var image: NSImage? {
-        didSet { needsDisplay = true }
-    }
-
-    /// Struck through: the mask is retained but ignored while compositing.
-    var slashed = false {
-        didSet { needsDisplay = true }
-    }
-
-    /// One or two characters in a corner chip; nil for a plain raster layer.
-    var badge: String? {
-        didSet {
-            if badge != oldValue { needsDisplay = true }
-        }
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        if let image = image, image.size.width > 0, image.size.height > 0 {
-            let scale = min(
-                bounds.width / image.size.width, bounds.height / image.size.height, 1)
-            let size = NSSize(
-                width: image.size.width * scale, height: image.size.height * scale)
-            image.draw(
-                in: NSRect(
-                    x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
-                    width: size.width, height: size.height))
-        }
-        if slashed {
-            let slash = NSBezierPath()
-            slash.move(to: NSPoint(x: bounds.minX + 4, y: bounds.minY + 4))
-            slash.line(to: NSPoint(x: bounds.maxX - 4, y: bounds.maxY - 4))
-            // Halo underneath so the slash reads over any coverage.
-            slash.lineWidth = 3
-            DS.chromeBackground.setStroke()
-            slash.stroke()
-            slash.lineWidth = 1.5
-            DS.textStrong.setStroke()
-            slash.stroke()
-        }
-        drawBadge()
-    }
-
-    /// The badge chip, bottom-right: a filled, bordered plate — the slash's
-    /// halo idea as a solid — so the letter reads over any thumbnail.
-    private func drawBadge() {
-        guard let badge = badge, !badge.isEmpty else { return }
-        let label = NSAttributedString(
-            string: badge,
-            attributes: [.font: DS.sans(10, weight: .semibold), .foregroundColor: DS.textStrong])
-        let labelSize = label.size()
-        let chip = NSRect(
-            x: bounds.maxX - max(labelSize.width + 7, 14) - 2,
-            y: bounds.minY + 2,
-            width: max(labelSize.width + 7, 14),
-            height: 14)
-        let plate = NSBezierPath(roundedRect: chip, xRadius: 4, yRadius: 4)
-        DS.chromeBackground.withAlphaComponent(0.94).setFill()
-        plate.fill()
-        plate.lineWidth = 1
-        DS.border.setStroke()
-        plate.stroke()
-        label.draw(
-            at: NSPoint(
-                x: chip.midX - labelSize.width / 2, y: chip.midY - labelSize.height / 2))
-    }
-}
-
-/// One row of the layers table: 22px visibility eye, framed thumbnail (plus
-/// a second one for the layer's mask), then a two-line stack — editable name
-/// over a mono meta line reading "Soft Light · 62%". A CLIPPED layer indents
-/// its thumbnail block behind a "↳" arrow — it rides on the layer below. The
-/// active layer rings whichever thumbnail brush/eraser currently edit.
-/// Callbacks route edits back to the panel controller.
-final class LayerCellView: NSView, NSTextFieldDelegate {
-    /// Thumbnail well side: 34 on its own, smaller once a mask thumbnail
-    /// sits beside it — the row height never grows.
-    static let thumbSide: CGFloat = 34
-    static let pairedThumbSide: CGFloat = 28
-    private static let thumbGap: CGFloat = 5
-    /// Extra leading on a clipped row's thumbnail block; the "↳" arrow sits
-    /// in the gap this opens up.
-    private static let clipIndent: CGFloat = 16
-
-    private let eyeButton = NSButton(title: "", target: nil, action: nil)
-    private let clipLabel = NSTextField(labelWithString: "↳")
-    private let thumbView = ThumbnailImageView()
-    private let thumbFrame = ThumbnailWellView()
-    private let maskView = ThumbnailImageView()
-    private let maskFrame = ThumbnailWellView()
-    private let nameField = NSTextField(string: "")
-    private let metaLabel = NSTextField(labelWithString: "")
-    private var committedName = ""
-    private var hasMask = false
-
-    private var thumbLeading: NSLayoutConstraint!
-    private var thumbWidth: NSLayoutConstraint!
-    private var thumbHeight: NSLayoutConstraint!
-    private var maskWidth: NSLayoutConstraint!
-    private var maskHeight: NSLayoutConstraint!
-    private var maskLeading: NSLayoutConstraint!
-
-    var onToggleVisible: (() -> Void)?
-    var onRename: ((String) -> Void)?
-    /// Clicking either thumbnail selects this layer and points brush/eraser
-    /// at the clicked target.
-    var onSelectTarget: ((PaintTarget) -> Void)?
-    /// Double-clicking an ADJUSTMENT layer's thumbnail (the ◐-badged one,
-    /// not the mask's) reopens its options dialog; unset for other layers.
-    var onAdjustmentEdit: (() -> Void)?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-
-        eyeButton.translatesAutoresizingMaskIntoConstraints = false
-        eyeButton.isBordered = false
-        eyeButton.setButtonType(.momentaryChange)
-        eyeButton.target = self
-        eyeButton.action = #selector(eyeClicked(_:))
-
-        // The clip arrow: a plain label, so clicks fall through to the row
-        // (selection and drag-reorder keep working over it).
-        clipLabel.translatesAutoresizingMaskIntoConstraints = false
-        clipLabel.font = DS.sans(12, weight: .semibold)
-        clipLabel.textColor = DS.textMuted
-        clipLabel.toolTip = "Clipped to the layer below"
-        clipLabel.isHidden = true
-
-        for well in [thumbFrame, maskFrame] {
-            well.translatesAutoresizingMaskIntoConstraints = false
-            well.wantsLayer = true
-            well.layer?.cornerRadius = 5
-            well.layer?.borderWidth = 1
-            well.layer?.masksToBounds = true
-        }
-        thumbFrame.onClick = { [weak self] in self?.onSelectTarget?(.layer) }
-        maskFrame.onClick = { [weak self] in self?.onSelectTarget?(.mask) }
-        thumbFrame.toolTip = "Paint on the layer"
-
-        for view in [thumbView, maskView] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-        }
-        thumbFrame.addSubview(thumbView)
-        maskFrame.addSubview(maskView)
-
-        nameField.translatesAutoresizingMaskIntoConstraints = false
-        nameField.isBordered = false
-        nameField.drawsBackground = false
-        nameField.isEditable = true
-        nameField.usesSingleLineMode = true
-        nameField.lineBreakMode = .byTruncatingTail
-        nameField.font = DS.sans(13)
-        nameField.delegate = self
-
-        metaLabel.translatesAutoresizingMaskIntoConstraints = false
-        metaLabel.font = DS.mono(10)
-        metaLabel.textColor = DS.textFaint
-        metaLabel.lineBreakMode = .byTruncatingTail
-
-        addSubview(eyeButton)
-        addSubview(clipLabel)
-        addSubview(thumbFrame)
-        addSubview(maskFrame)
-        addSubview(nameField)
-        addSubview(metaLabel)
-
-        // The mask well collapses to zero (and hides) on a layer without a
-        // mask, so the name field's leading edge follows either way. The
-        // whole thumbnail block indents on a clipped layer (thumbLeading
-        // grows by clipIndent) and the "↳" arrow fills the opened gap.
-        thumbLeading = thumbFrame.leadingAnchor.constraint(
-            equalTo: eyeButton.trailingAnchor, constant: 9)
-        thumbWidth = thumbFrame.widthAnchor.constraint(equalToConstant: Self.thumbSide)
-        thumbHeight = thumbFrame.heightAnchor.constraint(equalToConstant: Self.thumbSide)
-        maskWidth = maskFrame.widthAnchor.constraint(equalToConstant: 0)
-        maskHeight = maskFrame.heightAnchor.constraint(equalToConstant: 0)
-        maskLeading = maskFrame.leadingAnchor.constraint(
-            equalTo: thumbFrame.trailingAnchor, constant: 0)
-
-        NSLayoutConstraint.activate([
-            eyeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            eyeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            eyeButton.widthAnchor.constraint(equalToConstant: 22),
-
-            clipLabel.trailingAnchor.constraint(equalTo: thumbFrame.leadingAnchor, constant: -3),
-            clipLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-
-            thumbLeading,
-            thumbFrame.centerYAnchor.constraint(equalTo: centerYAnchor),
-            thumbWidth,
-            thumbHeight,
-
-            thumbView.topAnchor.constraint(equalTo: thumbFrame.topAnchor),
-            thumbView.bottomAnchor.constraint(equalTo: thumbFrame.bottomAnchor),
-            thumbView.leadingAnchor.constraint(equalTo: thumbFrame.leadingAnchor),
-            thumbView.trailingAnchor.constraint(equalTo: thumbFrame.trailingAnchor),
-
-            maskLeading,
-            maskFrame.centerYAnchor.constraint(equalTo: centerYAnchor),
-            maskWidth,
-            maskHeight,
-
-            maskView.topAnchor.constraint(equalTo: maskFrame.topAnchor),
-            maskView.bottomAnchor.constraint(equalTo: maskFrame.bottomAnchor),
-            maskView.leadingAnchor.constraint(equalTo: maskFrame.leadingAnchor),
-            maskView.trailingAnchor.constraint(equalTo: maskFrame.trailingAnchor),
-
-            nameField.leadingAnchor.constraint(equalTo: maskFrame.trailingAnchor, constant: 9),
-            nameField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            nameField.bottomAnchor.constraint(equalTo: centerYAnchor, constant: 1),
-
-            metaLabel.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
-            metaLabel.trailingAnchor.constraint(equalTo: nameField.trailingAnchor),
-            metaLabel.topAnchor.constraint(equalTo: centerYAnchor, constant: 2),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("LayerCellView does not support NSCoder")
-    }
-
-    func configure(
-        info: RasterDocument.LayerInfo, thumbnail: NSImage?, hasMask: Bool,
-        maskThumbnail: NSImage?, maskEnabled: Bool, isText: Bool, isAdjustment: Bool,
-        clipped: Bool, selected: Bool, paintTarget: PaintTarget
-    ) {
-        committedName = info.name
-        nameField.stringValue = info.name
-        nameField.font = DS.sans(13, weight: selected ? .semibold : .regular)
-        if !info.visible {
-            nameField.textColor = DS.textFaint
-        } else {
-            nameField.textColor = selected ? DS.accent : DS.textStrong
-        }
-        let percent = Int((Double(info.opacity) * 100).rounded())
-        metaLabel.stringValue = "\(RzBlendMode.displayName(for: info.blendMode)) · \(percent)%"
-
-        self.hasMask = hasMask
-        // The clip indent shifts the whole thumbnail block (name and meta
-        // follow their leading anchors); the arrow shows in the gap.
-        clipLabel.isHidden = !clipped
-        thumbLeading.constant = clipped ? 9 + Self.clipIndent : 9
-        let side = hasMask ? Self.pairedThumbSide : Self.thumbSide
-        thumbWidth.constant = side
-        thumbHeight.constant = side
-        maskWidth.constant = hasMask ? side : 0
-        maskHeight.constant = hasMask ? side : 0
-        maskLeading.constant = hasMask ? Self.thumbGap : 0
-        maskFrame.isHidden = !hasMask
-        maskView.image = maskThumbnail
-        maskView.slashed = hasMask && !maskEnabled
-        maskView.alphaValue = maskEnabled ? 1.0 : 0.4
-        maskFrame.toolTip =
-            maskEnabled ? "Paint on the layer mask" : "Paint on the layer mask (disabled)"
-        setTargetHighlight(layerActive: selected, target: paintTarget)
-
-        thumbView.image = thumbnail
-        thumbView.alphaValue = info.visible ? 1.0 : 0.35
-        // A text layer is still editable as text: say so on the thumbnail,
-        // and the badge goes away the moment the description is dropped. An
-        // adjustment layer badges ◐ the same way (the two are mutually
-        // exclusive — one meta slot, one type), and its double-click reopens
-        // the options dialog.
-        thumbView.badge = isText ? "T" : (isAdjustment ? "◐" : nil)
-        thumbFrame.onDoubleClick =
-            isAdjustment ? { [weak self] in self?.onAdjustmentEdit?() } : nil
-        if isText {
-            thumbFrame.toolTip = "Paint on the layer (text layer — painting rasterizes it)"
-        } else if isAdjustment {
-            thumbFrame.toolTip = "Adjustment layer — double-click for options"
-        } else {
-            thumbFrame.toolTip = "Paint on the layer"
-        }
-        let symbol = info.visible ? "eye" : "eye.slash"
-        let label = info.visible ? "Visible" : "Hidden"
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
-            eyeButton.image = image.tinted(with: info.visible ? DS.textMuted : DS.textFaint)
-            eyeButton.title = ""
-        } else {
-            eyeButton.image = nil
-            eyeButton.title = info.visible ? "●" : "○"
-        }
-        eyeButton.toolTip = info.visible ? "Hide Layer" : "Show Layer"
-    }
-
-    /// Rings the thumbnail brush/eraser would hit — but only on the active
-    /// layer, where the paint target means anything.
-    func setTargetHighlight(layerActive: Bool, target: PaintTarget) {
-        let maskRinged = layerActive && hasMask && target == .mask
-        let layerRinged = layerActive && !maskRinged
-        thumbFrame.layer?.borderWidth = layerRinged ? 2 : 1
-        thumbFrame.layer?.borderColor = (layerRinged ? DS.accent : DS.border).cgColor
-        maskFrame.layer?.borderWidth = maskRinged ? 2 : 1
-        maskFrame.layer?.borderColor = (maskRinged ? DS.accent : DS.border).cgColor
-    }
-
-    @objc private func eyeClicked(_ sender: Any?) {
-        onToggleVisible?()
-    }
-
-    func controlTextDidEndEditing(_ obj: Notification) {
-        let name = nameField.stringValue
-        if name.isEmpty {
-            nameField.stringValue = committedName
-        } else if name != committedName {
-            onRename?(name)
-        }
-    }
-}
-
 /// Right-hand layers panel: blend mode + opacity for the active layer on
 /// top, the layer stack (row 0 = TOPMOST layer) in the middle, and the
 /// add/delete/duplicate/merge buttons below. All edits route through
@@ -370,9 +20,19 @@ final class LayersPanelViewController: NSViewController {
     /// thumbnail: the editor points brush/eraser at that target.
     var onPaintTargetChange: ((PaintTarget) -> Void)?
 
-    /// Called when the user double-clicks an adjustment layer's thumbnail
-    /// (layer index attached): the editor reopens its options dialog.
+    /// Called when the user double-clicks an adjustment layer (layer index
+    /// attached): the editor reopens its options dialog.
     var onAdjustmentEdit: ((Int) -> Void)?
+
+    /// Called when the user double-clicks a text layer (layer index
+    /// attached): the editor switches to the text tool and reopens the
+    /// layer's description on the canvas.
+    var onTextEdit: ((Int) -> Void)?
+
+    /// Called when the user double-clicks a live photo layer, or picks
+    /// Select Frame… from its row menu (layer index attached): the editor
+    /// opens that layer's frame picker.
+    var onLivePhotoEdit: ((Int) -> Void)?
 
     /// What brush/eraser currently edit on the active layer, pushed in by the
     /// editor and drawn as a focus ring around the matching thumbnail.
@@ -389,6 +49,8 @@ final class LayersPanelViewController: NSViewController {
     private var removeButton: NSButton!
     private var duplicateButton: NSButton!
     private var mergeButton: NSButton!
+
+    private let rowMenu = NSMenu()
 
     private var isReloading = false
     private var opacityDragActive = false
@@ -480,6 +142,14 @@ final class LayersPanelViewController: NSViewController {
         tableView.delegate = self
         tableView.registerForDraggedTypes([Self.layerRowType])
         tableView.setDraggingSourceOperationMask(.move, forLocal: true)
+        // Double-click anywhere on a row reopens the layer's source, the same
+        // gesture its thumbnail offers; right-click opens the row menu. Both
+        // read tableView.clickedRow, so they act on the row under the cursor
+        // rather than on the selection.
+        tableView.target = self
+        tableView.doubleAction = #selector(rowDoubleClicked(_:))
+        rowMenu.delegate = self
+        tableView.menu = rowMenu
 
         tableView.backgroundColor = .clear
         tableView.selectionHighlightStyle = .regular
@@ -824,13 +494,14 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
             maskEnabled: doc.layerMaskEnabled(idx),
             isText: doc.textPayload(idx) != nil,
             isAdjustment: doc.layerIsAdjustment(idx),
+            isLivePhoto: doc.livePhotoPayload(idx) != nil,
             clipped: doc.layerClipped(idx),
             selected: idx == document.activeLayerIndex, paintTarget: paintTarget)
         cell.onSelectTarget = { [weak self] target in
             self?.selectPaintTarget(target, layer: idx)
         }
-        cell.onAdjustmentEdit = { [weak self] in
-            self?.onAdjustmentEdit?(idx)
+        cell.onEditSource = { [weak self] in
+            self?.editLayerSource(idx)
         }
         cell.onToggleVisible = { [weak self] in
             guard let document = self?.document else { return }
@@ -911,5 +582,91 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
         reload()
         onActiveLayerChange?()
         return true
+    }
+}
+
+// MARK: - Row double-click and right-click menu
+
+extension LayersPanelViewController: NSMenuDelegate {
+    /// Double-click on a row: reopen whatever the layer was made from. The
+    /// first click has already selected the row, so this only has to route.
+    @objc private func rowDoubleClicked(_ sender: Any?) {
+        let row = tableView.clickedRow
+        guard row >= 0, row < tableView.numberOfRows else { return }
+        editLayerSource(layerIndex(forRow: row))
+    }
+
+    /// Routes "edit this layer's source" to the editor by layer kind — the
+    /// kinds are mutually exclusive (one meta slot), and a plain raster layer
+    /// has no source to reopen, so the gesture is simply inert there. Both
+    /// the row's double-click and the thumbnail's own land here.
+    private func editLayerSource(_ idx: Int) {
+        guard let doc = document?.doc else { return }
+        if doc.layerIsAdjustment(idx) {
+            onAdjustmentEdit?(idx)
+        } else if doc.textPayload(idx) != nil {
+            onTextEdit?(idx)
+        } else if doc.livePhotoPayload(idx) != nil {
+            onLivePhotoEdit?(idx)
+        }
+    }
+
+    /// Builds the row menu for the row under the cursor, and SELECTS that row
+    /// first — so the menu, the panel footer and the Layer menu always act on
+    /// the same layer. A right-click below the last row (clickedRow == -1)
+    /// leaves the menu empty, which shows nothing.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let row = tableView.clickedRow
+        guard row >= 0, row < tableView.numberOfRows else { return }
+        if tableView.selectedRow != row {
+            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+        let rename = NSMenuItem(
+            title: "Rename", action: #selector(renameClickedLayer(_:)), keyEquivalent: "")
+        rename.target = self
+        menu.addItem(rename)
+        // Only on a live photo layer, where it is the row's own version of
+        // the double-click: no other row kind has a frame to select.
+        if document?.doc?.livePhotoPayload(layerIndex(forRow: row)) != nil {
+            let frame = NSMenuItem(
+                title: "Select Frame…", action: #selector(selectClickedLayerFrame(_:)),
+                keyEquivalent: "")
+            frame.target = self
+            menu.addItem(frame)
+        }
+        menu.addItem(.separator())
+        // The SAME nil-target action the footer button and the Layer menu
+        // send, so it inherits the editor's validation: disabled on the last
+        // remaining layer, and while a canvas session or sheet is open.
+        menu.addItem(
+            NSMenuItem(
+                title: "Delete Layer",
+                action: #selector(EditorViewController.deleteLayer(_:)), keyEquivalent: ""))
+    }
+
+    /// Select Frame…: the clicked row's Live Photo timeline, the same picker
+    /// its double-click opens. `clickedRow` still names the right row here
+    /// (it stays valid until the next click), and menuNeedsUpdate has already
+    /// selected it.
+    @objc private func selectClickedLayerFrame(_ sender: Any?) {
+        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
+        guard row >= 0, row < tableView.numberOfRows else { return }
+        onLivePhotoEdit?(layerIndex(forRow: row))
+    }
+
+    /// Rename: put the keyboard in the row's name field with the name
+    /// selected, which is exactly the inline rename a click on the name
+    /// starts (and commits the same way). `clickedRow` stays valid until the
+    /// next click, so it still names the right row here; the selection made
+    /// in menuNeedsUpdate is the fallback.
+    @objc private func renameClickedLayer(_ sender: Any?) {
+        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
+        guard row >= 0, row < tableView.numberOfRows else { return }
+        tableView.scrollRowToVisible(row)
+        guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: true)
+                as? LayerCellView
+        else { return }
+        cell.beginRename()
     }
 }

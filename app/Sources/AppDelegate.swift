@@ -181,7 +181,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Undo", Selector(("undo:")), "z"))
         menu.addItem(item("Redo", Selector(("redo:")), "z", [.command, .shift]))
         menu.addItem(.separator())
+        menu.addItem(item("Cut", #selector(EditorViewController.cut(_:)), "x"))
         menu.addItem(item("Copy", #selector(EditorViewController.copy(_:)), "c"))
+        // Photoshop's pair and its shortcut: Copy takes the active layer,
+        // Copy Merged the flattened composite.
+        menu.addItem(
+            item(
+                "Copy Merged", #selector(EditorViewController.copyMerged(_:)), "c",
+                [.command, .shift]))
         menu.addItem(
             item("Paste", Selector(("paste:")), "v"))
         // Bare ⌫: U+0008 (NSBackspaceCharacter) is what AppKit matches the
@@ -207,6 +214,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item(
                 "Invert Selection", #selector(EditorViewController.invertSelection(_:)), "i",
                 [.command, .shift]))
+        menu.addItem(.separator())
+        // Vision segmentation; needs no selection to start from, so it sits
+        // with Select All rather than with the modify-the-selection block.
+        menu.addItem(
+            item("Select Subject", #selector(EditorViewController.selectSubject(_:))))
         menu.addItem(.separator())
         menu.addItem(
             item("Feather Selection…", #selector(EditorViewController.featherSelection(_:))))
@@ -239,8 +251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Flip Horizontal", #selector(EditorViewController.flipH(_:))))
         menu.addItem(item("Flip Vertical", #selector(EditorViewController.flipV(_:))))
         menu.addItem(.separator())
-        menu.addItem(
-            item("Crop to Selection", #selector(EditorViewController.cropToSelection(_:)), "k"))
+        menu.addItem(item("Crop", #selector(EditorViewController.cropToSelection(_:)), "k"))
         menu.addItem(
             item("Image Size…", #selector(EditorViewController.resizeImage(_:)), "i", [.command, .option]))
         menu.addItem(
@@ -253,6 +264,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(
             item("New Layer", #selector(EditorViewController.newLayer(_:)), "n", [.command, .shift]))
         menu.addItem(submenuItem(newAdjustmentLayerMenu()))
+        // Imports a Live Photo as a layer showing its key frame; Select Live
+        // Photo Frame… below then scrubs that layer's timeline.
+        menu.addItem(
+            item("Place Live Photo…", #selector(EditorViewController.placeLivePhoto(_:))))
         menu.addItem(item("Duplicate Layer", #selector(EditorViewController.duplicateLayer(_:)), "j"))
         menu.addItem(item("Delete Layer", #selector(EditorViewController.deleteLayer(_:))))
         menu.addItem(.separator())
@@ -272,6 +287,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // adjustment layer whose op has one (validation in the editor).
         menu.addItem(
             item("Adjustment Options…", #selector(EditorViewController.adjustmentOptions(_:))))
+        // Enabled only on a layer that still carries its Live Photo
+        // description (validation in the editor).
+        menu.addItem(
+            item(
+                "Select Live Photo Frame…",
+                #selector(EditorViewController.selectLivePhotoFrame(_:))))
         menu.addItem(.separator())
         menu.addItem(
             item("Merge Down", #selector(EditorViewController.mergeDown(_:)), "e", [.command, .shift]))
@@ -365,6 +386,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Ellipse Select Tool", #selector(EditorViewController.selectEllipseTool(_:))))
         menu.addItem(item("Lasso Tool", #selector(EditorViewController.selectLassoTool(_:))))
         menu.addItem(item("Magic Wand Tool", #selector(EditorViewController.selectWandTool(_:))))
+        menu.addItem(
+            item("Subject Select Tool", #selector(EditorViewController.selectSubjectTool(_:))))
         menu.addItem(item("Move Tool", #selector(EditorViewController.selectMoveTool(_:))))
         menu.addItem(item("Brush Tool", #selector(EditorViewController.selectBrushTool(_:))))
         menu.addItem(item("Eraser Tool", #selector(EditorViewController.selectEraserTool(_:))))
@@ -374,7 +397,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Text Tool", #selector(EditorViewController.selectTextTool(_:))))
         menu.addItem(
             item("Eyedropper Tool", #selector(EditorViewController.selectEyedropperTool(_:))))
-        menu.addItem(item("Crop Tool", #selector(EditorViewController.selectCropTool(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Allow Agent Connections", #selector(toggleAgentServer(_:))))
         return menu

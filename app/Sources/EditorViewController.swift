@@ -1,22 +1,5 @@
 import AppKit
 
-/// Tools offered by the editor UI. Raw values are the toolbar group's
-/// segment indices.
-enum EditorTool: Int {
-    case select = 0
-    case ellipseSelect
-    case lasso
-    case wand
-    case move
-    case brush
-    case eraser
-    case fill
-    case gradient
-    case text
-    case eyedropper
-    case crop
-}
-
 /// What brush and eraser edit on the active layer: its pixels, or its layer
 /// mask. Pure UI state owned by EditorViewController — not undoable, not
 /// persisted, and reset to `.layer` whenever the active layer changes, its
@@ -27,10 +10,14 @@ enum PaintTarget {
 }
 
 final class EditorViewController: NSViewController {
-    private weak var document: ImageDocument?
+    // Not private: the per-feature extension files (EditorViewController+…)
+    // are handlers of this controller and need the document they act on.
+    weak var document: ImageDocument?
 
     private let scrollView = NSScrollView()
-    private let canvas = ImageCanvasView()
+    // Not private, like `document` above: the extension files need the two
+    // things every editor command works against.
+    let canvas = ImageCanvasView()
     private var didRunInitialZoom = false
 
     // Design chrome: 58px toolbar, floating zoom pill, 30px status bar with
@@ -74,15 +61,6 @@ final class EditorViewController: NSViewController {
     // shared paint color.
     private let sampleSwatch = NSBox()
     private let sampleValueLabel = NSTextField(labelWithString: "Click to sample")
-    // Crop: the aspect preset constraining drags and resizes, and the W/H
-    // fields (transform-bar conventions) that resize the session's rect
-    // keeping its top-left corner fixed.
-    private let cropAspectLabel = NSTextField(labelWithString: "Aspect")
-    private let cropAspectPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let cropSizeWLabel = NSTextField(labelWithString: "W")
-    private let cropSizeWField = NSTextField(string: "")
-    private let cropSizeHLabel = NSTextField(labelWithString: "H")
-    private let cropSizeHField = NSTextField(string: "")
     // Free Transform: numerics bound both ways to the session's parameters,
     // plus the sampler the single commit-time resample will use.
     private let transformAngleLabel = NSTextField(labelWithString: "Angle°")
@@ -254,16 +232,17 @@ final class EditorViewController: NSViewController {
             // A mask stroke already committed itself (onCommitMaskOverlay)
             // and never opened a live-edit session.
             guard !wasMask else { return }
-            // A stroke that actually landed on a text layer contradicts the
-            // description its pixels were rendered from. Ask at mouse-up
-            // rather than mouse-down: a modal alert during mouse-down would
-            // swallow the drag. Rasterize drops the description inside this
-            // same gesture (one undo step); Cancel rolls the stroke back to
-            // the pre-stroke snapshot, which makes endLiveEdit a same-handle
-            // no-op — no undo step, no pixels changed.
+            // A stroke that actually landed on a DESCRIBED layer — text, a
+            // Live Photo frame — contradicts the description its pixels were
+            // rendered from. Ask at mouse-up rather than mouse-down: a modal
+            // alert during mouse-down would swallow the drag. Rasterize drops
+            // the description inside this same gesture (one undo step);
+            // Cancel rolls the stroke back to the pre-stroke snapshot, which
+            // makes endLiveEdit a same-handle no-op — no undo step, no pixels
+            // changed.
             let idx = document.activeLayerIndex
-            if let base = base, document.doc !== base, document.doc?.textPayload(idx) != nil {
-                if document.confirmTextRasterize(layer: idx) {
+            if let base = base, document.doc !== base, document.layerDescribesSource(idx) {
+                if document.confirmRasterize(layer: idx) {
                     if let cleared = document.doc?.withLayerMeta(idx, nil) {
                         document.updateLiveEdit(cleared)
                     }
@@ -296,29 +275,12 @@ final class EditorViewController: NSViewController {
             // Drops the layer-hidden preview a re-edit session put up.
             self?.canvas.previewImage = nil
         }
-        canvas.onToolKey = { [weak self] tool in
-            switch tool {
-            case .select: self?.selectTool(.select)
-            case .ellipseSelect: self?.selectTool(.ellipseSelect)
-            case .lasso: self?.selectTool(.lasso)
-            case .wand: self?.selectTool(.wand)
-            case .move: self?.selectTool(.move)
-            case .brush: self?.selectTool(.brush)
-            case .eraser: self?.selectTool(.eraser)
-            case .fill: self?.selectTool(.fill)
-            case .gradient: self?.selectTool(.gradient)
-            case .text: self?.selectTool(.text)
-            case .eyedropper: self?.selectTool(.eyedropper)
-            case .crop: self?.selectTool(.crop)
-            }
-        }
+        canvas.onToolKey = { [weak self] tool in self?.selectTool(tool) }
         canvas.onQuickMaskKey = { [weak self] in self?.toggleQuickMask(nil) }
         canvas.onWandClick = { [weak self] point, mode in self?.wandClicked(point, mode: mode) }
         canvas.onFillClick = { [weak self] point in self?.fillClicked(point) }
         canvas.onEyedropper = { [weak self] point in self?.sampleColor(at: point) }
         canvas.onGradientCommit = { [weak self] a, b in self?.gradientCommitted(a, b) }
-        canvas.onCropRectChange = { [weak self] _ in self?.updateCropFields() }
-        canvas.onCropCommit = { [weak self] rect in self?.cropCommitted(rect) }
         canvas.onBrushSizeKey = { [weak self] newSize in
             guard let self = self else { return }
             self.brushSize = newSize
@@ -375,35 +337,11 @@ final class EditorViewController: NSViewController {
         canvas.textFont = currentFont()
         canvas.textAlignment = textAlignment
 
-        // Toolbar: pill tool group left, ghost zoom cluster, crop pinned
-        // right, on a card bar with a subtle bottom border.
+        // Toolbar: pill tool group left, ghost zoom cluster, on a card bar
+        // with a subtle bottom border. The pill's contents — including
+        // which tools share a button — come from EditorTool.toolbarGroups.
         toolbarBar.translatesAutoresizingMaskIntoConstraints = false
-        toolPill = ToolPillControl(segments: [
-            .init(symbol: "cursorarrow", fallback: "S", label: "Select",
-                  action: #selector(selectSelectTool(_:))),
-            .init(symbol: "circle.dashed", fallback: "O", label: "Ellipse",
-                  action: #selector(selectEllipseTool(_:))),
-            .init(symbol: "lasso", fallback: "L", label: "Lasso",
-                  action: #selector(selectLassoTool(_:))),
-            .init(symbol: "wand.and.stars", fallback: "W", label: "Wand",
-                  action: #selector(selectWandTool(_:))),
-            .init(symbol: "arrow.up.and.down.and.arrow.left.and.right", fallback: "M",
-                  label: "Move", action: #selector(selectMoveTool(_:))),
-            .init(symbol: "paintbrush.pointed", fallback: "B", label: "Brush",
-                  action: #selector(selectBrushTool(_:))),
-            .init(symbol: "eraser", fallback: "E", label: "Eraser",
-                  action: #selector(selectEraserTool(_:))),
-            .init(symbol: "drop.fill", fallback: "K", label: "Fill",
-                  action: #selector(selectFillTool(_:))),
-            .init(symbol: "circle.lefthalf.filled", fallback: "G", label: "Grad",
-                  action: #selector(selectGradientTool(_:))),
-            .init(symbol: "textformat", fallback: "T", label: "Text",
-                  action: #selector(selectTextTool(_:))),
-            .init(symbol: "eyedropper", fallback: "I", label: "Pick",
-                  action: #selector(selectEyedropperTool(_:))),
-            .init(symbol: "crop", fallback: "C", label: "Crop",
-                  action: #selector(selectCropTool(_:))),
-        ])
+        toolPill = ToolPillControl(groups: EditorTool.toolbarGroups)
         toolPill.translatesAutoresizingMaskIntoConstraints = false
         let zoomOutButton = GhostButton(
             symbol: "minus.magnifyingglass", fallback: "−", caption: "Zoom Out",
@@ -417,12 +355,9 @@ final class EditorViewController: NSViewController {
         let actualButton = GhostButton(
             symbol: "1.magnifyingglass", fallback: "1", caption: "Actual",
             tooltip: "Actual Size", action: #selector(zoomActualAction(_:)))
-        let cropButton = GhostButton(
-            symbol: "crop", fallback: "⌗", caption: "Crop",
-            tooltip: "Crop to Selection", action: #selector(cropToSelection(_:)))
         let toolbarStack = NSStackView(views: [
             toolPill, zoomOutButton, zoomInButton, fitButton, actualButton,
-            NSView(), cropButton,
+            NSView(),
         ])
         toolbarStack.translatesAutoresizingMaskIntoConstraints = false
         toolbarStack.orientation = .horizontal
@@ -464,6 +399,12 @@ final class EditorViewController: NSViewController {
         }
         layersPanel.onAdjustmentEdit = { [weak self] idx in
             self?.editAdjustmentLayer(idx)
+        }
+        layersPanel.onTextEdit = { [weak self] idx in
+            self?.editTextLayer(idx)
+        }
+        layersPanel.onLivePhotoEdit = { [weak self] idx in
+            self?.editLivePhotoLayer(idx)
         }
         layersPanel.onShowAssistant = { [weak self] in
             self?.panelTab = 1
@@ -579,7 +520,7 @@ final class EditorViewController: NSViewController {
         for label in [
             sizeLabel, opacityLabel, fontLabel, transformAngleLabel, transformScaleXLabel,
             transformScaleYLabel, transformSizeLabel, transformSizeHLabel,
-            transformSamplerLabel, cropAspectLabel, cropSizeWLabel, cropSizeHLabel,
+            transformSamplerLabel,
         ] {
             label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
         }
@@ -768,31 +709,6 @@ final class EditorViewController: NSViewController {
         transformSamplerPopup.action = #selector(transformSamplerChanged(_:))
         transformSamplerPopup.widthAnchor.constraint(equalToConstant: 170).isActive = true
 
-        // Crop: aspect presets, plus W/H fields following the transform
-        // bar's conventions (whole pixels; the formatter only rules out
-        // empty/zero/negative input, the action clamps to the canvas).
-        cropAspectPopup.controlSize = .small
-        cropAspectPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        cropAspectPopup.addItems(withTitles: Self.cropAspectTitles)
-        cropAspectPopup.target = self
-        cropAspectPopup.action = #selector(cropAspectChanged(_:))
-        cropAspectPopup.widthAnchor.constraint(equalToConstant: 100).isActive = true
-
-        for field in [cropSizeWField, cropSizeHField] {
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .decimal
-            formatter.usesGroupingSeparator = false
-            formatter.maximumFractionDigits = 0
-            formatter.minimum = 1
-            field.formatter = formatter
-            field.controlSize = .small
-            field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-            field.target = self
-            field.widthAnchor.constraint(equalToConstant: 60).isActive = true
-        }
-        cropSizeWField.action = #selector(cropSizeWChanged(_:))
-        cropSizeHField.action = #selector(cropSizeHChanged(_:))
-
         let controls: [NSView] = [
             sizeLabel, sizeSlider, sizeField,
             opacityLabel, opacitySlider, opacityValueLabel,
@@ -800,8 +716,6 @@ final class EditorViewController: NSViewController {
             toleranceLabel, toleranceSlider, toleranceValueLabel, contiguousCheck,
             gradientShapePopup, gradientEndLabel, gradientEndWell,
             sampleSwatch, sampleValueLabel,
-            cropAspectLabel, cropAspectPopup,
-            cropSizeWLabel, cropSizeWField, cropSizeHLabel, cropSizeHField,
             fontLabel, fontPopup, fontSizeField, alignmentControl,
             transformAngleLabel, transformAngleField,
             transformScaleXLabel, transformScaleXField,
@@ -862,26 +776,7 @@ final class EditorViewController: NSViewController {
             canvas.commitTextSession()
         }
         currentTool = tool
-        switch tool {
-        case .select: canvas.tool = .select
-        case .ellipseSelect: canvas.tool = .ellipseSelect
-        case .lasso: canvas.tool = .lasso
-        case .wand: canvas.tool = .wand
-        case .move: canvas.tool = .move
-        case .brush: canvas.tool = .brush
-        case .eraser: canvas.tool = .eraser
-        case .fill: canvas.tool = .fill
-        case .gradient: canvas.tool = .gradient
-        case .text: canvas.tool = .text
-        case .eyedropper: canvas.tool = .eyedropper
-        case .crop: canvas.tool = .crop
-        }
-        // Entering the crop tool: hand the canvas the popup's constraint
-        // and blank the W/H fields (the tool switch cleared any old rect).
-        if tool == .crop {
-            syncCropAspect()
-            updateCropFields()
-        }
+        canvas.tool = tool
         // Only brush and eraser edit masks; picking one of the other paint
         // tools silently points the target back at the layer rather than
         // blocking the tool or painting the wrong thing.
@@ -947,15 +842,18 @@ final class EditorViewController: NSViewController {
         }
     }
 
-    /// Mirrors tool selection into the toolbar pill (display only).
+    /// Mirrors tool selection into the toolbar pill (display only). A
+    /// grouped segment also starts standing for this tool, so the group
+    /// remembers what was last used in it.
     func reflectSelectedTool(_ tool: EditorTool) {
-        toolPill?.setSelectedIndex(tool.rawValue)
+        toolPill?.setSelectedTool(tool)
     }
 
     @objc func selectSelectTool(_ sender: Any?) { selectTool(.select) }
     @objc func selectEllipseTool(_ sender: Any?) { selectTool(.ellipseSelect) }
     @objc func selectLassoTool(_ sender: Any?) { selectTool(.lasso) }
     @objc func selectWandTool(_ sender: Any?) { selectTool(.wand) }
+    @objc func selectSubjectTool(_ sender: Any?) { selectTool(.subject) }
     @objc func selectMoveTool(_ sender: Any?) { selectTool(.move) }
     @objc func selectBrushTool(_ sender: Any?) { selectTool(.brush) }
     @objc func selectEraserTool(_ sender: Any?) { selectTool(.eraser) }
@@ -963,7 +861,6 @@ final class EditorViewController: NSViewController {
     @objc func selectGradientTool(_ sender: Any?) { selectTool(.gradient) }
     @objc func selectTextTool(_ sender: Any?) { selectTool(.text) }
     @objc func selectEyedropperTool(_ sender: Any?) { selectTool(.eyedropper) }
-    @objc func selectCropTool(_ sender: Any?) { selectTool(.crop) }
 
     private func updateOptionsBar() {
         // A Free Transform session takes the whole bar over: it is modal on
@@ -996,13 +893,6 @@ final class EditorViewController: NSViewController {
         let eyedropperTool = !transforming && tool == .eyedropper
         sampleSwatch.isHidden = !eyedropperTool
         sampleValueLabel.isHidden = !eyedropperTool
-        let cropTool = !transforming && tool == .crop
-        for control in [
-            cropAspectLabel, cropAspectPopup, cropSizeWLabel, cropSizeWField,
-            cropSizeHLabel, cropSizeHField,
-        ] as [NSView] {
-            control.isHidden = !cropTool
-        }
         for control in [
             transformAngleLabel, transformAngleField, transformScaleXLabel, transformScaleXField,
             transformScaleYLabel, transformScaleYField, transformSizeLabel, transformSizeWField,
@@ -1011,8 +901,12 @@ final class EditorViewController: NSViewController {
             control.isHidden = !transforming
         }
 
+        // Tools with nothing to configure hide the bar rather than show an
+        // empty one. Subject select is deliberately among them: the whole
+        // point of it is that there is no tolerance to tune.
         let barHidden = !transforming
-            && (tool == .select || tool == .ellipseSelect || tool == .lasso || tool == .move)
+            && (tool == .select || tool == .ellipseSelect || tool == .lasso || tool == .move
+                || tool == .subject)
         optionsBar.isHidden = barHidden
         scrollTopToRoot.isActive = false
         scrollTopToOptions.isActive = false
@@ -1122,109 +1016,50 @@ final class EditorViewController: NSViewController {
             ?? .systemFont(ofSize: fontSize)
     }
 
-    // MARK: - Crop tool
-
-    /// Aspect preset titles, in popup order. Free is unconstrained;
-    /// Original is the canvas's own aspect, computed at use time — a canvas
-    /// size change cancels the session (ImageCanvasView's image setter), so
-    /// "at session start" and "now" always agree.
-    private static let cropAspectTitles = [
-        "Free", "Original", "1:1", "4:3", "3:2", "16:9", "9:16",
-    ]
-
-    /// The popup's constraint as width / height; nil = free.
-    private func currentCropAspect() -> CGFloat? {
-        switch cropAspectPopup.indexOfSelectedItem {
-        case 1:
-            guard let doc = document?.doc, doc.width > 0, doc.height > 0 else { return nil }
-            return CGFloat(doc.width) / CGFloat(doc.height)
-        case 2: return 1
-        case 3: return 4.0 / 3.0
-        case 4: return 3.0 / 2.0
-        case 5: return 16.0 / 9.0
-        case 6: return 9.0 / 16.0
-        default: return nil
-        }
-    }
-
-    /// Pushes the popup's constraint to the canvas (tool entry, popup
-    /// changes, and document changes — Original tracks the new canvas).
-    private func syncCropAspect() {
-        canvas.cropAspect = currentCropAspect()
-    }
-
-    @objc private func cropAspectChanged(_ sender: Any?) {
-        syncCropAspect()
-    }
-
-    /// The rect → fields half of the binding (the fields' actions are the
-    /// other half); blank fields when no session is in progress.
-    private func updateCropFields() {
-        guard let rect = canvas.cropRect else {
-            cropSizeWField.stringValue = ""
-            cropSizeHField.stringValue = ""
-            return
-        }
-        cropSizeWField.stringValue = String(Int(rect.width.rounded()))
-        cropSizeHField.stringValue = String(Int(rect.height.rounded()))
-    }
-
-    @objc private func cropSizeWChanged(_ sender: Any?) {
-        resizeCropRect(width: CGFloat(cropSizeWField.doubleValue), height: nil)
-    }
-
-    @objc private func cropSizeHChanged(_ sender: Any?) {
-        resizeCropRect(width: nil, height: CGFloat(cropSizeHField.doubleValue))
-    }
-
-    /// Typing W or H resizes the crop rect keeping its TOP-LEFT corner
-    /// fixed, clamped to the canvas. Bad input (no session, non-positive)
-    /// just snaps the field back to the current value.
-    private func resizeCropRect(width: CGFloat?, height: CGFloat?) {
-        defer { updateCropFields() }
-        guard var rect = canvas.cropRect else { return }
-        if let width = width, width >= 1 {
-            rect.size.width = min(max(width.rounded(), 1), canvas.bounds.width - rect.minX)
-        }
-        if let height = height, height >= 1 {
-            rect.size.height = min(max(height.rounded(), 1), canvas.bounds.height - rect.minY)
-        }
-        canvas.setCropRect(rect)
-    }
-
-    /// Crop-tool commit (Return, or a double-click inside the rect): the
-    /// same core crop op as Image > Crop to Selection, with the same
-    /// semantics — the canvas shrinks to the rect and layers keep their
-    /// pixels outside it — as ONE undo step through applyEdit (which also
-    /// counts the edit change). The canvas has already cleared the session.
-    private func cropCommitted(_ rect: CGRect) {
-        guard let document = document else {
-            NSSound.beep()
-            return
-        }
-        let w = Int(rect.width)
-        let h = Int(rect.height)
-        guard w >= 1, h >= 1 else {
-            NSSound.beep()
-            return
-        }
-        let x = Int(rect.minX)
-        let y = Int(rect.minY)
-        document.applyEdit("Crop") { doc in
-            doc.cropped(x: x, y: y, w: w, h: h)
-        }
-    }
-
     // MARK: - Text layers
 
     /// A text-tool click: re-open the topmost VISIBLE text layer under the
     /// point, or start a new text entry there.
     private func textClicked(_ point: CGPoint) {
+        guard let doc = document?.doc, let idx = topmostTextLayer(at: point, in: doc) else {
+            canvas.beginTextSession(at: point)
+            return
+        }
+        // A click puts the caret where it landed, so nothing is preselected.
+        openTextSession(layer: idx, selectAll: false)
+    }
+
+    /// Double-clicking a TEXT layer in the layers panel: switch to the text
+    /// tool and reopen the layer's description with the whole string
+    /// selected, so typing replaces it and the options bar exposes the font,
+    /// size, color and alignment. The layer needn't be under the cursor or
+    /// even visible — the panel already said which one.
+    func editTextLayer(_ idx: Int) {
+        guard let doc = document?.doc, doc.textPayload(idx) != nil else {
+            NSSound.beep()
+            return
+        }
+        // A click that ends an open session only ends it — the rule the
+        // canvas follows too — because committing may insert a layer and
+        // renumber everything above it, `idx` included.
+        if canvas.hasActiveTextSession {
+            canvas.commitTextSession()
+            return
+        }
+        // The session belongs to the text tool; entering it also drops any
+        // mask paint target and swaps the options bar over.
+        selectTool(.text)
+        openTextSession(layer: idx, selectAll: true)
+    }
+
+    /// Opens the on-canvas editor on text layer `idx`, restoring its
+    /// description into the options bar and the session. Shared by the
+    /// text-tool click and the layers panel's double-click.
+    private func openTextSession(layer idx: Int, selectAll: Bool) {
         guard let document = document, let doc = document.doc,
-              let idx = topmostTextLayer(at: point, in: doc),
               let info = doc.layerInfo(idx), let payload = doc.textPayload(idx)
         else {
-            canvas.beginTextSession(at: point)
+            NSSound.beep()
             return
         }
         // Editing a layer makes it the active one (the commit replaces its
@@ -1240,12 +1075,14 @@ final class EditorViewController: NSViewController {
         // draws with those very parameters.
         applyTextOptions(payload)
         // Hide the layer's own raster underneath the session, or the old
-        // glyphs ghost behind every edit to the string.
+        // glyphs ghost behind every edit to the string. An already-hidden
+        // layer has nothing to hide: the pure op returns nil and the session
+        // runs over the unmodified canvas, which is correct.
         canvas.previewImage = doc.withLayerVisible(idx, false)?.flattened()?.makeCGImage()
         canvas.beginTextSession(
             at: TextLayer.editorOrigin(
                 offsetX: info.offsetX, offsetY: info.offsetY, payload: payload),
-            string: payload.string, editingLayer: idx)
+            string: payload.string, editingLayer: idx, selectAll: selectAll)
     }
 
     /// The topmost visible layer that carries a text description and whose
@@ -1338,12 +1175,9 @@ final class EditorViewController: NSViewController {
             return moved.withLayerMeta(idx, meta)
         }
         guard document.doc !== before else { return }
-        document.activeLayerIndex = min(below + 1, document.doc.layerCount - 1)
-        // The active layer moved: any mask paint target goes with it.
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        // The active layer moves to the new text layer; any mask paint target
+        // goes with it.
+        setActiveLayer(min(below + 1, document.doc.layerCount - 1))
     }
 
     // MARK: - Free Transform
@@ -1682,12 +1516,13 @@ final class EditorViewController: NSViewController {
             return true
         }
         let idx = session.layer
-        // A free transform rewrites the pixels a text layer's description was
-        // rendered from. Same prompt as every other rasterizing edit, but
-        // taken here rather than through applyRasterizingEdit: Cancel has to
-        // keep the session open instead of abandoning the whole gesture.
-        let describesText = doc.textPayload(idx) != nil
-        if describesText, !document.confirmTextRasterize(layer: idx) { return false }
+        // A free transform rewrites the pixels a described layer — text, a
+        // Live Photo frame — was rendered from. Same prompt as every other
+        // rasterizing edit, but taken here rather than through
+        // applyRasterizingEdit: Cancel has to keep the session open instead
+        // of abandoning the whole gesture.
+        let describesSource = document.layerDescribesSource(idx)
+        if describesSource, !document.confirmRasterize(layer: idx) { return false }
         let matrix = session.transform.matrix
         let sampler = session.sampler
         let before = document.doc
@@ -1696,7 +1531,7 @@ final class EditorViewController: NSViewController {
             guard let transformed = doc.transformingLayer(idx, matrix, sampler: sampler) else {
                 return nil
             }
-            guard describesText else { return transformed }
+            guard describesSource else { return transformed }
             return transformed.withLayerMeta(idx, nil) ?? transformed
         }
         isCommittingTransform = false
@@ -1870,10 +1705,6 @@ final class EditorViewController: NSViewController {
         }
         canvas.needsDisplay = true
         syncPaintTarget()
-        // The canvas cancels a crop session itself when its size changed
-        // (the rect would be meaningless); the Original preset just needs to
-        // track the new canvas for the next drag.
-        syncCropAspect()
         updateStatus()
         updateActiveLayerRect()
         view.window?.subtitle = "\(doc.width) × \(doc.height) px"
@@ -1910,25 +1741,8 @@ final class EditorViewController: NSViewController {
             statusLayer.text = ""
             statusBlend.text = ""
         }
-        statusTool.text = isTransforming ? "Free Transform" : toolDisplayName(currentTool)
+        statusTool.text = isTransforming ? "Free Transform" : currentTool.displayName
         updateZoomLabel()
-    }
-
-    private func toolDisplayName(_ tool: EditorTool) -> String {
-        switch tool {
-        case .select: return "Select"
-        case .ellipseSelect: return "Ellipse Select"
-        case .lasso: return "Lasso"
-        case .wand: return "Magic Wand"
-        case .move: return "Move"
-        case .brush: return "Brush"
-        case .eraser: return "Eraser"
-        case .fill: return "Fill"
-        case .gradient: return "Gradient"
-        case .text: return "Text"
-        case .eyedropper: return "Eyedropper"
-        case .crop: return "Crop"
-        }
     }
 
     /// Pushes the active layer's extent (image-pixel coordinates) to the
@@ -2330,6 +2144,22 @@ final class EditorViewController: NSViewController {
         editAdjustmentLayer(document.activeLayerIndex)
     }
 
+    /// Makes `idx` the layer edits target and refreshes everything that
+    /// follows it — the paint target, the panel, the status line, the
+    /// on-canvas layer boundary. Like the panel's own selection this only
+    /// retargets future edits: no undo step, no dirty flag. A no-op when
+    /// `idx` is already active or out of range.
+    func setActiveLayer(_ idx: Int) {
+        guard let document = document, let doc = document.doc,
+              idx >= 0, idx < doc.layerCount, idx != document.activeLayerIndex
+        else { return }
+        document.activeLayerIndex = idx
+        syncPaintTarget()
+        layersPanel.reload()
+        updateStatus()
+        updateActiveLayerRect()
+    }
+
     /// Reopens layer `idx`'s dialog pre-filled from its meta (the menu item
     /// and the layers panel's thumbnail double-click both land here). OK
     /// replaces only the meta as one undo step; Cancel leaves the document
@@ -2345,13 +2175,7 @@ final class EditorViewController: NSViewController {
         }
         // Editing a layer makes it the active one, like re-opening a text
         // layer does.
-        if document.activeLayerIndex != idx {
-            document.activeLayerIndex = idx
-            syncPaintTarget()
-            layersPanel.reload()
-            updateStatus()
-            updateActiveLayerRect()
-        }
+        setActiveLayer(idx)
         guard let sheet = AdjustmentLayerSheetController.make(
             op: op, document: document, canvas: canvas,
             mode: .edit(layer: idx, original: payload))
@@ -2595,22 +2419,72 @@ final class EditorViewController: NSViewController {
         }
     }
 
+    /// Edit > Cut (⌘X): Copy then Clear as one step — the ACTIVE LAYER's
+    /// pixels within the selection go to the clipboard exactly as Copy takes
+    /// them, then the selected region is cleared out of the layer as one
+    /// undoable "Cut" edit. The copy lands first, and only a copy that
+    /// succeeded lets the clear proceed, so pixels are never deleted without
+    /// having been captured; a Cancel on the rasterize prompt then degrades
+    /// to a plain Copy.
+    @objc func cut(_ sender: Any?) {
+        guard let document = document, let doc = document.doc,
+              let selection = canvas.selection
+        else {
+            NSSound.beep()
+            return
+        }
+        // Validation disables the menu item on an adjustment layer; this
+        // backstop covers any path around it.
+        guard !refuseAdjustmentPixelEdit() else { return }
+        let idx = document.activeLayerIndex
+        guard copyToPasteboard(doc.layerCanvasImage(idx)) else { return }
+        let mask = selection.maskBytes()
+        document.applyRasterizingEdit("Cut", layer: idx) { doc in
+            doc.clearingSelection(idx, mask: mask)
+        }
+    }
+
+    /// Edit > Copy: the ACTIVE LAYER's pixels within the selection, the way
+    /// Photoshop's Copy works — raw layer pixels, so opacity, blend mode and
+    /// the layer mask stay out of it and the copy round-trips through Paste
+    /// as New Layer unchanged. Everything the layer does not reach inside the
+    /// selection comes out transparent.
     @objc func copy(_ sender: Any?) {
-        guard let projection = document?.projection else {
+        guard let doc = document?.doc else {
             NSSound.beep()
             return
         }
-        let source: RasterImage?
-        if let selection = canvas.selectionRect {
-            source = projection.cropped(
-                x: Int(selection.minX), y: Int(selection.minY),
-                w: Int(selection.width), h: Int(selection.height))
-        } else {
-            source = projection
+        copyToPasteboard(doc.layerCanvasImage(document?.activeLayerIndex ?? 0))
+    }
+
+    /// Edit > Copy Merged: the same region of the flattened composite —
+    /// every visible layer, with opacity, blend modes, masks, clipping and
+    /// adjustment layers all applied, as one image.
+    @objc func copyMerged(_ sender: Any?) {
+        copyToPasteboard(document?.projection)
+    }
+
+    /// Shared tail of Cut and both copies: multiply the canvas-sized
+    /// source's alpha by the selection's coverage — only the SELECTED pixels
+    /// come along, so anything inside the bounding box but outside the shape
+    /// goes transparent, and a feathered or anti-aliased edge fades out
+    /// across the fringe, exactly as Clear removes it — then crop to the
+    /// selection's BOUNDS (the whole canvas without a selection) and write
+    /// TIFF + PNG. True when the clipboard was written — Cut clears only on
+    /// success.
+    @discardableResult
+    private func copyToPasteboard(_ source: RasterImage?) -> Bool {
+        var image = source
+        if let selection = canvas.selection {
+            let bounds = selection.bounds
+            image = image?.masked(by: selection.maskBytes())
+            image = image?.cropped(
+                x: Int(bounds.minX), y: Int(bounds.minY),
+                w: Int(bounds.width), h: Int(bounds.height))
         }
-        guard let cgImage = source?.makeCGImage() else {
+        guard let cgImage = image?.makeCGImage() else {
             NSSound.beep()
-            return
+            return false
         }
         let rep = NSBitmapImageRep(cgImage: cgImage)
         let item = NSPasteboardItem()
@@ -2620,9 +2494,16 @@ final class EditorViewController: NSViewController {
         if let pngData = rep.representation(using: .png, properties: [:]) {
             item.setData(pngData, forType: .png)
         }
+        // The success return is load-bearing (Cut deletes on it), so an item
+        // both encodes failed to fill, or a write the pasteboard refuses,
+        // must report failure — not fall through as a silent success.
+        guard !item.types.isEmpty else {
+            NSSound.beep()
+            return false
+        }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.writeObjects([item])
+        return pasteboard.writeObjects([item])
     }
 }
 
@@ -2660,6 +2541,7 @@ extension EditorViewController: NSUserInterfaceValidations {
         #selector(selectEllipseTool(_:)): .ellipseSelect,
         #selector(selectLassoTool(_:)): .lasso,
         #selector(selectWandTool(_:)): .wand,
+        #selector(selectSubjectTool(_:)): .subject,
         #selector(selectMoveTool(_:)): .move,
         #selector(selectBrushTool(_:)): .brush,
         #selector(selectEraserTool(_:)): .eraser,
@@ -2667,7 +2549,6 @@ extension EditorViewController: NSUserInterfaceValidations {
         #selector(selectGradientTool(_:)): .gradient,
         #selector(selectTextTool(_:)): .text,
         #selector(selectEyedropperTool(_:)): .eyedropper,
-        #selector(selectCropTool(_:)): .crop,
     ]
 
     /// True while a text-editing responder owns the keyboard: a field
@@ -2725,11 +2606,27 @@ extension EditorViewController: NSUserInterfaceValidations {
             // Every other Select-menu item is disabled inside Quick Mask
             // mode: the selection lives in the mode's buffer until exit.
             return !canvas.quickMaskActive
-        case #selector(cropToSelection(_:)), #selector(deselect(_:)),
+        case #selector(selectSubject(_:)):
+            // Segmentation reads the composite, so an image is all it needs
+            // — unlike the modify-the-selection items, it makes a selection
+            // from nothing.
+            return !canvas.quickMaskActive && document?.doc != nil
+        case #selector(deselect(_:)),
             #selector(invertSelection(_:)), #selector(featherSelection(_:)),
             #selector(growSelection(_:)), #selector(shrinkSelection(_:)),
             #selector(borderSelection(_:)), #selector(smoothSelection(_:)):
             return !canvas.quickMaskActive && canvas.selectionRect != nil
+        case #selector(cropToSelection(_:)):
+            // Crop needs a selection that would actually shrink the canvas.
+            // Selection BOUNDS are what it crops to, so a selection already
+            // spanning the image — Select All, or a lasso whose extent
+            // covers it — leaves nothing to do; the core refuses that crop
+            // as a no-op, so the item would be dead anyway.
+            guard !canvas.quickMaskActive, let rect = canvas.selectionRect,
+                  let doc = document?.doc
+            else { return false }
+            return rect.integral
+                != CGRect(x: 0, y: 0, width: doc.width, height: doc.height)
         case #selector(clearSelection(_:)):
             // Clear's key equivalent is a BARE ⌫: while it is enabled the
             // menu eats every Delete keystroke before the first responder
@@ -2744,6 +2641,13 @@ extension EditorViewController: NSUserInterfaceValidations {
             guard !isEditingText, canvas.selection != nil, !activeLayerIsAdjustment
             else { return false }
             return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
+        case #selector(cut(_:)):
+            // Cut is Copy + Clear in one step, so it needs what Clear needs:
+            // a selection and an active layer with pixels. No text-editing
+            // guard — ⌘X reaches a field editor first, which claims cut:
+            // itself, exactly as ⌘C does for copy.
+            guard canvas.selection != nil, !activeLayerIsAdjustment else { return false }
+            return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
         case #selector(showAdjustments(_:)), #selector(showBlur(_:)),
             #selector(showHueRotate(_:)), #selector(showLevels(_:)),
             #selector(showThreshold(_:)), #selector(showPosterize(_:)),
@@ -2755,6 +2659,13 @@ extension EditorViewController: NSUserInterfaceValidations {
             // an adjustment layer doesn't meaningfully have; its parameters
             // re-open through Adjustment Options… instead.
             return !activeLayerIsAdjustment
+        case #selector(selectLivePhotoFrame(_:)):
+            // Only a layer that still says which Live Photo it came from can
+            // show a different frame of it; a missing clip is reported when
+            // the picker opens, not by disabling the item, so the reason is
+            // visible rather than mysterious.
+            guard let document = document, let doc = document.doc else { return false }
+            return doc.livePhotoPayload(document.activeLayerIndex) != nil
         case #selector(adjustmentOptions(_:)):
             guard let document = document, let doc = document.doc else { return false }
             let idx = document.activeLayerIndex
@@ -2792,6 +2703,11 @@ extension EditorViewController: NSUserInterfaceValidations {
                     activeLayerClipped ? "Release Clipping Mask" : "Create Clipping Mask"
             }
             return (document?.activeLayerIndex ?? 0) >= 1
+        case #selector(copy(_:)):
+            // Copy takes the ACTIVE LAYER's pixels, and an adjustment layer
+            // has none worth copying — its effect lives in the composite, so
+            // Copy Merged is the one that captures it and stays enabled.
+            return !activeLayerIsAdjustment
         case #selector(pasteAsNewLayer(_:)), #selector(paste(_:)):
             return NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
         case #selector(toggleLayersPanel(_:)):
@@ -2812,31 +2728,5 @@ extension EditorViewController: NSUserInterfaceValidations {
         default:
             return true
         }
-    }
-}
-
-// MARK: - Composite pixel sampling (eyedropper)
-
-extension RasterImage {
-    /// The straight (non-premultiplied) RGBA of one pixel, read in place
-    /// from the handle's pixel buffer (row 0 = top, matching the FFI
-    /// convention); nil outside the image. The buffer behind a handle never
-    /// changes, so this is safe and O(1) — used by the editor's eyedropper
-    /// and the agent's sample_color, both against the flattened composite.
-    func pixelRGBA(x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
-        let w = width
-        guard x >= 0, y >= 0, x < w, y < height,
-              let pixels = rz_image_pixels_rgba(ptr)
-        else { return nil }
-        let offset = (y * w + x) * 4
-        return (pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3])
-    }
-
-    /// Canonical hex form of a sampled pixel: #RRGGBB, with the alpha byte
-    /// appended (#RRGGBBAA) only when the pixel is not fully opaque —
-    /// matching the color syntax the paint tools accept.
-    static func hexString(_ rgba: (r: UInt8, g: UInt8, b: UInt8, a: UInt8)) -> String {
-        let base = String(format: "#%02X%02X%02X", rgba.r, rgba.g, rgba.b)
-        return rgba.a == 255 ? base : base + String(format: "%02X", rgba.a)
     }
 }

@@ -10,7 +10,8 @@ decoding, encoding, and manipulation.
   Dissolve, Vivid/Linear/Pin Light, Hard Mix, Divide, Darker/Lighter Color,
   and the non-separable Hue/Saturation/Color/Luminosity — grouped in the
   panel exactly like Photoshop's menu;
-  layers panel with thumbnails, inline rename, drag-reorder, and
+  layers panel with thumbnails, inline rename, drag-reorder, a right-click
+  row menu (Rename, Select Frame… on a Live Photo layer, Delete Layer), and
   new/delete/duplicate/merge-down/flatten; Move tool (V) with arrow-key
   nudges; Paste as New Layer; PSD files import with their real layers; the
   native `.rz` format saves the full layer stack — masks, clipping flags,
@@ -34,8 +35,8 @@ decoding, encoding, and manipulation.
   and Red/Green/Blue individually), Hue Rotate, Posterize, Threshold,
   Invert, Grayscale, and Sepia. The parameterized ops open live-preview
   dialogs and re-open any time via Layer > Adjustment Options… or a
-  double-click on the layer's thumbnail (the panel badges adjustment layers
-  "◐"). Every adjustment layer is created with a layer mask gating where
+  double-click on the layer's row in the panel (which badges adjustment
+  layers "◐"). Every adjustment layer is created with a layer mask gating where
   the adjustment applies — built from the selection when one exists, else
   revealing all — and brush and eraser strokes on the layer paint that mask
   automatically. Because it is just a layer, opacity, blend mode and
@@ -49,8 +50,9 @@ decoding, encoding, and manipulation.
   groups. The layers panel indents a clipped layer behind a "↳" arrow;
   releasing (the same menu item, retitled) undoes it, pixels untouched
   either way
-- Open PNG, JPEG, Photoshop (PSD, layered), TIFF, BMP, GIF, WebP
-  — EXIF orientation is applied on open, so camera photos display upright
+- Open PNG, JPEG, Photoshop (PSD, layered), TIFF, BMP, GIF, WebP, HEIC/HEIF,
+  and Apple Live Photos — EXIF orientation is applied on open, so camera
+  photos display upright
 - Export a copy to PNG, JPEG (with quality control), TIFF, BMP, GIF, WebP;
   failed saves never truncate or delete an existing destination file
 - Smooth zoom (pinch, ⌘+/⌘-, fit, actual size) and pan
@@ -71,14 +73,11 @@ decoding, encoding, and manipulation.
   first (as any destructive edit does). Selections are not transformable yet —
   a session always transforms the whole layer and hides the marquee while it
   runs
-- **Crop tool** (C): drag out a crop box and refine it by its eight handles
-  — Shift constrains a corner drag to the box's aspect, and the options bar
-  offers aspect presets (Free, Original, 1:1, 4:3, 3:2, 16:9, 9:16) plus
-  editable W/H fields; arrow keys nudge, Return or a double-click inside
-  the box commits, Escape cancels. The commit is the same canvas crop as
-  Image > Crop to Selection — the canvas shrinks to the box and layers keep
-  their pixels outside it, ready to be revealed again
-- Selection-based crop, Image Size (scale with filter choice, up to 100 MP),
+- **Crop** (Image > Crop, ⌘K): the canvas shrinks to the selection's
+  bounds and layers keep their pixels outside it, ready to be revealed
+  again. Available only while the selection covers less than the whole
+  image — anything else would be a no-op
+- Image Size (scale with filter choice, up to 100 MP),
   and Canvas Size with the Photoshop-style 3×3 anchor selector — grow or
   trim the canvas without scaling; layers keep their pixels and can be
   revealed again later
@@ -90,7 +89,14 @@ decoding, encoding, and manipulation.
 - Selections beyond the rectangle: ellipse marquee (O), polygonal lasso
   (L — click vertices, double-click/Return/click-the-start closes, Escape
   cancels), and a magic wand (W) with tolerance + contiguous options that
-  samples the flattened composite; combine selections with Shift (add),
+  samples the flattened composite; Select > Select Subject hands the
+  composite to macOS's Vision segmentation — the model behind Preview's
+  Copy Subject — and turns the people, animals or objects it finds into a
+  selection with no seed point, no tolerance and a genuinely soft edge,
+  while the Subject tool (S) does it one subject at a time: press and the
+  subject under the pointer is outlined, drag between subjects to change
+  which, release to select it;
+  combine selections with Shift (add),
   Option (subtract), or Shift+Option (intersect), invert (⇧⌘I), soften
   them with Select > Feather Selection…, reshape them with Grow, Shrink,
   Border, and Smooth Selection… — true Euclidean-distance morphology at
@@ -119,17 +125,53 @@ decoding, encoding, and manipulation.
   mode; strokes confine to an active selection) and on-canvas text
   (font/size/color and left/center/right alignment, ⌘Return commits,
   Escape cancels) — tools switch via toolbar, Tools menu, or
-  M/O/L/W/V/B/E/K/G/T/I/C
+  M/O/L/W/V/B/E/K/G/T/I. Related tools share one toolbar button: the four
+  selection tools sit on one, brush and eraser on another, each showing
+  whichever member is current with a chevron on its right that drops a menu
+  of the rest (with their keys). A group remembers the member last used
 - **Re-editable text layers**: committing text adds its own layer that
   remembers the string, font, size, color and alignment it was rendered
   from — click it again with the text tool to reopen the editor pre-filled,
   with its font/size/color/alignment restored into the options bar, and the
-  layers panel badges it with a "T". A destructive edit (filter, adjustment, fill, gradient,
+  layers panel badges it with a "T". Double-clicking the layer's row in the
+  panel reopens it the same way from anywhere: it switches to the text tool
+  and selects the whole string, so typing replaces it. A destructive edit (filter, adjustment, fill, gradient,
   brush, eraser) asks "Rasterize text layer?" first and drops the
   description on confirm, keeping the pixels. The native `.rz` format stores
   the description alongside the pixels, so text stays editable across
   save and open
-- Full undo/redo, copy to clipboard, recent files
+- **Live Photo layers**: open either half of an Apple Live Photo — the photo
+  (`IMG_0001.HEIC`) or its clip (`IMG_0001.MOV`), which Photos exports as a
+  pair sharing one name — and the layer shows the key frame, the
+  full-resolution photo itself, while remembering the whole clip behind it.
+  Layer > Place Live Photo… adds one to the document you already have.
+  Right-click the layer's row (or double-click it, or Layer > Select Live
+  Photo Frame…) for a timeline slider that scrubs the clip with a live
+  preview on the canvas: pick any moment, and Apply re-renders the layer
+  from that frame as one undo step, keeping its name, position, opacity,
+  blend mode and mask. Video frames are scaled to the photo's size so the
+  layer's geometry never shifts, and a Key Frame button walks back to the
+  full-resolution still. The layers panel badges these layers "▶". A
+  destructive edit (filter, adjustment, fill, gradient, brush, eraser) asks
+  before cutting the layer loose from its Live Photo, exactly as it does for
+  text; the description is stored in `.rz` files, so the frame stays
+  changeable across save and open as long as the original files are where
+  they were
+- **Copy** (⌘C) puts the active layer's own pixels within the selection on
+  the clipboard — raw, so layer opacity, blend mode and the layer mask stay
+  out of it and the copy round-trips through Paste as New Layer unchanged —
+  while **Copy Merged** (⇧⌘C) takes the same region of the flattened
+  composite, every visible layer with its opacity, blend modes, masks,
+  clipping and adjustment layers applied. Both copy only the SELECTED pixels:
+  the clipboard image spans the selection's bounds (the whole canvas with
+  nothing selected), but anything inside those bounds and outside the shape
+  comes out transparent, and a feathered or anti-aliased edge fades out
+  proportionally — a lasso or Select Subject outline copies exactly what it
+  encloses. Written as TIFF and PNG. **Cut** (⌘X) is Copy then Clear in one
+  step: it needs a selection, puts the same pixels on the clipboard, and
+  clears the selected region of the active layer to transparency as a single
+  undo step
+- Full undo/redo, recent files
 - Drag image files onto a window to open them; File > New from Clipboard (⌘N)
 - Checkerboard backdrop for transparency
 
@@ -139,7 +181,10 @@ import; animated GIFs and multi-page TIFFs
 load their first frame/page only, so ⌘S on a GIF deliberately routes through
 Save As instead of overwriting the animation in place. Document-level rotate,
 flip and resize move a text layer's pixels but keep its description, so
-re-editing the text after one re-renders it upright at the layer's corner.
+re-editing the text after one re-renders it upright at the layer's corner —
+selecting a different Live Photo frame after one lands the same way. A Live
+Photo's files are referenced by path, not copied into the document: move or
+delete them and the layer keeps its pixels but can no longer change frame.
 
 ## Built-in assistant
 
@@ -162,7 +207,7 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 43 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 46 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG, and `sample_color` reads single pixels off the flattened
 composite — the eyedropper), layer operations, blend modes, layer masks (add
@@ -180,8 +225,15 @@ with size/color/opacity, and a
 and `edit_text_layer` for re-editable text layers with an `alignment`
 parameter (`get_document` reports each layer's text parameters) and
 `add_text` for the rasterizing variant —
+Live Photos (`add_live_photo_layer` places one as a layer and
+`set_live_photo_frame` re-renders it at another moment of its clip;
+`get_document` reports each layer's clip, key frame and the moment it is
+showing) —
 selections (rect/ellipse/polygon/magic wand with add/subtract/intersect
-modes, plus `modify_selection`'s invert, feather, grow, shrink, border, and
+modes, plus `select_subject` for Vision's subject segmentation — it goes
+past the menu command in giving the agent the subjects individually, since
+`instance` picks one of them and every result reports how many were found,
+plus `modify_selection`'s invert, feather, grow, shrink, border, and
 smooth — shared with the UI and
 honored by every paint tool), `clear_selection` to clear the window's
 current selection on a layer (partial coverage clears proportionally),

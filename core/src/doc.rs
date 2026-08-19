@@ -1,404 +1,29 @@
 //! Layered document model: `RzDocument` (canvas + bottom-to-top layer
-//! stack), the blend-mode table and f32 compositing, per-layer masks, the
-//! RZDC native format, and layered PSD import. See include/rasterize_core.h
-//! for the contract. Layer pixel and mask buffers are `Arc`-shared so
-//! document copies are copy-on-write.
+//! stack), the f32 compositing projection, document ops, and per-layer
+//! masks. See include/rasterize_core.h for the contract. The blend-mode
+//! table and blend math live in `blend`, the RZDC native format in `rzdc`,
+//! and layered PSD import in `psd`. Layer pixel and mask buffers are
+//! `Arc`-shared so document copies are copy-on-write.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
-use image::codecs::png::PngEncoder;
 use image::imageops::{self, FilterType};
-use image::{
-    ExtendedColorType, GenericImageView, GrayImage, ImageBuffer, ImageEncoder, Luma, Pixel,
-    RgbaImage,
-};
+use image::{GenericImageView, GrayImage, ImageBuffer, Luma, Pixel, RgbaImage};
 
 use crate::adjust::Adjustment;
+use crate::blend::{
+    blend_kind, composite_source_into, dissolve_threshold, paint_pixel, BlendKind, LUMA_B, LUMA_G,
+    LUMA_R,
+};
 use crate::ops::CompositeMode;
 use crate::RzImage;
+
+pub use crate::blend::BlendMode;
 
 /// Largest permitted canvas or merged-extent size, in total pixels (matches
 /// the `rz_image_resize` guard). The FFI applies it to caller-declared layer
 /// buffer dimensions too, so absurd dimensions are refused rather than read.
 pub(crate) const MAX_PIXELS: u64 = 100_000_000;
-
-/// Hard caps applied while reading RZDC files so corrupt headers cannot ask
-/// for absurd allocations. The meta cap is also what the FFI meta setter
-/// enforces, so a document can never carry meta the writer would refuse.
-const MAX_RZDC_LAYERS: u32 = 1024;
-const MAX_RZDC_NAME_LEN: u32 = 64 * 1024;
-const MAX_RZDC_PNG_LEN: u32 = 512 * 1024 * 1024;
-pub(crate) const MAX_RZDC_META_LEN: u32 = 16 * 1024 * 1024;
-
-/// The RZDC revision this build writes. Version 1 files (no mask, no layer
-/// meta) and version 2 files (no clipped flag) still load; anything newer is
-/// refused.
-const RZDC_VERSION: u32 = 3;
-
-/// Rec. 709 luma coefficients (private copy; `ops` and `ops_filters` keep
-/// their own). Used to reduce a mask-painting overlay to coverage.
-const LUMA_R: f32 = 0.2126;
-const LUMA_G: f32 = 0.7152;
-const LUMA_B: f32 = 0.0722;
-
-/// Ceiling on the SUM of decoded layer pixels across one RZDC file: even when
-/// every individual layer looks reasonable, a crafted file must not be able
-/// to stack layers until memory is exhausted.
-const MAX_RZDC_TOTAL_LAYER_PIXELS: u64 = 4 * MAX_PIXELS;
-
-/// The blend-mode set, mirroring `RzBlendMode` in the C header: 0-13 and
-/// 15-22 are separable (per-channel W3C formulas), 23-26 non-separable
-/// (whole-RGB-triple SetLum/SetSat math), and Dissolve (14) replaces alpha
-/// compositing with a deterministic per-canvas-position dither.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(i32)]
-pub enum BlendMode {
-    Normal = 0,
-    Multiply = 1,
-    Screen = 2,
-    Overlay = 3,
-    SoftLight = 4,
-    HardLight = 5,
-    Darken = 6,
-    Lighten = 7,
-    Difference = 8,
-    Exclusion = 9,
-    ColorDodge = 10,
-    ColorBurn = 11,
-    Addition = 12,
-    Subtract = 13,
-    Dissolve = 14,
-    LinearBurn = 15,
-    DarkerColor = 16,
-    LighterColor = 17,
-    VividLight = 18,
-    LinearLight = 19,
-    PinLight = 20,
-    HardMix = 21,
-    Divide = 22,
-    Hue = 23,
-    Saturation = 24,
-    Color = 25,
-    Luminosity = 26,
-}
-
-impl BlendMode {
-    /// Maps a raw `RzBlendMode` value coming across the FFI.
-    pub fn from_c(value: i32) -> Option<Self> {
-        match value {
-            0 => Some(BlendMode::Normal),
-            1 => Some(BlendMode::Multiply),
-            2 => Some(BlendMode::Screen),
-            3 => Some(BlendMode::Overlay),
-            4 => Some(BlendMode::SoftLight),
-            5 => Some(BlendMode::HardLight),
-            6 => Some(BlendMode::Darken),
-            7 => Some(BlendMode::Lighten),
-            8 => Some(BlendMode::Difference),
-            9 => Some(BlendMode::Exclusion),
-            10 => Some(BlendMode::ColorDodge),
-            11 => Some(BlendMode::ColorBurn),
-            12 => Some(BlendMode::Addition),
-            13 => Some(BlendMode::Subtract),
-            14 => Some(BlendMode::Dissolve),
-            15 => Some(BlendMode::LinearBurn),
-            16 => Some(BlendMode::DarkerColor),
-            17 => Some(BlendMode::LighterColor),
-            18 => Some(BlendMode::VividLight),
-            19 => Some(BlendMode::LinearLight),
-            20 => Some(BlendMode::PinLight),
-            21 => Some(BlendMode::HardMix),
-            22 => Some(BlendMode::Divide),
-            23 => Some(BlendMode::Hue),
-            24 => Some(BlendMode::Saturation),
-            25 => Some(BlendMode::Color),
-            26 => Some(BlendMode::Luminosity),
-            _ => None,
-        }
-    }
-
-    /// The `RzBlendMode` value for the FFI.
-    pub fn to_c(self) -> i32 {
-        self as i32
-    }
-}
-
-// --------------------------------------------------------- blend functions --
-// W3C separable blend functions B(cb, cs); all inputs and outputs in [0, 1].
-
-fn b_normal(_cb: f32, cs: f32) -> f32 {
-    cs
-}
-
-fn b_multiply(cb: f32, cs: f32) -> f32 {
-    cb * cs
-}
-
-fn b_screen(cb: f32, cs: f32) -> f32 {
-    cb + cs - cb * cs
-}
-
-fn b_hard_light(cb: f32, cs: f32) -> f32 {
-    if cs <= 0.5 {
-        2.0 * cb * cs
-    } else {
-        1.0 - 2.0 * (1.0 - cb) * (1.0 - cs)
-    }
-}
-
-fn b_overlay(cb: f32, cs: f32) -> f32 {
-    b_hard_light(cs, cb)
-}
-
-fn b_darken(cb: f32, cs: f32) -> f32 {
-    cb.min(cs)
-}
-
-fn b_lighten(cb: f32, cs: f32) -> f32 {
-    cb.max(cs)
-}
-
-fn b_difference(cb: f32, cs: f32) -> f32 {
-    (cb - cs).abs()
-}
-
-fn b_exclusion(cb: f32, cs: f32) -> f32 {
-    cb + cs - 2.0 * cb * cs
-}
-
-fn b_color_dodge(cb: f32, cs: f32) -> f32 {
-    if cb == 0.0 {
-        0.0
-    } else if cs == 1.0 {
-        1.0
-    } else {
-        (cb / (1.0 - cs)).min(1.0)
-    }
-}
-
-fn b_color_burn(cb: f32, cs: f32) -> f32 {
-    if cb == 1.0 {
-        1.0
-    } else if cs == 0.0 {
-        0.0
-    } else {
-        1.0 - ((1.0 - cb) / cs).min(1.0)
-    }
-}
-
-fn soft_light_d(cb: f32) -> f32 {
-    if cb <= 0.25 {
-        ((16.0 * cb - 12.0) * cb + 4.0) * cb
-    } else {
-        cb.sqrt()
-    }
-}
-
-fn b_soft_light(cb: f32, cs: f32) -> f32 {
-    if cs <= 0.5 {
-        cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb)
-    } else {
-        cb + (2.0 * cs - 1.0) * (soft_light_d(cb) - cb)
-    }
-}
-
-fn b_addition(cb: f32, cs: f32) -> f32 {
-    (cb + cs).min(1.0)
-}
-
-fn b_subtract(cb: f32, cs: f32) -> f32 {
-    (cb - cs).max(0.0)
-}
-
-fn b_linear_burn(cb: f32, cs: f32) -> f32 {
-    (cb + cs - 1.0).max(0.0)
-}
-
-fn b_vivid_light(cb: f32, cs: f32) -> f32 {
-    // At cs == 0.5 exactly, burn(cb, 1.0) == cb, matching the dodge branch's
-    // limit, so the seam is continuous.
-    if cs <= 0.5 {
-        b_color_burn(cb, 2.0 * cs)
-    } else {
-        b_color_dodge(cb, 2.0 * cs - 1.0)
-    }
-}
-
-fn b_linear_light(cb: f32, cs: f32) -> f32 {
-    (cb + 2.0 * cs - 1.0).clamp(0.0, 1.0)
-}
-
-fn b_pin_light(cb: f32, cs: f32) -> f32 {
-    if cs <= 0.5 {
-        cb.min(2.0 * cs)
-    } else {
-        cb.max(2.0 * cs - 1.0)
-    }
-}
-
-fn b_hard_mix(cb: f32, cs: f32) -> f32 {
-    if cb + cs >= 1.0 {
-        1.0
-    } else {
-        0.0
-    }
-}
-
-fn b_divide(cb: f32, cs: f32) -> f32 {
-    if cs == 0.0 {
-        1.0
-    } else {
-        (cb / cs).min(1.0)
-    }
-}
-
-// W3C non-separable blend machinery (compositing-1 spec pseudocode) operating
-// on RGB triples in [0, 1]. Lum uses the spec's 0.3/0.59/0.11 weights.
-
-fn lum(c: [f32; 3]) -> f32 {
-    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
-}
-
-/// ClipColor: pulls out-of-gamut channels back toward the triple's
-/// luminosity, preserving it. The divisors are safe: `l` is always a real
-/// color's luminosity (in [0, 1]), so `n < 0` implies `l - n > 0` and `x > 1`
-/// implies `x - l > 0`.
-fn clip_color(mut c: [f32; 3]) -> [f32; 3] {
-    let l = lum(c);
-    let n = c[0].min(c[1]).min(c[2]);
-    let x = c[0].max(c[1]).max(c[2]);
-    if n < 0.0 {
-        for ch in &mut c {
-            *ch = l + (*ch - l) * l / (l - n);
-        }
-    }
-    if x > 1.0 {
-        for ch in &mut c {
-            *ch = l + (*ch - l) * (1.0 - l) / (x - l);
-        }
-    }
-    c
-}
-
-/// SetLum: shifts the triple to luminosity `l`, then clips into gamut.
-fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
-    let d = l - lum(c);
-    clip_color([c[0] + d, c[1] + d, c[2] + d])
-}
-
-fn sat(c: [f32; 3]) -> f32 {
-    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
-}
-
-/// SetSat: rescales the triple to saturation `s` — min channel to 0, max to
-/// `s`, mid proportionally between them (spec pseudocode).
-fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
-    let mut idx = [0usize, 1, 2];
-    idx.sort_by(|&a, &b| c[a].total_cmp(&c[b]));
-    let [lo, mid, hi] = idx;
-    let mut out = [0.0f32; 3];
-    if c[hi] > c[lo] {
-        out[mid] = (c[mid] - c[lo]) * s / (c[hi] - c[lo]);
-        out[hi] = s;
-    }
-    out
-}
-
-fn b_hue(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    set_lum(set_sat(cs, sat(cb)), lum(cb))
-}
-
-fn b_saturation(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    set_lum(set_sat(cb, sat(cs)), lum(cb))
-}
-
-fn b_color(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    set_lum(cs, lum(cb))
-}
-
-fn b_luminosity(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    set_lum(cb, lum(cs))
-}
-
-/// Whole-pixel pick: the lower-luma triple wins (backdrop on a tie).
-fn b_darker_color(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    if lum(cs) < lum(cb) {
-        cs
-    } else {
-        cb
-    }
-}
-
-/// Whole-pixel pick: the higher-luma triple wins (backdrop on a tie).
-fn b_lighter_color(cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    if lum(cs) > lum(cb) {
-        cs
-    } else {
-        cb
-    }
-}
-
-/// How a blend mode participates in compositing: per-channel `B(cb, cs)`,
-/// whole-RGB-triple `B(Cb, Cs)`, or the Dissolve dither (which replaces the
-/// compositing formula entirely).
-#[derive(Clone, Copy)]
-enum BlendKind {
-    Separable(fn(f32, f32) -> f32),
-    NonSeparable(fn([f32; 3], [f32; 3]) -> [f32; 3]),
-    Dissolve,
-}
-
-/// The blend behavior for a mode (data table, resolved once per layer rather
-/// than per pixel).
-fn blend_kind(mode: BlendMode) -> BlendKind {
-    match mode {
-        BlendMode::Normal => BlendKind::Separable(b_normal),
-        BlendMode::Multiply => BlendKind::Separable(b_multiply),
-        BlendMode::Screen => BlendKind::Separable(b_screen),
-        BlendMode::Overlay => BlendKind::Separable(b_overlay),
-        BlendMode::SoftLight => BlendKind::Separable(b_soft_light),
-        BlendMode::HardLight => BlendKind::Separable(b_hard_light),
-        BlendMode::Darken => BlendKind::Separable(b_darken),
-        BlendMode::Lighten => BlendKind::Separable(b_lighten),
-        BlendMode::Difference => BlendKind::Separable(b_difference),
-        BlendMode::Exclusion => BlendKind::Separable(b_exclusion),
-        BlendMode::ColorDodge => BlendKind::Separable(b_color_dodge),
-        BlendMode::ColorBurn => BlendKind::Separable(b_color_burn),
-        BlendMode::Addition => BlendKind::Separable(b_addition),
-        BlendMode::Subtract => BlendKind::Separable(b_subtract),
-        BlendMode::Dissolve => BlendKind::Dissolve,
-        BlendMode::LinearBurn => BlendKind::Separable(b_linear_burn),
-        BlendMode::DarkerColor => BlendKind::NonSeparable(b_darker_color),
-        BlendMode::LighterColor => BlendKind::NonSeparable(b_lighter_color),
-        BlendMode::VividLight => BlendKind::Separable(b_vivid_light),
-        BlendMode::LinearLight => BlendKind::Separable(b_linear_light),
-        BlendMode::PinLight => BlendKind::Separable(b_pin_light),
-        BlendMode::HardMix => BlendKind::Separable(b_hard_mix),
-        BlendMode::Divide => BlendKind::Separable(b_divide),
-        BlendMode::Hue => BlendKind::NonSeparable(b_hue),
-        BlendMode::Saturation => BlendKind::NonSeparable(b_saturation),
-        BlendMode::Color => BlendKind::NonSeparable(b_color),
-        BlendMode::Luminosity => BlendKind::NonSeparable(b_luminosity),
-    }
-}
-
-/// Deterministic Dissolve threshold for a canvas position, in [0, 1).
-/// Murmur3-style integer mix of the coordinates; canvas-absolute so the
-/// dither pattern is stable for a given position regardless of layer offset
-/// or projection window. Only the low 24 hash bits are used so the result is
-/// exact in f32 and strictly below 1 (a fully opaque pixel always shows).
-fn dissolve_threshold(x: i64, y: i64) -> f32 {
-    let mut h = (x as u32)
-        .wrapping_mul(0x9E37_79B9)
-        .wrapping_add((y as u32).wrapping_mul(0x85EB_CA6B));
-    h ^= h >> 16;
-    h = h.wrapping_mul(0x85EB_CA6B);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0xC2B2_AE35);
-    h ^= h >> 16;
-    ((h >> 8) as f32) * (1.0 / 16_777_216.0)
-}
 
 // ------------------------------------------------------------------ model --
 
@@ -486,7 +111,7 @@ pub struct RzDocument {
 }
 
 /// Clamps opacity to [0, 1], mapping non-finite values to 1.
-fn sane_opacity(opacity: f32) -> f32 {
+pub(crate) fn sane_opacity(opacity: f32) -> f32 {
     if opacity.is_finite() {
         opacity.clamp(0.0, 1.0)
     } else {
@@ -549,31 +174,8 @@ fn composite_layer_into(
                 f32::from(raw[li + 2]) / 255.0,
             ];
             let ai = (ay as u64 * u64::from(acc_w) + ax as u64) as usize;
-            if let BlendKind::Dissolve = kind {
-                // Dissolve skips the compositing formula: the source shows
-                // fully opaque with probability sa (its effective alpha),
-                // otherwise the backdrop pixel stays untouched.
-                let (cx, cy) = (ax + i64::from(origin.0), ay + i64::from(origin.1));
-                if dissolve_threshold(cx, cy) < sa {
-                    acc[ai] = [cs[0], cs[1], cs[2], 1.0];
-                }
-                continue;
-            }
-            let bg = acc[ai];
-            let ab = bg[3];
-            let ao = sa + ab * (1.0 - sa);
-            let blended = match kind {
-                BlendKind::Separable(f) => [f(bg[0], cs[0]), f(bg[1], cs[1]), f(bg[2], cs[2])],
-                BlendKind::NonSeparable(f) => f([bg[0], bg[1], bg[2]], cs),
-                BlendKind::Dissolve => unreachable!("dissolve handled above"),
-            };
-            let mut out = [0.0f32; 4];
-            for c in 0..3 {
-                out[c] =
-                    (sa * (1.0 - ab) * cs[c] + sa * ab * blended[c] + (1.0 - sa) * ab * bg[c]) / ao;
-            }
-            out[3] = ao;
-            acc[ai] = out;
+            let canvas_xy = (ax + i64::from(origin.0), ay + i64::from(origin.1));
+            composite_source_into(acc, ai, cs, sa, kind, canvas_xy);
         }
     }
 }
@@ -711,7 +313,7 @@ fn composite_clip_group_into(
         }
     }
     // The group buffer is accumulator-aligned (same size, same origin), so
-    // this is composite_layer_into's inner loop with an f32 source and the
+    // this is composite_layer_into's kernel with an f32 source and the
     // base's mode and opacity. Pixels a clipped layer touched outside the
     // footprint carry color at forced alpha 0 and are skipped here.
     let kind = blend_kind(base.blend);
@@ -724,28 +326,8 @@ fn composite_clip_group_into(
                 continue;
             }
             let cs = [src[0], src[1], src[2]];
-            if let BlendKind::Dissolve = kind {
-                let (cx, cy) = (ax + i64::from(origin.0), ay + i64::from(origin.1));
-                if dissolve_threshold(cx, cy) < sa {
-                    acc[ai] = [cs[0], cs[1], cs[2], 1.0];
-                }
-                continue;
-            }
-            let bg = acc[ai];
-            let ab = bg[3];
-            let ao = sa + ab * (1.0 - sa);
-            let blended = match kind {
-                BlendKind::Separable(f) => [f(bg[0], cs[0]), f(bg[1], cs[1]), f(bg[2], cs[2])],
-                BlendKind::NonSeparable(f) => f([bg[0], bg[1], bg[2]], cs),
-                BlendKind::Dissolve => unreachable!("dissolve handled above"),
-            };
-            let mut out = [0.0f32; 4];
-            for c in 0..3 {
-                out[c] =
-                    (sa * (1.0 - ab) * cs[c] + sa * ab * blended[c] + (1.0 - sa) * ab * bg[c]) / ao;
-            }
-            out[3] = ao;
-            acc[ai] = out;
+            let canvas_xy = (ax + i64::from(origin.0), ay + i64::from(origin.1));
+            composite_source_into(acc, ai, cs, sa, kind, canvas_xy);
         }
     }
 }
@@ -854,6 +436,36 @@ impl RzDocument {
             i = end;
         }
         quantize(&acc, self.width, self.height)
+    }
+
+    /// Layer `idx`'s OWN pixels on a transparent canvas-sized buffer, placed
+    /// at its offset and clipped to the canvas — the single-layer counterpart
+    /// of [`Self::flattened`], and what a layer-scoped copy puts on the
+    /// clipboard.
+    ///
+    /// Deliberately raw: opacity, blend mode, visibility and the layer mask
+    /// are COMPOSITING properties — they describe how the layer meets the
+    /// stack, not what its pixels are — so they play no part here and a
+    /// hidden layer still yields its pixels. Straight alpha throughout, so
+    /// nothing is un/premultiplied and the bytes copy across verbatim.
+    ///
+    /// None for an out-of-range `idx`; an empty canvas or a layer entirely
+    /// off-canvas simply yields a fully transparent buffer.
+    pub fn layer_canvas_image(&self, idx: usize) -> Option<RgbaImage> {
+        let layer = self.layers.get(idx)?;
+        let mut out = RgbaImage::new(self.width, self.height);
+        let (off_x, off_y) = layer.offset;
+        for (lx, ly, px) in layer.pixels.enumerate_pixels() {
+            // Layer space -> canvas space in i64: an offset near i32::MIN/MAX
+            // must not wrap into the canvas.
+            let cx = i64::from(off_x) + i64::from(lx);
+            let cy = i64::from(off_y) + i64::from(ly);
+            if cx < 0 || cy < 0 || cx >= i64::from(self.width) || cy >= i64::from(self.height) {
+                continue;
+            }
+            out.put_pixel(cx as u32, cy as u32, *px);
+        }
+        Some(out)
     }
 
     /// Pure setter: replaces layer `idx`'s name.
@@ -1180,6 +792,10 @@ impl RzDocument {
     /// retained rather than trimmed — so masks and meta ride along untouched:
     /// a mask is layer-space, and moving the window past it keeps it hiding
     /// exactly the same pixels.
+    ///
+    /// `None` for an empty or out-of-bounds rect, and for the whole canvas
+    /// (0, 0, width, height) — that window IS the current one, and returning
+    /// an identical copy would register a phantom undo step in the host.
     pub fn crop(&self, x: u32, y: u32, w: u32, h: u32) -> Option<Self> {
         if w == 0 || h == 0 {
             return None;
@@ -1187,6 +803,9 @@ impl RzDocument {
         let x_end = x.checked_add(w)?;
         let y_end = y.checked_add(h)?;
         if x_end > self.width || y_end > self.height {
+            return None;
+        }
+        if x == 0 && y == 0 && w == self.width && h == self.height {
             return None;
         }
         let layers = self
@@ -1431,456 +1050,6 @@ impl RzDocument {
     }
 }
 
-/// Per-pixel core of `rz_image_composite` (same math as `ops::composite`,
-/// duplicated here because painting maps a canvas-frame overlay through a
-/// layer offset rather than compositing two same-size frames). `dp` is a
-/// straight-alpha RGBA8 pixel, `sp` a premultiplied overlay pixel, `a` the
-/// pre-clamped global alpha.
-fn paint_pixel(dp: &mut [u8], sp: [u8; 4], mode: CompositeMode, a: f32) {
-    // Fast path: a fully transparent overlay pixel passes the destination
-    // bytes through exactly (no float round-trip). For OVER the color bytes
-    // must also be zero — they always are in well-formed premultiplied data;
-    // malformed pixels fall through to the math.
-    let src_transparent = sp[3] == 0
-        && match mode {
-            CompositeMode::Over => sp[0] == 0 && sp[1] == 0 && sp[2] == 0,
-            CompositeMode::Erase => true,
-        };
-    if src_transparent {
-        return;
-    }
-    let sa = (f32::from(sp[3]) / 255.0) * a;
-    let da = f32::from(dp[3]) / 255.0;
-    match mode {
-        CompositeMode::Over => {
-            let out_a = sa + da * (1.0 - sa);
-            if out_a < 1e-6 {
-                // Keep the destination color bytes so fully transparent
-                // regions do not invent color fringes.
-                dp[3] = 0;
-            } else {
-                for c in 0..3 {
-                    let scp = (f32::from(sp[c]) / 255.0) * a;
-                    let dc = f32::from(dp[c]) / 255.0;
-                    let v = (scp + dc * da * (1.0 - sa)) / out_a;
-                    dp[c] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                }
-                dp[3] = (out_a.clamp(0.0, 1.0) * 255.0).round() as u8;
-            }
-        }
-        CompositeMode::Erase => {
-            let out_a = da * (1.0 - sa);
-            dp[3] = (out_a.clamp(0.0, 1.0) * 255.0).round() as u8;
-        }
-    }
-}
-
-// ---------------------------------------------------- native format (RZDC) --
-
-impl RzDocument {
-    /// Serializes to the RZDC layout (see the header comment): "RZDC",
-    /// u32 version, u32 width, u32 height, u32 layer count; per layer
-    /// bottom-to-top: u32 name len + UTF-8 name, i32 off x, i32 off y,
-    /// f32 opacity, u32 blend, u8 visible, u32 PNG len + PNG pixels.
-    /// All integers little-endian.
-    ///
-    /// Version 2 appends three fields to each layer record, after the pixel
-    /// PNG (so a version-1 record is a strict prefix of a version-2 one):
-    /// u8 mask present, u8 mask enabled, u32 mask len + that many RAW
-    /// coverage bytes when present (the mask's dimensions are the layer's
-    /// pixel dimensions and are not stored twice), then u8 meta present and,
-    /// when present, u32 meta len + UTF-8 meta bytes.
-    ///
-    /// Version 3 appends one more field after all the version-2 fields (so a
-    /// version-2 record is in turn a strict prefix of a version-3 one):
-    /// u8 clipped.
-    fn encode_native(&self) -> Result<Vec<u8>, String> {
-        // The writer enforces the reader's caps, so every file it produces
-        // can be read back: layer count and per-layer PNG size are hard
-        // errors, over-long names are truncated on a char boundary.
-        let count = u32::try_from(self.layers.len())
-            .ok()
-            .filter(|&c| c <= MAX_RZDC_LAYERS)
-            .ok_or_else(|| format!("too many layers (max {MAX_RZDC_LAYERS})"))?;
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"RZDC");
-        buf.extend_from_slice(&RZDC_VERSION.to_le_bytes());
-        buf.extend_from_slice(&self.width.to_le_bytes());
-        buf.extend_from_slice(&self.height.to_le_bytes());
-        buf.extend_from_slice(&count.to_le_bytes());
-        for layer in &self.layers {
-            let mut name = layer.name.as_str();
-            if name.len() > MAX_RZDC_NAME_LEN as usize {
-                let mut end = MAX_RZDC_NAME_LEN as usize;
-                while !name.is_char_boundary(end) {
-                    end -= 1;
-                }
-                name = &name[..end];
-            }
-            let name = name.as_bytes();
-            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
-            buf.extend_from_slice(name);
-            buf.extend_from_slice(&layer.offset.0.to_le_bytes());
-            buf.extend_from_slice(&layer.offset.1.to_le_bytes());
-            buf.extend_from_slice(&layer.opacity.to_le_bytes());
-            buf.extend_from_slice(&(layer.blend.to_c() as u32).to_le_bytes());
-            buf.push(u8::from(layer.visible));
-            let mut png = Vec::new();
-            let (lw, lh) = layer.pixels.dimensions();
-            PngEncoder::new(&mut png)
-                .write_image(layer.pixels.as_raw(), lw, lh, ExtendedColorType::Rgba8)
-                .map_err(|e| format!("PNG encoding failed: {e}"))?;
-            let png_len = u32::try_from(png.len())
-                .ok()
-                .filter(|&len| len <= MAX_RZDC_PNG_LEN)
-                .ok_or_else(|| "layer PNG too large".to_string())?;
-            buf.extend_from_slice(&png_len.to_le_bytes());
-            buf.extend_from_slice(&png);
-            // Version 2 fields. The mask is stored raw: its length is always
-            // the layer's pixel count, which the reader re-derives and checks
-            // — so a mask that somehow broke that invariant is written as
-            // absent rather than as a file that cannot be read back.
-            let mask = layer.mask.as_deref().filter(|m| m.dimensions() == (lw, lh));
-            buf.push(u8::from(mask.is_some()));
-            buf.push(u8::from(layer.mask_enabled));
-            if let Some(mask) = mask {
-                let bytes = mask.as_raw();
-                let mask_len =
-                    u32::try_from(bytes.len()).map_err(|_| "layer mask too large".to_string())?;
-                buf.extend_from_slice(&mask_len.to_le_bytes());
-                buf.extend_from_slice(bytes);
-            }
-            buf.push(u8::from(layer.meta.is_some()));
-            if let Some(meta) = layer.meta.as_deref() {
-                let meta_len = u32::try_from(meta.len())
-                    .ok()
-                    .filter(|&len| len <= MAX_RZDC_META_LEN)
-                    .ok_or_else(|| format!("layer meta too large (max {MAX_RZDC_META_LEN})"))?;
-                buf.extend_from_slice(&meta_len.to_le_bytes());
-                buf.extend_from_slice(meta.as_bytes());
-            }
-            // Version 3 field.
-            buf.push(u8::from(layer.clipped));
-        }
-        Ok(buf)
-    }
-
-    /// Writes the native RZDC format. Atomic like `RzImage::save`: the bytes
-    /// go to a temporary file in the same directory which is renamed over
-    /// `path` only on success, so a failed save never truncates or deletes an
-    /// existing destination file.
-    pub fn save_native(&self, path: &str) -> Result<(), String> {
-        let bytes = self.encode_native()?;
-        static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp_path = format!("{path}.rz-tmp-{}-{seq}", std::process::id());
-        let result = std::fs::write(&tmp_path, &bytes)
-            .map_err(|e| format!("failed to create {path}: {e}"))
-            .and_then(|()| {
-                std::fs::rename(&tmp_path, path).map_err(|e| format!("failed to write {path}: {e}"))
-            });
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-        result
-    }
-}
-
-/// Bounds-checked little-endian reader over an RZDC byte buffer.
-struct Reader<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .filter(|&e| e <= self.bytes.len())
-            .ok_or_else(|| "unexpected end of file".to_string())?;
-        let slice = &self.bytes[self.pos..end];
-        self.pos = end;
-        Ok(slice)
-    }
-
-    fn u8(&mut self) -> Result<u8, String> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u32(&mut self) -> Result<u32, String> {
-        Ok(u32::from_le_bytes(
-            self.take(4)?.try_into().expect("4 bytes"),
-        ))
-    }
-
-    fn i32(&mut self) -> Result<i32, String> {
-        Ok(i32::from_le_bytes(
-            self.take(4)?.try_into().expect("4 bytes"),
-        ))
-    }
-
-    fn f32(&mut self) -> Result<f32, String> {
-        Ok(f32::from_le_bytes(
-            self.take(4)?.try_into().expect("4 bytes"),
-        ))
-    }
-}
-
-/// Parses an RZDC buffer of version 1, 2 or 3 (version 1 predates layer
-/// masks and layer meta, which default to absent; versions 1 and 2 predate
-/// the clipped flag, which defaults to false). Corrupt or truncated input
-/// produces `Err`, never a panic; unknown blend-mode values fall back to
-/// Normal and opacity is clamped.
-fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
-    let mut r = Reader { bytes, pos: 0 };
-    if r.take(4)? != b"RZDC" {
-        return Err("not an RZDC document".to_string());
-    }
-    let version = r.u32()?;
-    if version == 0 || version > RZDC_VERSION {
-        return Err(format!("unsupported RZDC version {version}"));
-    }
-    // Version 1 layer records stop after the pixel PNG; version 2 records
-    // after the mask and meta fields.
-    let has_mask_and_meta = version >= 2;
-    let has_clipped = version >= 3;
-    let width = r.u32()?;
-    let height = r.u32()?;
-    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
-        return Err("invalid canvas size".to_string());
-    }
-    let count = r.u32()?;
-    if count == 0 || count > MAX_RZDC_LAYERS {
-        return Err(format!("invalid layer count {count}"));
-    }
-    let mut layers = Vec::with_capacity(count as usize);
-    let mut total_pixels: u64 = 0;
-    for _ in 0..count {
-        let name_len = r.u32()?;
-        if name_len > MAX_RZDC_NAME_LEN {
-            return Err(format!("layer name length {name_len} out of range"));
-        }
-        let name = String::from_utf8_lossy(r.take(name_len as usize)?).into_owned();
-        let off_x = r.i32()?;
-        let off_y = r.i32()?;
-        let opacity = sane_opacity(r.f32()?);
-        let blend_raw = r.u32()?;
-        let blend = i32::try_from(blend_raw)
-            .ok()
-            .and_then(BlendMode::from_c)
-            .unwrap_or(BlendMode::Normal);
-        let visible = r.u8()? != 0;
-        let png_len = r.u32()?;
-        if png_len > MAX_RZDC_PNG_LEN {
-            return Err(format!("layer PNG length {png_len} out of range"));
-        }
-        let png = r.take(png_len as usize)?;
-        let pixels = image::load_from_memory_with_format(png, image::ImageFormat::Png)
-            .map_err(|e| format!("failed to decode layer pixels: {e}"))?
-            .to_rgba8();
-        let (lw, lh) = pixels.dimensions();
-        total_pixels = total_pixels.saturating_add(u64::from(lw) * u64::from(lh));
-        if total_pixels > MAX_RZDC_TOTAL_LAYER_PIXELS {
-            return Err(format!(
-                "total layer pixels exceed {MAX_RZDC_TOTAL_LAYER_PIXELS}"
-            ));
-        }
-        let mut mask = None;
-        let mut mask_enabled = true;
-        let mut meta = None;
-        if has_mask_and_meta {
-            let present = r.u8()? != 0;
-            mask_enabled = r.u8()? != 0;
-            if present {
-                let mask_len = r.u32()?;
-                let expected = u64::from(lw) * u64::from(lh);
-                if u64::from(mask_len) != expected {
-                    return Err(format!(
-                        "layer mask length {mask_len} does not match the layer's {expected} pixels"
-                    ));
-                }
-                let raw = r.take(mask_len as usize)?.to_vec();
-                mask = Some(Arc::new(
-                    GrayImage::from_raw(lw, lh, raw)
-                        .ok_or_else(|| "invalid layer mask".to_string())?,
-                ));
-            }
-            if r.u8()? != 0 {
-                let meta_len = r.u32()?;
-                if meta_len > MAX_RZDC_META_LEN {
-                    return Err(format!("layer meta length {meta_len} out of range"));
-                }
-                meta = Some(String::from_utf8_lossy(r.take(meta_len as usize)?).into_owned());
-            }
-        }
-        let clipped = has_clipped && r.u8()? != 0;
-        layers.push(Layer {
-            pixels: Arc::new(pixels),
-            offset: (off_x, off_y),
-            name,
-            opacity,
-            blend,
-            visible,
-            mask,
-            mask_enabled,
-            meta,
-            clipped,
-        });
-    }
-    Ok(RzDocument {
-        width,
-        height,
-        layers,
-    })
-}
-
-// -------------------------------------------------------------- psd import --
-
-/// PSD -> RzDocument blend-mode mapping; PassThrough (group-only semantics)
-/// and unknown values become Normal. The argument is the discriminant of
-/// psd 0.3.5's `BlendMode` (the enum itself lives in a private module and is
-/// not re-exported, so it cannot be named here — but its values are C-like
-/// and cast losslessly): 0 PassThrough, 1 Normal, 2 Dissolve, 3 Darken,
-/// 4 Multiply, 5 ColorBurn, 6 LinearBurn, 7 DarkerColor, 8 Lighten,
-/// 9 Screen, 10 ColorDodge, 11 LinearDodge, 12 LighterColor, 13 Overlay,
-/// 14 SoftLight, 15 HardLight, 16 VividLight, 17 LinearLight, 18 PinLight,
-/// 19 HardMix, 20 Difference, 21 Exclusion, 22 Subtract, 23 Divide, 24 Hue,
-/// 25 Saturation, 26 Color, 27 Luminosity.
-fn map_psd_blend(mode: i32) -> BlendMode {
-    match mode {
-        2 => BlendMode::Dissolve,
-        3 => BlendMode::Darken,
-        4 => BlendMode::Multiply,
-        5 => BlendMode::ColorBurn,
-        6 => BlendMode::LinearBurn,
-        7 => BlendMode::DarkerColor,
-        8 => BlendMode::Lighten,
-        9 => BlendMode::Screen,
-        10 => BlendMode::ColorDodge,
-        11 => BlendMode::Addition, // LinearDodge
-        12 => BlendMode::LighterColor,
-        13 => BlendMode::Overlay,
-        14 => BlendMode::SoftLight,
-        15 => BlendMode::HardLight,
-        16 => BlendMode::VividLight,
-        17 => BlendMode::LinearLight,
-        18 => BlendMode::PinLight,
-        19 => BlendMode::HardMix,
-        20 => BlendMode::Difference,
-        21 => BlendMode::Exclusion,
-        22 => BlendMode::Subtract,
-        23 => BlendMode::Divide,
-        24 => BlendMode::Hue,
-        25 => BlendMode::Saturation,
-        26 => BlendMode::Color,
-        27 => BlendMode::Luminosity,
-        _ => BlendMode::Normal,
-    }
-}
-
-/// Flattened-composite fallback: the whole PSD as one "Background" layer.
-fn psd_composite_fallback(psd: &psd::Psd, path: &str) -> Result<RzDocument, String> {
-    let pixels = RgbaImage::from_raw(psd.width(), psd.height(), psd.rgba())
-        .ok_or_else(|| format!("PSD {path}: composite buffer size mismatch"))?;
-    Ok(RzDocument::from_pixels(pixels))
-}
-
-/// Layered PSD import. One document layer per PSD raster layer; if the file
-/// has no raster layers or any layer fails to decode, falls back to the
-/// flattened composite.
-///
-/// psd 0.3.5 quirks this code compensates for (verified against the crate
-/// sources and real files):
-/// - `Psd::layers()` is ordered TOP-to-bottom (its `layer_by_idx` doc comment
-///   claims the opposite, but the crate's own renderer consumes it top-down),
-///   so the iteration is reversed for our bottom-first stack.
-/// - `PsdLayer::visible()` actually returns the record's HIDDEN flag (bit 1
-///   of the flags byte set means hidden in real files), so it is negated.
-/// - `PsdLayer::rgba()` returns a CANVAS-sized buffer with the layer placed
-///   at its rectangle — but for layers with no alpha channel it floods
-///   alpha=255 across the whole canvas (opaque black outside the layer), and
-///   for layers whose rectangle leaves the canvas it can panic. The buffer is
-///   therefore cropped to the layer's rectangle intersected with the canvas
-///   (which also yields real per-layer offsets), and each decode runs under
-///   `catch_unwind`.
-fn open_psd(bytes: &[u8], path: &str) -> Result<RzDocument, String> {
-    let psd =
-        psd::Psd::from_bytes(bytes).map_err(|e| format!("failed to decode PSD {path}: {e}"))?;
-    // The psd crate silently mis-decodes anything but 8-bit RGB or grayscale
-    // (CMYK channels land in RGB slots, 16-bit data is read byte-interleaved),
-    // so reject those up front — same gate as the flat open path.
-    if psd.depth() != psd::PsdDepth::Eight
-        || !matches!(
-            psd.color_mode(),
-            psd::ColorMode::Rgb | psd::ColorMode::Grayscale
-        )
-    {
-        return Err(format!(
-            "PSD {path}: unsupported {:?} color at depth {:?}; only 8-bit RGB and grayscale PSDs are supported",
-            psd.color_mode(),
-            psd.depth()
-        ));
-    }
-    let (cw, ch) = (psd.width(), psd.height());
-    if cw == 0 || ch == 0 {
-        return Err(format!("PSD {path}: empty canvas"));
-    }
-    if psd.layers().is_empty() {
-        return psd_composite_fallback(&psd, path);
-    }
-    let canvas_len = cw as usize * ch as usize * 4;
-    let mut layers = Vec::with_capacity(psd.layers().len());
-    for l in psd.layers().iter().rev() {
-        let rgba = match catch_unwind(AssertUnwindSafe(|| l.rgba())) {
-            Ok(rgba) if rgba.len() == canvas_len => rgba,
-            _ => return psd_composite_fallback(&psd, path),
-        };
-        // Intersect the layer rectangle (crate bounds are inclusive) with the
-        // canvas.
-        let x0 = l.layer_left().max(0) as i64;
-        let y0 = l.layer_top().max(0) as i64;
-        let x1 = (i64::from(l.layer_right()) + 1).min(i64::from(cw));
-        let y1 = (i64::from(l.layer_bottom()) + 1).min(i64::from(ch));
-        let (pixels, offset) = if x0 < x1 && y0 < y1 {
-            let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
-            let img = RgbaImage::from_fn(w, h, |x, y| {
-                let cx = x0 as u32 + x;
-                let cy = y0 as u32 + y;
-                let i = (cy as usize * cw as usize + cx as usize) * 4;
-                image::Rgba([rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]])
-            });
-            (img, (x0 as i32, y0 as i32))
-        } else {
-            // The layer is entirely outside the canvas; keep a minimal
-            // transparent placeholder so the layer (and its properties)
-            // survive the import.
-            (RgbaImage::new(1, 1), (0, 0))
-        };
-        layers.push(Layer {
-            pixels: Arc::new(pixels),
-            offset,
-            name: l.name().to_string(),
-            opacity: f32::from(l.opacity()) / 255.0,
-            blend: map_psd_blend(l.blend_mode() as i32),
-            visible: !l.visible(),
-            // PSD layer masks are not imported (the crate exposes them only
-            // as raw channel data); imported layers arrive unmasked. The PSD
-            // clipping bit is not exposed by the crate either, so imported
-            // layers arrive unclipped.
-            mask: None,
-            mask_enabled: true,
-            meta: None,
-            clipped: false,
-        });
-    }
-    Ok(RzDocument {
-        width: cw,
-        height: ch,
-        layers,
-    })
-}
-
 // ------------------------------------------------------------------- open --
 
 impl RzDocument {
@@ -1890,9 +1059,10 @@ impl RzDocument {
     pub fn open(path: &str) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("failed to read {path}: {e}"))?;
         if bytes.len() >= 4 && &bytes[..4] == b"RZDC" {
-            parse_native(&bytes).map_err(|e| format!("failed to read document {path}: {e}"))
+            crate::rzdc::parse_native(&bytes)
+                .map_err(|e| format!("failed to read document {path}: {e}"))
         } else if bytes.len() >= 4 && &bytes[..4] == b"8BPS" {
-            open_psd(&bytes, path)
+            crate::psd::open_psd(&bytes, path)
         } else {
             drop(bytes);
             Ok(RzDocument::from_pixels(RzImage::open(path)?.pixels))

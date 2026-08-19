@@ -113,20 +113,44 @@ stroke) extends naturally:
   destination's illumination survives. Real work, but §9 documents the
   mechanism and it is what separates "clone stamp" from "magic".
 
-## The distinctive one: subject selection via Vision
+## The distinctive one: subject selection via Vision — SHIPPED
 
 Our selection *is* a coverage mask, so a segmentation result drops
-straight into the existing model with no glue. macOS ships this:
-`VNGeneratePersonSegmentationRequest` works on the current deployment
-target; full subject lifting
-(`VNGenerateForegroundInstanceMaskRequest`) needs macOS 14, so it is a
-raise-the-floor-or-gate-it decision.
+straight into the existing model with no glue. macOS ships this, and the
+deployment floor was raised to 15 to reach all of it:
+`VNGenerateForegroundInstanceMaskRequest` (subject lifting — the API
+behind Preview's *Copy Subject*) returns each salient subject as its own
+instance, and `VNGeneratePersonInstanceMaskRequest` separates up to four
+people; `VNGeneratePersonSegmentationRequest` remains the one merged
+people mask. Instances are what make it a *tool* rather than a filter —
+click a subject, get that subject.
 
-Exposed as an MCP tool as well, it makes the built-in agent
-qualitatively more capable — "remove the background", "brighten just the
-person" become one-shot requests. No other editor pairs a segmentation
-primitive with an agent that can act on it. **Content-aware fill**
-(PatchMatch inpainting) is the natural follow-on and the bigger lift.
+Shipped as Select > Select Subject (`SubjectSelection.swift`), which
+selects every subject at once, and as the `select_subject` MCP tool, which
+also takes an `instance` and reports how many were found. It makes the
+built-in agent qualitatively more capable — "remove the background",
+"brighten just the person" are one-shot requests now. No other editor
+pairs a segmentation primitive with an agent that can act on it.
+
+The click-a-subject half shipped too, as the Subject tool (S): press and
+the subject under the pointer is outlined, drag to change which, release
+to select it. It rests on a fact worth keeping: `VNInstanceMaskObservation`
+carries `instanceMask`, a per-pixel map of instance IDS produced as a
+by-product of the request, so the hit test is ONE BYTE READ rather than a
+mask per subject. That map is a fixed 512×512 square whatever the image's
+shape, and it is a straight squash, not a letterboxed fit — measured
+against the full-resolution masks over aspect ratios 0.31 to 3.2, agreeing
+to within one cell every time. Hence outlining on every mouse-moved event
+costs nothing; only landing on a new subject pays for a mask.
+
+**Still open, in order of value.** The animated shimmer Apple draws along
+its outline: ours is static, and the canvas has no animation timer at all
+(the marquee is a fixed two-pass dash), so this is genuinely new drawing
+machinery rather than a tweak. Then
+`VNGeneratePersonInstanceMaskRequest` when the subjects wanted are
+specifically people (up to four, separated) and the general saliency
+model grabs the wrong thing. **Content-aware fill** (PatchMatch
+inpainting) remains the natural follow-on and the bigger lift.
 
 ## Keep deferring
 

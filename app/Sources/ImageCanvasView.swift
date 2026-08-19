@@ -1,22 +1,5 @@
 import AppKit
 
-/// Editing tools the canvas understands. Mirrors EditorTool; the view
-/// controller keeps the two in sync.
-enum CanvasTool {
-    case select
-    case ellipseSelect
-    case lasso
-    case wand
-    case move
-    case brush
-    case eraser
-    case fill
-    case gradient
-    case text
-    case eyedropper
-    case crop
-}
-
 /// Text view used for in-canvas text sessions: ⌘Return commits the session.
 final class CanvasTextView: NSTextView {
     var onCommandReturn: (() -> Void)?
@@ -53,17 +36,6 @@ final class ImageCanvasView: NSView {
             {
                 setSelection(nil)
             }
-            // Likewise the crop session's rect: any canvas size change
-            // underneath it (undo, an agent edit, Canvas Size) cancels the
-            // session. `bounds` still holds the OLD canvas size here — the
-            // view controller resizes the frame after setting the image.
-            if cropRect != nil,
-               CGFloat(image?.width ?? 0) != bounds.width
-                   || CGFloat(image?.height ?? 0) != bounds.height
-            {
-                cropDrag = nil
-                setCropRect(nil)
-            }
             // A Quick Mask buffer made at a different canvas size is
             // meaningless: discard the session (no selection comes back —
             // there is nothing valid to convert). Same-size doc swaps
@@ -74,9 +46,18 @@ final class ImageCanvasView: NSView {
             {
                 discardQuickMask()
             }
+            // An outline describes the composite it was traced from; the
+            // analysis behind it re-runs on identity, but the drawn path has
+            // to go now (an agent edit can land mid-press).
+            subjectSession.cancel()
             needsDisplay = true
         }
     }
+
+    /// The Subject tool's press-and-hold: the segmentation it caches and
+    /// the outline currently under the pointer. Logic lives in
+    /// SubjectSelection.swift; this view only points it at events.
+    var subjectSession = SubjectSession()
 
     /// When non-nil, drawn instead of `image` (live-preview sheets).
     var previewImage: CGImage? {
@@ -139,20 +120,14 @@ final class ImageCanvasView: NSView {
 
     /// The active tool. The view controller commits any pending text session
     /// before flipping this; the setter only abandons stroke/drag state.
-    var tool: CanvasTool = .select {
+    var tool: EditorTool = .select {
         didSet {
             cancelStroke()
             cancelLasso()
+            subjectSession.cancel()
             gradientAnchor = nil
             gradientCurrent = nil
             eyedropperDragActive = false
-            // Switching tools cancels the crop session (the rect is pure
-            // view state, so cancelling is just dropping it). Re-selecting
-            // the already-active crop tool keeps the rect.
-            if tool != oldValue {
-                cropDrag = nil
-                if cropRect != nil { setCropRect(nil) }
-            }
             if moveDragOrigin != nil {
                 // A tool switch mid-drag must still close the live edit so
                 // the drag-so-far becomes one undo step.
@@ -227,7 +202,7 @@ final class ImageCanvasView: NSView {
     /// receiver drops any preview it put up for the session).
     var onTextSessionEnd: (() -> Void)?
 
-    var onToolKey: ((CanvasTool) -> Void)?
+    var onToolKey: ((EditorTool) -> Void)?
     var onBrushSizeKey: ((CGFloat) -> Void)?
     /// Bare Q, handled with the tool keys (deliberately not a menu key
     /// equivalent): toggles Quick Mask mode.
@@ -275,36 +250,6 @@ final class ImageCanvasView: NSView {
     var onEyedropper: ((CGPoint) -> Void)?
     /// Fired when a gradient drag commits (start, end in image pixels).
     var onGradientCommit: ((CGPoint, CGPoint) -> Void)?
-
-    // Crop tool. The rect is SESSION/VIEW state only — never stored on the
-    // document. It is cleared by Escape, commit, tool switches, and any
-    // canvas size change underneath it (see the image setter).
-
-    /// The crop session's rect in image pixel coordinates, clamped to the
-    /// canvas; nil when no session is in progress.
-    private(set) var cropRect: CGRect?
-    /// Aspect (width / height) constraining crop creates and corner/edge
-    /// resizes; nil = free. Kept current by EditorViewController from the
-    /// options bar's preset popup.
-    var cropAspect: CGFloat?
-    /// Fired whenever the crop rect changes, including to nil (the options
-    /// bar mirrors the size into its W/H fields).
-    var onCropRectChange: ((CGRect?) -> Void)?
-    /// Fired when the crop session commits (Return, or a double-click
-    /// inside the rect) with the finalized integral rect. The receiver runs
-    /// the core crop as one undo step; the session is already cleared.
-    var onCropCommit: ((CGRect) -> Void)?
-
-    /// What the current crop-tool drag does, captured at mouse-down with the
-    /// state it started from (every tick recomputes from that snapshot, like
-    /// the Free Transform drags).
-    private enum CropDrag {
-        case create(anchor: CGPoint)
-        case move(start: CGRect, grab: CGPoint)
-        case resize(handle: TransformHandle, start: CGRect)
-    }
-
-    private var cropDrag: CropDrag?
 
     // Lasso state: committed vertices of the in-progress polygon.
     private var lassoPoints: [CGPoint] = []
@@ -495,17 +440,9 @@ final class ImageCanvasView: NSView {
 
         // A transform ignores the selection entirely, and its dimming wash
         // and marquee would fight the box: the selection survives the
-        // session, it just stops drawing for it. A crop session's own dim
-        // and box would fight it the same way, so it too suspends the
-        // selection's drawing without dropping the selection.
-        if let selection = selection, !isTransforming, cropRect == nil {
+        // session, it just stops drawing for it.
+        if let selection = selection, !isTransforming {
             drawSelection(selection)
-        }
-
-        // The crop session: dim outside the rect (the selection wash,
-        // reused) and hang transform-style handles off the rect.
-        if tool == .crop, let cropRect = cropRect, !isTransforming {
-            drawCropOverlay(cropRect)
         }
 
         // Both of these belong to a tool gesture the session has suspended;
@@ -516,6 +453,10 @@ final class ImageCanvasView: NSView {
 
         if let anchor = gradientAnchor, let current = gradientCurrent, !isTransforming {
             drawGradientPreview(from: anchor, to: current)
+        }
+
+        if let outline = subjectSession.outline, !isTransforming {
+            drawSubjectOutline(outline)
         }
 
         if let textView = activeTextView {
@@ -734,37 +675,28 @@ final class ImageCanvasView: NSView {
         }
     }
 
-    /// The crop overlay: the selection's dimming wash outside the rect,
-    /// then a transform-style box — hairline black under white, with the
-    /// eight white handle squares — on the rect itself.
-    private func drawCropOverlay(_ rect: CGRect) {
-        let dimPath = NSBezierPath(rect: bounds)
-        dimPath.append(NSBezierPath(rect: rect))
-        dimPath.windingRule = .evenOdd
-        NSColor.black.withAlphaComponent(0.35).setFill()
-        dimPath.fill()
-
+    /// The subject under the pointer while the Subject tool is held.
+    ///
+    /// SOLID, unlike every other overlay here, and that is the point: a
+    /// dashed line would read as a committed selection, and this one is a
+    /// proposal that vanishes if the mouse comes up somewhere else. Drawn
+    /// dark-then-light so it survives both a white shirt and a black one.
+    private func drawSubjectOutline(_ path: NSBezierPath) {
         let scale = magnification
-        let path = NSBezierPath(rect: rect)
-        path.lineWidth = 3 / scale
-        NSColor.black.withAlphaComponent(0.45).setStroke()
+        // setLineDash is sticky on NSBezierPath and this same path object
+        // becomes the marquee once the selection commits, so the dash the
+        // marquee left behind has to be cleared rather than inherited.
+        path.setLineDash(nil, count: 0, phase: 0)
+        // Each pass carries the contrast on one kind of image — the dark
+        // halo on a light subject, the light core on a dark one — so both
+        // have to be heavy enough to read alone, not merely to edge the
+        // other. A thin pair vanishes into a pale background.
+        path.lineWidth = 5 / scale
+        NSColor.black.withAlphaComponent(0.65).setStroke()
         path.stroke()
-        path.lineWidth = 1 / scale
-        NSColor.white.withAlphaComponent(0.95).setStroke()
+        path.lineWidth = 2.5 / scale
+        NSColor.white.setStroke()
         path.stroke()
-
-        let size = Self.transformHandleSize / scale
-        for handle in TransformHandle.allCases {
-            let point = handle.point(in: rect)
-            let square = NSBezierPath(
-                rect: CGRect(
-                    x: point.x - size / 2, y: point.y - size / 2, width: size, height: size))
-            NSColor.white.setFill()
-            square.fill()
-            square.lineWidth = 1 / scale
-            NSColor.black.withAlphaComponent(0.65).setStroke()
-            square.stroke()
-        }
     }
 
     /// Subtle dashed outline (selection stroke style, thinner) marking the
@@ -910,8 +842,6 @@ final class ImageCanvasView: NSView {
             return
         }
         cancelLasso()
-        cropDrag = nil
-        if cropRect != nil { setCropRect(nil) }
         gradientAnchor = nil
         gradientCurrent = nil
         dragAnchor = nil
@@ -1002,212 +932,6 @@ final class ImageCanvasView: NSView {
         context.restoreGState()
     }
 
-    // MARK: - Crop session
-
-    /// The single write path for the crop rect (drag ticks, nudges, the
-    /// options bar's W/H fields, cancellation).
-    func setCropRect(_ rect: CGRect?) {
-        cropRect = rect
-        needsDisplay = true
-        onCropRectChange?(rect)
-    }
-
-    /// Escape (and every other way a session dies without committing): the
-    /// document was never touched, so cancelling is just dropping the rect.
-    /// The tool stays active.
-    private func cancelCropSession() {
-        cropDrag = nil
-        guard cropRect != nil else { return }
-        setCropRect(nil)
-    }
-
-    /// Return or a double-click inside the rect: clears the session and
-    /// hands the finalized rect to the receiver, which runs the core crop.
-    private func commitCropSession() {
-        guard let rect = cropRect.flatMap(finalizedCropRect) else { return }
-        cropDrag = nil
-        setCropRect(nil)
-        onCropCommit?(rect)
-    }
-
-    private func cropMouseDown(_ point: CGPoint, _ event: NSEvent) {
-        if let rect = cropRect {
-            if event.clickCount >= 2, rect.contains(point) {
-                commitCropSession()
-                return
-            }
-            // Handle hit-testing borrows the transform box's convention:
-            // the handle's screen-size slop around its point, handles first.
-            let slop = Self.transformHandleSize / magnification
-            for handle in TransformHandle.allCases {
-                let handlePoint = handle.point(in: rect)
-                if abs(point.x - handlePoint.x) <= slop,
-                   abs(point.y - handlePoint.y) <= slop {
-                    cropDrag = .resize(handle: handle, start: rect)
-                    return
-                }
-            }
-            if rect.contains(point) {
-                cropDrag = .move(start: rect, grab: point)
-                return
-            }
-        }
-        // Outside any rect: start a new one. The zero rect makes a plain
-        // click read as click-to-clear at mouse-up (the drag threshold).
-        cropDrag = .create(anchor: point)
-        setCropRect(CGRect(origin: point, size: .zero))
-    }
-
-    /// `raw` is unclamped (like the transform drags) so deltas stay honest
-    /// when the pointer leaves the canvas; each drag kind clamps the RECT.
-    private func cropMouseDragged(_ raw: CGPoint, shift: Bool) {
-        guard let drag = cropDrag else { return }
-        switch drag {
-        case let .create(anchor):
-            setCropRect(cropRectCreating(anchor: anchor, to: clamp(point: raw)))
-        case let .move(start, grab):
-            setCropRect(cropRectMoving(start, dx: raw.x - grab.x, dy: raw.y - grab.y))
-        case let .resize(handle, start):
-            setCropRect(
-                cropRectResizing(start, handle: handle, to: clamp(point: raw), shift: shift))
-        }
-    }
-
-    private func cropMouseUp() {
-        guard let drag = cropDrag else { return }
-        cropDrag = nil
-        guard let rect = cropRect else { return }
-        if case .create = drag {
-            // The click-vs-drag threshold, in SCREEN points like the
-            // selection tools': a tiny drag (or plain click) clears instead
-            // of leaving an invisible sliver of a session behind.
-            let scale = magnification
-            if rect.width * scale < 2 || rect.height * scale < 2 {
-                setCropRect(nil)
-                return
-            }
-        }
-        // Settle on the pixel grid once per gesture, like the marquee.
-        setCropRect(finalizedCropRect(rect))
-    }
-
-    /// Arrow-key nudge of the whole rect (Shift: 10px, matching the
-    /// transform session), clamped to the canvas.
-    private func nudgeCropRect(_ dx: CGFloat, _ dy: CGFloat) {
-        guard let rect = cropRect else { return }
-        setCropRect(cropRectMoving(rect, dx: dx, dy: dy))
-    }
-
-    /// A new rect dragged out from `anchor`, constrained to `cropAspect`
-    /// and clamped to the canvas.
-    private func cropRectCreating(anchor: CGPoint, to point: CGPoint) -> CGRect {
-        let dirX: CGFloat = point.x >= anchor.x ? 1 : -1
-        let dirY: CGFloat = point.y >= anchor.y ? 1 : -1
-        var w = abs(point.x - anchor.x)
-        var h = abs(point.y - anchor.y)
-        if let aspect = cropAspect, aspect > 0 {
-            // Follow the dominant axis, then refit inside the canvas.
-            if w / aspect >= h { h = w / aspect } else { w = h * aspect }
-            let availW = dirX > 0 ? bounds.width - anchor.x : anchor.x
-            let availH = dirY > 0 ? bounds.height - anchor.y : anchor.y
-            if w > availW { w = availW; h = w / aspect }
-            if h > availH { h = availH; w = h * aspect }
-        }
-        return CGRect(
-            x: dirX > 0 ? anchor.x : anchor.x - w,
-            y: dirY > 0 ? anchor.y : anchor.y - h,
-            width: w, height: h)
-    }
-
-    /// `start` moved by (dx, dy), clamped so the whole rect stays on the
-    /// canvas.
-    private func cropRectMoving(_ start: CGRect, dx: CGFloat, dy: CGFloat) -> CGRect {
-        var origin = CGPoint(x: start.minX + dx, y: start.minY + dy)
-        origin.x = min(max(origin.x, 0), max(bounds.width - start.width, 0))
-        origin.y = min(max(origin.y, 0), max(bounds.height - start.height, 0))
-        return CGRect(origin: origin, size: start.size)
-    }
-
-    /// `start` resized so the dragged handle lands on `point` (already
-    /// clamped to the canvas), pinning the opposite side(s). The aspect is
-    /// the popup's when set; otherwise Shift on a CORNER constrains to the
-    /// rect's aspect at drag start. No flipping: a side dragged past its
-    /// opposite pins at 1px instead.
-    private func cropRectResizing(
-        _ start: CGRect, handle: TransformHandle, to point: CGPoint, shift: Bool
-    ) -> CGRect {
-        let unit = handle.unit
-        let aspect = cropAspect
-            ?? ((shift && handle.isCorner && start.height >= 1)
-                ? start.width / start.height : nil)
-
-        if let aspect = aspect, aspect > 0 {
-            if handle.isCorner {
-                // The opposite corner is the fixed point; the dominant axis
-                // of the drag drives the size, refit inside the canvas.
-                let fixedX = unit.x > 0 ? start.minX : start.maxX
-                let fixedY = unit.y > 0 ? start.minY : start.maxY
-                var w = max((point.x - fixedX) * unit.x, 1)
-                var h = max((point.y - fixedY) * unit.y, 1)
-                if w / aspect >= h { h = w / aspect } else { w = h * aspect }
-                let availW = unit.x > 0 ? bounds.width - fixedX : fixedX
-                let availH = unit.y > 0 ? bounds.height - fixedY : fixedY
-                if w > availW { w = availW; h = w / aspect }
-                if h > availH { h = availH; w = h * aspect }
-                return CGRect(
-                    x: unit.x > 0 ? fixedX : fixedX - w,
-                    y: unit.y > 0 ? fixedY : fixedY - h,
-                    width: w, height: h)
-            }
-            if unit.y == 0 {
-                // Left/right edge: the drag drives the width; the height
-                // follows the aspect, centered on the rect and shifted back
-                // inside the canvas where centering would leave it.
-                let fixedX = unit.x > 0 ? start.minX : start.maxX
-                var w = max((point.x - fixedX) * unit.x, 1)
-                var h = w / aspect
-                if h > bounds.height { h = bounds.height; w = h * aspect }
-                let y = min(max(start.midY - h / 2, 0), bounds.height - h)
-                return CGRect(
-                    x: unit.x > 0 ? fixedX : fixedX - w, y: y, width: w, height: h)
-            }
-            // Top/bottom edge: the mirror image.
-            let fixedY = unit.y > 0 ? start.minY : start.maxY
-            var h = max((point.y - fixedY) * unit.y, 1)
-            var w = h * aspect
-            if w > bounds.width { w = bounds.width; h = w / aspect }
-            let x = min(max(start.midX - w / 2, 0), bounds.width - w)
-            return CGRect(
-                x: x, y: unit.y > 0 ? fixedY : fixedY - h, width: w, height: h)
-        }
-
-        // Unconstrained: the dragged side(s) follow the pointer.
-        var minX = start.minX
-        var maxX = start.maxX
-        var minY = start.minY
-        var maxY = start.maxY
-        if unit.x < 0 { minX = min(point.x, maxX - 1) }
-        if unit.x > 0 { maxX = max(point.x, minX + 1) }
-        if unit.y < 0 { minY = min(point.y, maxY - 1) }
-        if unit.y > 0 { maxY = max(point.y, minY + 1) }
-        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-    }
-
-    /// The rect a gesture (or the commit) settles on: snapped to the pixel
-    /// grid, at least 1×1, pulled back inside the canvas; nil when the
-    /// canvas has no room for even that.
-    private func finalizedCropRect(_ rect: CGRect) -> CGRect? {
-        var r = rect.integral
-        r.size.width = min(max(r.width, 1), bounds.width)
-        r.size.height = min(max(r.height, 1), bounds.height)
-        r.origin.x = min(max(r.minX, 0), max(bounds.width - r.width, 0))
-        r.origin.y = min(max(r.minY, 0), max(bounds.height - r.height, 0))
-        guard r.width >= 1, r.height >= 1,
-              r.maxX <= bounds.width, r.maxY <= bounds.height
-        else { return nil }
-        return r
-    }
-
     // MARK: - Mouse
 
     override func mouseDown(with event: NSEvent) {
@@ -1280,6 +1004,15 @@ final class ImageCanvasView: NSView {
             }
         case .wand:
             onWandClick?(point, Self.combineMode(for: event))
+        case .subject:
+            // Same modifier conventions as the marquee gestures, decided
+            // at mouse-down and held for the whole press.
+            dragCombineMode = Self.combineMode(for: event)
+            dragBaseSelection = selection
+            if subjectSession.hover(point, in: image) { needsDisplay = true }
+            // Nothing salient in the picture at all is worth saying;
+            // merely missing a subject is an ordinary miss, and silent.
+            if subjectSession.subjectCount == 0 { NSSound.beep() }
         case .fill:
             onFillClick?(point)
         case .gradient:
@@ -1297,8 +1030,6 @@ final class ImageCanvasView: NSView {
             onTextClick?(point)
         case .eyedropper:
             break // handled before the switch
-        case .crop:
-            cropMouseDown(point, event)
         }
     }
 
@@ -1324,6 +1055,10 @@ final class ImageCanvasView: NSView {
                 shapeSelection(.ellipse(rect(from: anchor, to: clamp(point: raw)))))
         case .lasso, .wand, .fill, .eyedropper:
             break
+        case .subject:
+            // The hit test is a byte read, so dragging across the photo
+            // re-outlines whichever subject is under the pointer.
+            if subjectSession.hover(clamp(point: raw), in: image) { needsDisplay = true }
         case .gradient:
             guard gradientAnchor != nil else { return }
             gradientCurrent = clamp(point: raw)
@@ -1339,8 +1074,6 @@ final class ImageCanvasView: NSView {
             continueStroke(to: raw)
         case .text:
             break
-        case .crop:
-            cropMouseDragged(raw, shift: event.modifierFlags.contains(.shift))
         }
     }
 
@@ -1379,6 +1112,17 @@ final class ImageCanvasView: NSView {
             }
         case .lasso, .wand, .fill, .eyedropper:
             break
+        case .subject:
+            let mode = dragCombineMode
+            let base = dragBaseSelection
+            dragBaseSelection = nil
+            // Releasing over the background keeps the selection as it was
+            // rather than clearing it: with this tool a miss is usually
+            // the segmentation's, not the user's.
+            if let found = subjectSession.end() {
+                commitSelection(found, mode: mode, base: base)
+            }
+            needsDisplay = true
         case .gradient:
             guard let anchor = gradientAnchor else { return }
             let end = clamp(point: convert(event.locationInWindow, from: nil))
@@ -1398,8 +1142,6 @@ final class ImageCanvasView: NSView {
             endStroke()
         case .text:
             break
-        case .crop:
-            cropMouseUp()
         }
     }
 
@@ -1585,8 +1327,13 @@ final class ImageCanvasView: NSView {
     /// session as a re-edit of that text layer: the commit replaces its
     /// content instead of adding a layer. The session always draws with the
     /// canvas's current textFont/paintColor, so the caller restores those
-    /// from the layer's description first.
-    func beginTextSession(at point: CGPoint, string: String = "", editingLayer: Int? = nil) {
+    /// from the layer's description first. `selectAll` opens with the whole
+    /// string selected — the layers panel's double-click, which has no click
+    /// position to put a caret at, so typing replaces the text.
+    func beginTextSession(
+        at point: CGPoint, string: String = "", editingLayer: Int? = nil,
+        selectAll: Bool = false
+    ) {
         // Shift the box left rather than letting the 40px minimum overhang
         // the right edge, where committed glyphs would be clipped away.
         let width = min(600, max(bounds.width - point.x, 40))
@@ -1621,6 +1368,11 @@ final class ImageCanvasView: NSView {
         }
         needsDisplay = true
         window?.makeFirstResponder(textView)
+        // Last, so the restyling above (which rewrites the storage) cannot
+        // collapse the selection again.
+        if selectAll, !string.isEmpty {
+            textView.setSelectedRange(NSRange(location: 0, length: (string as NSString).length))
+        }
     }
 
     /// Applies the current textFont/paintColor/textAlignment to the whole
@@ -1754,25 +1506,12 @@ final class ImageCanvasView: NSView {
                 cancelLasso()
                 return
             }
-            // A crop session: Escape cancels it (the tool stays active).
-            // Gated on the rect, so with no session Escape falls through to
-            // deselect as always.
-            if tool == .crop, cropRect != nil {
-                cancelCropSession()
-                return
-            }
             setSelection(nil)
             return
         }
         // Return closes an in-progress lasso.
         if (event.keyCode == 36 || event.keyCode == 76), !lassoPoints.isEmpty {
             closeLasso()
-            return
-        }
-        // Return commits a crop session; without one the key falls through
-        // untouched.
-        if (event.keyCode == 36 || event.keyCode == 76), tool == .crop, cropRect != nil {
-            commitCropSession()
             return
         }
         // Arrow-key nudges for the move tool (Shift: 10px). Down is +y in the
@@ -1790,64 +1529,17 @@ final class ImageCanvasView: NSView {
                 break
             }
         }
-        // Arrow-key nudges of a crop session's rect (Shift: 10px, matching
-        // the transform session). Gated on the rect: with no session the
-        // arrows fall through untouched.
-        if tool == .crop, cropRect != nil, !hasActiveTextSession,
-           event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
-            let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
-            switch event.keyCode {
-            case 123: nudgeCropRect(-step, 0); return // left
-            case 124: nudgeCropRect(step, 0); return // right
-            case 125: nudgeCropRect(0, step); return // down
-            case 126: nudgeCropRect(0, -step); return // up
-            default:
-                break
-            }
-        }
         // Bare tool keys (Photoshop-style), handled here only (never as menu
         // key equivalents — they would steal keystrokes from text editing).
         // The text view is first responder during sessions anyway.
         if !hasActiveTextSession,
            event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
            let characters = event.charactersIgnoringModifiers?.lowercased() {
+            if let keyTool = EditorTool(keyCharacter: characters) {
+                onToolKey?(keyTool)
+                return
+            }
             switch characters {
-            case "m":
-                onToolKey?(.select)
-                return
-            case "v":
-                onToolKey?(.move)
-                return
-            case "b":
-                onToolKey?(.brush)
-                return
-            case "e":
-                onToolKey?(.eraser)
-                return
-            case "t":
-                onToolKey?(.text)
-                return
-            case "o":
-                onToolKey?(.ellipseSelect)
-                return
-            case "l":
-                onToolKey?(.lasso)
-                return
-            case "w":
-                onToolKey?(.wand)
-                return
-            case "k":
-                onToolKey?(.fill)
-                return
-            case "g":
-                onToolKey?(.gradient)
-                return
-            case "i":
-                onToolKey?(.eyedropper)
-                return
-            case "c":
-                onToolKey?(.crop)
-                return
             case "q":
                 // Quick Mask toggle rides with the tool keys for the same
                 // reason they live here: a menu key equivalent would steal
@@ -1874,15 +1566,10 @@ final class ImageCanvasView: NSView {
             addCursorRect(bounds, cursor: .arrow)
             return
         }
-        switch tool {
-        case .select, .ellipseSelect, .lasso, .wand, .fill, .gradient, .brush, .eraser,
-            .eyedropper, .crop:
-            addCursorRect(bounds, cursor: .crosshair)
-        case .move:
-            addCursorRect(bounds, cursor: moveDragOrigin == nil ? .openHand : .closedHand)
-        case .text:
-            addCursorRect(bounds, cursor: .iBeam)
-        }
+        // The enum knows each tool's resting cursor; the move tool's hand
+        // closes while a drag is in flight.
+        let dragging = tool == .move && moveDragOrigin != nil
+        addCursorRect(bounds, cursor: dragging ? .closedHand : tool.cursor)
     }
 }
 

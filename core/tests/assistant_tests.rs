@@ -2,7 +2,6 @@
 //! FFI with a scripted mock of the Anthropic Messages API.
 
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::io::Read;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

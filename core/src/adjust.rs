@@ -69,13 +69,8 @@
 
 use serde_json::{Map, Value};
 
+use crate::blend::{LUMA_B, LUMA_G, LUMA_R};
 use crate::ops_filters::hue_rotate_matrix;
-
-/// Rec. 709 luma coefficients (private copy; `ops`, `ops_filters` and `doc`
-/// keep their own).
-const LUMA_R: f32 = 0.2126;
-const LUMA_G: f32 = 0.7152;
-const LUMA_B: f32 = 0.0722;
 
 /// The 256-entry per-channel lookup tables of a parsed `curves` op, built
 /// once at parse time (missing channels are the identity table).

@@ -11,6 +11,7 @@ use std::ptr;
 use std::sync::Mutex;
 
 use crate::agent::{self, AgentConfig, AgentServer};
+use crate::ffi_util::{fallible_op, read_cstr};
 
 /// C signature of the host tool handler. See the header for the contract.
 pub type RzAgentToolHandler = unsafe extern "C" fn(
@@ -45,18 +46,6 @@ impl HostHandler {
 }
 
 static SERVER: Mutex<Option<AgentServer>> = Mutex::new(None);
-
-unsafe fn set_err(err_out: *mut *mut c_char, msg: &str) {
-    if err_out.is_null() {
-        return;
-    }
-    let sanitized = msg.replace('\0', " ");
-    let cstring = CString::new(sanitized)
-        .unwrap_or_else(|_| CString::new("rasterize-core error").expect("static string"));
-    unsafe {
-        *err_out = cstring.into_raw();
-    }
-}
 
 /// Allocates a NUL-terminated copy of `s` owned by this library, for tool
 /// handlers to return. Never freed by the caller: ownership passes back
@@ -98,19 +87,10 @@ pub unsafe extern "C" fn rz_agent_server_start(
     context: *mut c_void,
     err_out: *mut *mut c_char,
 ) -> u16 {
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        let read = |ptr: *const c_char, what: &str| -> Result<String, String> {
-            if ptr.is_null() {
-                return Err(format!("{what} is NULL"));
-            }
-            unsafe { CStr::from_ptr(ptr) }
-                .to_str()
-                .map(str::to_owned)
-                .map_err(|_| format!("{what} is not valid UTF-8"))
-        };
-        let name = read(server_name, "server_name")?;
-        let version = read(server_version, "server_version")?;
-        let tools_text = read(tools_json, "tools_json")?;
+    let body = || {
+        let name = unsafe { read_cstr(server_name, "server_name") }?;
+        let version = unsafe { read_cstr(server_version, "server_version") }?;
+        let tools_text = unsafe { read_cstr(tools_json, "tools_json") }?;
         let tools: serde_json::Value = serde_json::from_str(&tools_text)
             .map_err(|e| format!("tools_json is not valid JSON: {e}"))?;
 
@@ -130,17 +110,15 @@ pub unsafe extern "C" fn rz_agent_server_start(
         let (bound, server) = agent::start(port, config)?;
         *slot = Some(server);
         Ok(bound)
-    }));
-    match outcome {
-        Ok(Ok(bound)) => bound,
-        Ok(Err(msg)) => {
-            unsafe { set_err(err_out, &msg) };
-            0
-        }
-        Err(_) => {
-            unsafe { set_err(err_out, "internal panic") };
-            0
-        }
+    };
+    unsafe {
+        fallible_op(
+            err_out,
+            "panic while starting agent server",
+            0,
+            body,
+            |bound| bound,
+        )
     }
 }
 
