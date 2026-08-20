@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Source+Sans+3:wght@400;600&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,300..500,0..1,0&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: #101010; }
+  a { color: #62b0ff; text-decoration: none; }
+  a:hover { color: #8cc6ff; }
+</style>
+</helmet>
+
+<div style="padding:28px;display:flex;justify-content:center;overflow-x:auto;font-family:'Source Sans 3',system-ui,sans-serif">
+<div style="width:1440px;flex:none;background:#232323;border:1px solid #3a3a3a;border-radius:8px;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,0.55);color:#e6e6e4;position:relative">
+
+  <div style="height:30px;background:#2c2c2c;border-bottom:1px solid #3a3a3a;display:flex;align-items:center;gap:10px;padding:0 12px">
+    <div style="display:flex;gap:8px">
+      <div style="width:11px;height:11px;border-radius:50%;background:#ff5f57"></div>
+      <div style="width:11px;height:11px;border-radius:50%;background:#febc2e"></div>
+      <div style="width:11px;height:11px;border-radius:50%;background:#28c840"></div>
+    </div>
+    <div style="font:400 12px/1 'IBM Plex Mono',monospace;color:#9a9a95">cheese.rz — 2016 × 1512 px</div>
+  </div>
+
+  <div style="height:36px;background:#262626;border-bottom:1px solid #3a3a3a;display:flex;align-items:center;padding:0 10px;gap:12px;overflow:hidden">
+    <div style="display:flex;align-items:center;gap:7px;min-width:132px">
+      <span style="font-family:'Material Symbols Outlined';font-size:17px;line-height:1;color:#62b0ff">{{ toolIcon }}</span>
+      <span style="font:600 12px/1 'Source Sans 3',sans-serif;letter-spacing:0.01em">{{ toolName }}</span>
+    </div>
+    <div style="width:1px;height:18px;background:#3a3a3a"></div>
+
+    <sc-if value="{{ isSelect }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="display:flex">
+          <div style="width:26px;height:22px;border:1px solid #4a7fd0;background:rgba(10,132,255,0.24);border-radius:3px 0 0 3px;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#8cc6ff">crop_square</span></div>
+          <div style="width:26px;height:22px;border:1px solid #3a3a3a;border-left:0;background:#2b2b2b;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">add</span></div>
+          <div style="width:26px;height:22px;border:1px solid #3a3a3a;border-left:0;background:#2b2b2b;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">remove</span></div>
+          <div style="width:26px;height:22px;border:1px solid #3a3a3a;border-left:0;background:#2b2b2b;border-radius:0 3px 3px 0;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">join_inner</span></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">FEATHER</span><div style="height:22px;min-width:52px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">0 px</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><div style="width:13px;height:13px;border:1px solid #4a7fd0;background:rgba(10,132,255,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font:500 9px/1 'IBM Plex Mono',monospace;color:#8cc6ff">✓</div><span style="font:400 11px/1 'Source Sans 3',sans-serif;color:#b9b9b3">Anti-alias</span></div>
+        <sc-if value="{{ isWand }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;align-items:center;gap:12px">
+            <div style="width:1px;height:18px;background:#3a3a3a"></div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">TOLERANCE</span><div style="height:22px;min-width:46px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">32</div></div>
+            <div style="display:flex;align-items:center;gap:6px"><div style="width:13px;height:13px;border:1px solid #4a7fd0;background:rgba(10,132,255,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font:500 9px/1 'IBM Plex Mono',monospace;color:#8cc6ff">✓</div><span style="font:400 11px/1 'Source Sans 3',sans-serif;color:#b9b9b3">Contiguous</span></div>
+            <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">Current layer<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isCrop }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">Original ratio<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">W</span><div style="height:22px;min-width:58px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">2016</div><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">H</span><div style="height:22px;min-width:58px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">1512</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">STRAIGHTEN</span><div style="height:22px;min-width:52px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">0.0°</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><div style="width:13px;height:13px;border:1px solid #55554f;background:#2b2b2b;border-radius:3px"></div><span style="font:400 11px/1 'Source Sans 3',sans-serif;color:#b9b9b3">Delete cropped pixels</span></div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isMove }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">AUTO-SELECT</span><div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">Layer<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div></div>
+        <div style="display:flex;align-items:center;gap:6px"><div style="width:13px;height:13px;border:1px solid #4a7fd0;background:rgba(10,132,255,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font:500 9px/1 'IBM Plex Mono',monospace;color:#8cc6ff">✓</div><span style="font:400 11px/1 'Source Sans 3',sans-serif;color:#b9b9b3">Show transform controls</span></div>
+        <div style="width:1px;height:18px;background:#3a3a3a"></div>
+        <div style="display:flex;gap:2px">
+          <div style="width:24px;height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">align_horizontal_left</span></div>
+          <div style="width:24px;height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">align_horizontal_center</span></div>
+          <div style="width:24px;height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">align_horizontal_right</span></div>
+          <div style="width:24px;height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">align_vertical_top</span></div>
+          <div style="width:24px;height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">align_vertical_center</span></div>
+          <div style="width:24px;height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">align_vertical_bottom</span></div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isPaint }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8"><div style="width:12px;height:12px;border-radius:50%;background:radial-gradient(circle,#dcdcd8 0%,rgba(220,220,216,0) 72%)"></div>Soft Round<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">SIZE</span><div style="height:22px;min-width:56px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">24 px</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">HARDNESS</span><div style="height:22px;min-width:48px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">0%</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">OPACITY</span><div style="height:22px;min-width:52px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">100%</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">FLOW</span><div style="height:22px;min-width:52px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">100%</div></div>
+        <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">Normal<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isFill }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8"><div style="width:12px;height:12px;border:1px solid #55554f;background:#e8e2d4"></div>Foreground<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">TOLERANCE</span><div style="height:22px;min-width:46px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">32</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><div style="width:13px;height:13px;border:1px solid #4a7fd0;background:rgba(10,132,255,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font:500 9px/1 'IBM Plex Mono',monospace;color:#8cc6ff">✓</div><span style="font:400 11px/1 'Source Sans 3',sans-serif;color:#b9b9b3">Contiguous</span></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">OPACITY</span><div style="height:22px;min-width:52px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">100%</div></div>
+        <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">Normal<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isGradient }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8"><div style="width:36px;height:12px;background:linear-gradient(90deg,#e8e2d4,#1f1f1d);border:1px solid #55554f"></div><span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div>
+        <div style="display:flex">
+          <div style="width:26px;height:22px;border:1px solid #4a7fd0;background:rgba(10,132,255,0.24);border-radius:3px 0 0 3px;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#8cc6ff">gradient</span></div>
+          <div style="width:26px;height:22px;border:1px solid #3a3a3a;border-left:0;background:#2b2b2b;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">radio_button_checked</span></div>
+          <div style="width:26px;height:22px;border:1px solid #3a3a3a;border-left:0;background:#2b2b2b;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">rotate_right</span></div>
+          <div style="width:26px;height:22px;border:1px solid #3a3a3a;border-left:0;background:#2b2b2b;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">flip</span></div>
+          <div style="width:26px;height:22px;border:1px solid #3a3a3a;border-left:0;background:#2b2b2b;border-radius:0 3px 3px 0;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">square</span></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">OPACITY</span><div style="height:22px;min-width:52px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">100%</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><div style="width:13px;height:13px;border:1px solid #55554f;background:#2b2b2b;border-radius:3px"></div><span style="font:400 11px/1 'Source Sans 3',sans-serif;color:#b9b9b3">Reverse</span></div>
+        <div style="display:flex;align-items:center;gap:6px"><div style="width:13px;height:13px;border:1px solid #4a7fd0;background:rgba(10,132,255,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font:500 9px/1 'IBM Plex Mono',monospace;color:#8cc6ff">✓</div><span style="font:400 11px/1 'Source Sans 3',sans-serif;color:#b9b9b3">Dither</span></div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isShape }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">FILL</span><div style="width:22px;height:22px;border:1px solid #55554f;border-radius:3px;background:#c96f4a"></div></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">STROKE</span><div style="width:22px;height:22px;border:1px solid #55554f;border-radius:3px;background:#e8e2d4"></div><div style="height:22px;min-width:50px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">2 px</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">RADIUS</span><div style="height:22px;min-width:50px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">8 px</div></div>
+        <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">New layer<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div>
+        <div style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a;border:1px dashed #4a4a44;border-radius:3px;padding:4px 6px">PLANNED</div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isText }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">Source Sans 3<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div>
+        <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">Semibold<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">SIZE</span><div style="height:22px;min-width:52px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">48 pt</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">TRACK</span><div style="height:22px;min-width:46px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">0</div></div>
+        <div style="display:flex">
+          <div style="width:26px;height:22px;border:1px solid #4a7fd0;background:rgba(10,132,255,0.24);border-radius:3px 0 0 3px;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#8cc6ff">format_align_left</span></div>
+          <div style="width:26px;height:22px;border:1px solid #3a3a3a;border-left:0;background:#2b2b2b;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">format_align_center</span></div>
+          <div style="width:26px;height:22px;border:1px solid #3a3a3a;border-left:0;background:#2b2b2b;border-radius:0 3px 3px 0;display:flex;align-items:center;justify-content:center"><span style="font-family:'Material Symbols Outlined';font-size:14px;color:#9a9a95">format_align_right</span></div>
+        </div>
+        <div style="width:22px;height:22px;border:1px solid #55554f;border-radius:3px;background:#c8d24a"></div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isPick }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">SAMPLE</span><div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">Point<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">FROM</span><div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;gap:8px;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">All layers<span style="font-family:'Material Symbols Outlined';font-size:13px;color:#8f8f8a">unfold_more</span></div></div>
+        <div style="display:flex;align-items:center;gap:6px"><div style="width:13px;height:13px;border:1px solid #4a7fd0;background:rgba(10,132,255,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font:500 9px/1 'IBM Plex Mono',monospace;color:#8cc6ff">✓</div><span style="font:400 11px/1 'Source Sans 3',sans-serif;color:#b9b9b3">Show sampling ring</span></div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">PICKED</span><div style="width:22px;height:22px;border:1px solid #55554f;border-radius:3px;background:#8d5b3f"></div><span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">#8D5B3F</span></div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isView }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="display:flex;gap:2px">
+          <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 9px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">Fit</div>
+          <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 9px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">100%</div>
+          <div style="height:22px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 9px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">Fill</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">ZOOM</span><div style="height:22px;min-width:56px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">66%</div></div>
+        <div style="display:flex;align-items:center;gap:6px"><div style="width:13px;height:13px;border:1px solid #55554f;background:#2b2b2b;border-radius:3px"></div><span style="font:400 11px/1 'Source Sans 3',sans-serif;color:#b9b9b3">Scrubby zoom</span></div>
+      </div>
+    </sc-if>
+
+    <div style="flex:1"></div>
+    <div onClick="{{ toggleMore }}" style="height:24px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:4px;display:flex;align-items:center;gap:5px;padding:0 8px;cursor:pointer;flex:none" style-hover="background:#333;border-color:#4a4a44">
+      <span style="font:400 11px/1 'Source Sans 3',sans-serif;color:#b9b9b3">More</span>
+      <span style="font-family:'Material Symbols Outlined';font-size:14px;line-height:1;color:#8f8f8a">more_horiz</span>
+    </div>
+  </div>
+
+  <div style="display:flex;height:760px">
+    <div style="width:48px;background:#262626;border-right:1px solid #3a3a3a;display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:3px">
+      <sc-for list="{{ rail }}" as="t" hint-placeholder-count="10">
+        <div onClick="{{ t.pick }}" style="width:34px;height:34px;border-radius:5px;display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer;color:#a3a39c" style-hover="background:#333;color:#dcdcd8">
+          <sc-if value="{{ t.selected }}" hint-placeholder-val="{{ true }}">
+            <div style="position:absolute;inset:0;border-radius:5px;background:rgba(10,132,255,0.26);border:1px solid #4a7fd0"></div>
+          </sc-if>
+          <span style="font-family:'Material Symbols Outlined';font-size:19px;line-height:1;position:relative">{{ t.icon }}</span>
+          <sc-if value="{{ t.grouped }}" hint-placeholder-val="{{ true }}">
+            <div onClick="{{ t.openMenu }}" style="position:absolute;right:1px;bottom:1px;width:10px;height:10px;display:flex;align-items:flex-end;justify-content:flex-end">
+              <div style="width:0;height:0;border-left:5px solid transparent;border-bottom:5px solid #9a9a95"></div>
+            </div>
+          </sc-if>
+        </div>
+      </sc-for>
+      <div style="flex:1"></div>
+      <div style="width:28px;height:28px;border-radius:4px;position:relative;background:#e8e2d4;border:1px solid #55554f"></div>
+      <div style="width:28px;height:28px;border-radius:4px;background:#1f1f1d;border:1px solid #55554f;margin-top:-14px;margin-left:10px"></div>
+    </div>
+
+    <div style="flex:1;background:#171717;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden">
+      <div style="width:820px;height:614px;box-shadow:0 0 0 1px #3a3a3a,0 8px 30px rgba(0,0,0,0.5);overflow:hidden">
+        <img src="assets/canvas.png" alt="canvas" style="width:100%;height:100%;object-fit:cover;display:block">
+      </div>
+      <div style="position:absolute;left:16px;bottom:16px;height:30px;border-radius:15px;background:rgba(18,20,19,0.66);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;gap:8px;padding:0 8px;font:400 11px/1 'IBM Plex Mono',monospace;color:#f0efe9">
+        <div style="width:22px;height:22px;border-radius:11px;display:flex;align-items:center;justify-content:center;cursor:pointer" style-hover="background:rgba(255,255,255,0.1)">−</div>
+        <span style="min-width:38px;text-align:center">66%</span>
+        <div style="width:22px;height:22px;border-radius:11px;display:flex;align-items:center;justify-content:center;cursor:pointer" style-hover="background:rgba(255,255,255,0.1)">+</div>
+      </div>
+    </div>
+
+    <div style="width:300px;background:#242424;border-left:1px solid #3a3a3a;display:flex;flex-direction:column">
+      <div style="display:flex;border-bottom:1px solid #3a3a3a;height:32px">
+        <div onClick="{{ showLayers }}" style="flex:1;display:flex;align-items:center;justify-content:center;cursor:pointer;border-right:1px solid #3a3a3a;position:relative">
+          <sc-if value="{{ layersTab }}" hint-placeholder-val="{{ true }}">
+            <div style="position:absolute;inset:0;background:#2c2c2c;border-bottom:2px solid #62b0ff"></div>
+          </sc-if>
+          <span style="font:600 12px/1 'Source Sans 3',sans-serif;position:relative;color:#e6e6e4">Layers</span>
+        </div>
+        <div onClick="{{ showAssistant }}" style="flex:1;display:flex;align-items:center;justify-content:center;cursor:pointer;position:relative">
+          <sc-if value="{{ assistantTab }}" hint-placeholder-val="{{ true }}">
+            <div style="position:absolute;inset:0;background:#2c2c2c;border-bottom:2px solid #62b0ff"></div>
+          </sc-if>
+          <span style="font:600 12px/1 'Source Sans 3',sans-serif;position:relative;color:#b9b9b3">Assistant</span>
+        </div>
+      </div>
+
+      <sc-if value="{{ layersTab }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;flex-direction:column;flex:1">
+          <div style="padding:10px;display:flex;flex-direction:column;gap:9px;border-bottom:1px solid #3a3a3a">
+            <div style="height:24px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:4px;display:flex;align-items:center;justify-content:space-between;padding:0 8px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">Normal<span style="font-family:'Material Symbols Outlined';font-size:14px;color:#8f8f8a">unfold_more</span></div>
+            <div style="display:flex;align-items:center;gap:9px">
+              <span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a;letter-spacing:0.06em">OPACITY</span>
+              <div style="flex:1;height:3px;background:#3a3a3a;border-radius:2px;position:relative"><div style="position:absolute;left:0;top:0;bottom:0;width:100%;background:#62b0ff;border-radius:2px"></div><div style="position:absolute;right:-5px;top:-4px;width:11px;height:11px;border-radius:50%;background:#e6e6e4"></div></div>
+              <span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8;min-width:32px;text-align:right">100%</span>
+            </div>
+          </div>
+          <div style="padding:8px;display:flex;flex-direction:column;gap:3px">
+            <div style="height:44px;border-radius:5px;background:rgba(10,132,255,0.22);border:1px solid #4a7fd0;display:flex;align-items:center;gap:9px;padding:0 8px">
+              <span style="font-family:'Material Symbols Outlined';font-size:15px;color:#8cc6ff">visibility</span>
+              <div style="width:30px;height:30px;border-radius:3px;background:linear-gradient(#e6e6e4,#8a8a85);border:1px solid #55554f"></div>
+              <div style="display:flex;flex-direction:column;gap:3px"><span style="font:600 12px/1 'Source Sans 3',sans-serif;color:#e6e6e4">Curves</span><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#9fc9f5">adjustment</span></div>
+            </div>
+            <div style="height:44px;border-radius:5px;border:1px solid #303030;display:flex;align-items:center;gap:9px;padding:0 8px">
+              <span style="font-family:'Material Symbols Outlined';font-size:15px;color:#8f8f8a">visibility</span>
+              <div style="width:30px;height:30px;border-radius:3px;background:#2b2b2b;border:1px solid #3a3a3a;display:flex;align-items:center;justify-content:center;font:600 11px/1 'Source Sans 3',sans-serif;color:#c8d24a">Hi</div>
+              <div style="display:flex;flex-direction:column;gap:3px"><span style="font:400 12px/1 'Source Sans 3',sans-serif;color:#dcdcd8">Hello</span><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">text</span></div>
+            </div>
+            <div style="height:44px;border-radius:5px;border:1px solid #303030;display:flex;align-items:center;gap:9px;padding:0 8px">
+              <span style="font-family:'Material Symbols Outlined';font-size:15px;color:#8f8f8a">visibility</span>
+              <div style="width:30px;height:30px;border-radius:3px;border:1px solid #3a3a3a;overflow:hidden"><img src="assets/canvas.png" alt="" style="width:100%;height:100%;object-fit:cover;display:block"></div>
+              <div style="display:flex;flex-direction:column;gap:3px"><span style="font:400 12px/1 'Source Sans 3',sans-serif;color:#dcdcd8">Background</span><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">2016 × 1512</span></div>
+            </div>
+          </div>
+          <div style="flex:1"></div>
+          <div style="height:36px;border-top:1px solid #3a3a3a;display:flex;align-items:center;gap:4px;padding:0 8px">
+            <div style="width:26px;height:24px;border-radius:4px;display:flex;align-items:center;justify-content:center;cursor:pointer" style-hover="background:#333"><span style="font-family:'Material Symbols Outlined';font-size:17px;color:#a3a39c">add</span></div>
+            <div style="width:26px;height:24px;border-radius:4px;display:flex;align-items:center;justify-content:center;cursor:pointer" style-hover="background:#333"><span style="font-family:'Material Symbols Outlined';font-size:17px;color:#a3a39c">tonality</span></div>
+            <div style="width:26px;height:24px;border-radius:4px;display:flex;align-items:center;justify-content:center;cursor:pointer" style-hover="background:#333"><span style="font-family:'Material Symbols Outlined';font-size:17px;color:#a3a39c">content_copy</span></div>
+            <div style="width:26px;height:24px;border-radius:4px;display:flex;align-items:center;justify-content:center;cursor:pointer" style-hover="background:#333"><span style="font-family:'Material Symbols Outlined';font-size:17px;color:#a3a39c">delete</span></div>
+            <div style="flex:1"></div>
+            <span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6e6e68">3 layers</span>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ assistantTab }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;flex-direction:column;flex:1">
+          <div style="flex:1;padding:12px;display:flex;flex-direction:column;gap:12px;overflow:hidden">
+            <div style="align-self:flex-end;max-width:230px;background:#2f4a6b;border-radius:10px 10px 3px 10px;padding:8px 10px;font:400 12px/1.45 'Source Sans 3',sans-serif;color:#eaf2fb">Brighten just the girl, leave the background alone.</div>
+            <div style="max-width:246px;background:#2b2b2b;border:1px solid #3a3a3a;border-radius:10px 10px 10px 3px;padding:8px 10px;font:400 12px/1.45 'Source Sans 3',sans-serif;color:#dcdcd8">Selected the subject, added a Curves layer clipped to it, +18 on the midtones.</div>
+            <div style="display:flex;flex-direction:column;gap:5px;padding-left:2px">
+              <div style="display:flex;align-items:center;gap:7px;font:400 10px/1 'IBM Plex Mono',monospace;color:#7f9a7f"><span style="font-family:'Material Symbols Outlined';font-size:13px">check</span>select_subject</div>
+              <div style="display:flex;align-items:center;gap:7px;font:400 10px/1 'IBM Plex Mono',monospace;color:#7f9a7f"><span style="font-family:'Material Symbols Outlined';font-size:13px">check</span>add_adjustment_layer · curves</div>
+              <div style="display:flex;align-items:center;gap:7px;font:400 10px/1 'IBM Plex Mono',monospace;color:#7f9a7f"><span style="font-family:'Material Symbols Outlined';font-size:13px">check</span>set_clipping_mask</div>
+            </div>
+          </div>
+          <div style="border-top:1px solid #3a3a3a;padding:10px;display:flex;flex-direction:column;gap:8px">
+            <div style="min-height:56px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:6px;padding:8px;font:400 12px/1.4 'Source Sans 3',sans-serif;color:#6e6e68">Ask the assistant to edit this document…</div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6e6e68">43 tools</span>
+              <div style="flex:1"></div>
+              <div style="height:24px;border-radius:4px;background:#3d6ea8;display:flex;align-items:center;padding:0 12px;font:600 11px/1 'Source Sans 3',sans-serif;color:#f0f6ff;cursor:pointer" style-hover="background:#4a7fbd">Send</div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+
+  <div style="height:26px;background:#262626;border-top:1px solid #3a3a3a;display:flex;align-items:center;gap:16px;padding:0 12px;font:400 10px/1 'IBM Plex Mono',monospace;color:#8f8f8a">
+    <span>2016 × 1512 px</span>
+    <span>RGB · 8-bit</span>
+    <span>{{ statusSelection }}</span>
+    <div style="flex:1"></div>
+    <span>{{ statusHint }}</span>
+  </div>
+
+  <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeAll }}" style="position:absolute;inset:0;z-index:20">
+      <div style="position:absolute;left:52px;top:{{ menuTop }}px;min-width:206px;background:#2e2e2e;border:1px solid #454545;border-radius:7px;box-shadow:0 12px 34px rgba(0,0,0,0.5);padding:5px">
+        <sc-for list="{{ menuItems }}" as="m" hint-placeholder-count="5">
+          <div onClick="{{ m.pick }}" style="height:28px;border-radius:4px;display:flex;align-items:center;gap:9px;padding:0 8px;cursor:pointer" style-hover="background:#3d6ea8">
+            <span style="font-family:'Material Symbols Outlined';font-size:16px;color:#c8c8c2">{{ m.icon }}</span>
+            <span style="font:400 12px/1 'Source Sans 3',sans-serif;color:#e6e6e4">{{ m.name }}</span>
+            <div style="flex:1"></div>
+            <sc-if value="{{ m.planned }}" hint-placeholder-val="{{ false }}">
+              <span style="font:400 9px/1 'IBM Plex Mono',monospace;color:#8f8f8a;border:1px dashed #55554f;border-radius:3px;padding:3px 4px">SOON</span>
+            </sc-if>
+            <span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#8f8f8a">{{ m.key }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ moreOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeAll }}" style="position:absolute;inset:0;z-index:20">
+      <div style="position:absolute;right:12px;top:70px;width:268px;background:#2e2e2e;border:1px solid #454545;border-radius:7px;box-shadow:0 12px 34px rgba(0,0,0,0.5);padding:10px;display:flex;flex-direction:column;gap:9px">
+        <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:0.09em;color:#8f8f8a">{{ moreTitle }}</div>
+        <sc-for list="{{ moreItems }}" as="o" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+            <span style="font:400 12px/1 'Source Sans 3',sans-serif;color:#dcdcd8">{{ o.label }}</span>
+            <div style="height:22px;min-width:74px;border:1px solid #3a3a3a;background:#2b2b2b;border-radius:3px;display:flex;align-items:center;justify-content:flex-end;padding:0 7px;font:400 11px/1 'IBM Plex Mono',monospace;color:#dcdcd8">{{ o.value }}</div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+</div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1496,&quot;height&quot;:924},&quot;defaultTool&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;select&quot;,&quot;wand&quot;,&quot;crop&quot;,&quot;move&quot;,&quot;brush&quot;,&quot;fill&quot;,&quot;gradient&quot;,&quot;rect&quot;,&quot;text&quot;,&quot;pick&quot;,&quot;zoom&quot;],&quot;default&quot;:&quot;brush&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Editor&quot;}}">
+const TOOLS = {
+  select: { name: "Rectangle Select", icon: "highlight_alt", key: "M", row: "select" },
+  ellipse: { name: "Ellipse Select", icon: "radio_button_unchecked", key: "O", row: "select" },
+  lasso: { name: "Lasso", icon: "gesture", key: "L", row: "select" },
+  wand: { name: "Magic Wand", icon: "auto_fix_high", key: "W", row: "select" },
+  subject: { name: "Subject Select", icon: "person", key: "S", row: "select" },
+  crop: { name: "Crop", icon: "crop", key: "C", row: "crop" },
+  move: { name: "Move", icon: "open_with", key: "V", row: "move" },
+  brush: { name: "Brush", icon: "brush", key: "B", row: "paint" },
+  eraser: { name: "Eraser", icon: "ink_eraser", key: "E", row: "paint" },
+  clone: { name: "Clone Stamp", icon: "approval", key: "J", row: "paint", planned: true },
+  dodge: { name: "Dodge / Burn", icon: "brightness_6", key: "D", row: "paint", planned: true },
+  fill: { name: "Fill", icon: "format_color_fill", key: "K", row: "fill" },
+  gradient: { name: "Gradient", icon: "gradient", key: "G", row: "gradient" },
+  rect: { name: "Rectangle", icon: "rectangle", key: "R", row: "shape", planned: true },
+  ellipseShape: { name: "Ellipse", icon: "circle", key: "R", row: "shape", planned: true },
+  line: { name: "Line", icon: "horizontal_rule", key: "R", row: "shape", planned: true },
+  text: { name: "Text", icon: "title", key: "T", row: "text" },
+  pick: { name: "Eyedropper", icon: "colorize", key: "I", row: "pick" },
+  zoom: { name: "Zoom", icon: "zoom_in", key: "Z", row: "view" },
+  hand: { name: "Hand", icon: "pan_tool", key: "H", row: "view" },
+};
+
+const GROUPS = [
+  ["select", "ellipse", "lasso", "wand", "subject"],
+  ["crop"],
+  ["move"],
+  ["brush", "eraser", "clone", "dodge"],
+  ["fill"],
+  ["gradient"],
+  ["rect", "ellipseShape", "line"],
+  ["text"],
+  ["pick"],
+  ["zoom", "hand"],
+];
+
+const MORE = {
+  select: ["Selection modes", [["Grow / Shrink", "0 px"], ["Border width", "2 px"], ["Smooth", "0 px"], ["Quick Mask", "Off"], ["Save selection", "—"]]],
+  crop: ["Crop overflow", [["Grid overlay", "Thirds"], ["Content-aware fill", "Off"], ["Snap to guides", "On"]]],
+  move: ["Move overflow", [["Distribute", "—"], ["Snap to layers", "On"], ["Nudge step", "1 px"]]],
+  paint: ["Brush overflow", [["Spacing", "10%"], ["Angle", "0°"], ["Roundness", "100%"], ["Smoothing", "20%"], ["Pressure size", "On"], ["Airbrush", "Off"]]],
+  fill: ["Fill overflow", [["Sample all layers", "Off"], ["Anti-alias", "On"], ["Pattern", "—"]]],
+  gradient: ["Gradient overflow", [["Stops", "2"], ["Midpoint", "50%"], ["Method", "Perceptual"], ["Transparency", "On"]]],
+  shape: ["Shape overflow", [["Corner style", "Round"], ["Dash pattern", "None"], ["Align stroke", "Center"]]],
+  text: ["Text overflow", [["Leading", "56 pt"], ["Baseline shift", "0"], ["Paragraph", "—"], ["Anti-alias", "Smooth"], ["Warp", "None"]]],
+  pick: ["Eyedropper overflow", [["Sample size", "3 × 3"], ["Copy on pick", "Off"], ["Recent swatches", "6"]]],
+  view: ["View overflow", [["Rulers", "Off"], ["Guides", "On"], ["Pixel grid", "Auto"]]],
+};
+
+class Component extends DCLogic {
+  state = {
+    tool: null,
+    members: { 0: "select", 3: "brush", 6: "rect", 9: "zoom" },
+    menu: null,
+    more: false,
+    tab: "layers",
+  };
+
+  get tool() {
+    return this.state.tool ?? this.props.defaultTool ?? "brush";
+  }
+
+  select(id) {
+    const group = GROUPS.findIndex((g) => g.includes(id));
+    this.setState((s) => ({
+      tool: id,
+      members: { ...s.members, [group]: id },
+      menu: null,
+      more: false,
+    }));
+  }
+
+  renderVals() {
+    const tool = this.tool;
+    const def = TOOLS[tool];
+    const row = def.row;
+    const rail = GROUPS.map((group, i) => {
+      const member = group.length > 1 ? this.state.members[i] ?? group[0] : group[0];
+      const shown = group.includes(tool) ? tool : member;
+      return {
+        icon: TOOLS[shown].icon,
+        selected: group.includes(tool),
+        grouped: group.length > 1,
+        pick: () => this.select(shown),
+        openMenu: (e) => {
+          e.stopPropagation();
+          this.setState({ menu: i, more: false });
+        },
+      };
+    });
+
+    const menu = this.state.menu;
+    const [moreTitle, moreRows] = MORE[row];
+
+    return {
+      rail,
+      toolName: def.name,
+      toolIcon: def.icon,
+      isSelect: row === "select",
+      isWand: tool === "wand",
+      isCrop: row === "crop",
+      isMove: row === "move",
+      isPaint: row === "paint",
+      isFill: row === "fill",
+      isGradient: row === "gradient",
+      isShape: row === "shape",
+      isText: row === "text",
+      isPick: row === "pick",
+      isView: row === "view",
+      statusSelection: row === "select" ? "Selection: 812 × 604 px" : "Selection: none",
+      statusHint: def.name + " · " + def.key,
+      layersTab: this.state.tab === "layers",
+      assistantTab: this.state.tab === "assistant",
+      showLayers: () => this.setState({ tab: "layers", more: false }),
+      showAssistant: () => this.setState({ tab: "assistant", more: false }),
+      menuOpen: menu !== null,
+      menuTop: menu === null ? 0 : 74 + menu * 37,
+      menuItems:
+        menu === null
+          ? []
+          : GROUPS[menu].map((id) => ({
+              name: TOOLS[id].name,
+              icon: TOOLS[id].icon,
+              key: TOOLS[id].key,
+              planned: !!TOOLS[id].planned,
+              pick: (e) => {
+                e.stopPropagation();
+                this.select(id);
+              },
+            })),
+      moreOpen: this.state.more,
+      moreTitle,
+      moreItems: moreRows.map(([label, value]) => ({ label, value })),
+      toggleMore: () => this.setState((s) => ({ more: !s.more, menu: null })),
+      closeAll: () => this.setState({ menu: null, more: false }),
+    };
+  }
+}
+
+</script>
+</body>
+</html>
