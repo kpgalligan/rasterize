@@ -769,6 +769,33 @@ pub unsafe extern "C" fn rz_doc_transform_layer(
     unsafe { doc_op(doc, |d| d.transform_layer(idx, m, filter_from_c(filter)?)) }
 }
 
+/// Maps layer `idx`'s rect corner-for-corner onto a destination quad: eight
+/// doubles, the canvas points of the source rect's TL, TR, BR, BL corners.
+/// A parallelogram quad delegates to the affine `transform_layer`, exact
+/// fast paths included. NULL for a NULL doc/quad, a non-finite coordinate,
+/// a concave/self-intersecting/collapsed quad, an unknown filter, or a
+/// destination extent that is empty, outside i32 or over the pixel budget.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `quad`
+/// must be NULL or a valid pointer to at least eight readable doubles.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_perspective_layer(
+    doc: *const RzDocument,
+    idx: usize,
+    quad: *const c_double,
+    filter: c_int,
+) -> *mut RzDocument {
+    if quad.is_null() {
+        return ptr::null_mut();
+    }
+    // The element count is fixed by the contract (eight), never a caller-
+    // supplied length, so the slice is bounded before anything reads it.
+    let q = unsafe { std::slice::from_raw_parts(quad, 8) };
+    let q = [q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7]];
+    unsafe { doc_op(doc, |d| d.perspective_layer(idx, q, filter_from_c(filter)?)) }
+}
+
 // ------------------------------------------------------- selection & fill --
 
 /// Similar-color selection from the flattened composite: writes a

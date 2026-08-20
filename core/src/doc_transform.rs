@@ -30,7 +30,7 @@ use crate::doc::{Geometry, Layer, RzDocument, MAX_PIXELS};
 /// Smallest determinant magnitude that still counts as invertible. Anything
 /// smaller collapses the layer onto a line or a point, which cannot be
 /// inverse-mapped (and whose bounding box would be empty anyway).
-const MIN_DETERMINANT: f64 = 1e-9;
+pub(crate) const MIN_DETERMINANT: f64 = 1e-9;
 
 /// How far a value may sit from an exact 0, +/-1 or integer and still be
 /// treated as that exact value — used both to recognize the resampling-free
@@ -62,7 +62,7 @@ const MIN_DETERMINANT: f64 = 1e-9;
 /// It is also the tolerance the app's own identity check uses on a composed
 /// matrix's linear part (`LayerTransform.isIdentity`), so the two agree on
 /// what counts as "the same transform".
-const EXACT_EPSILON: f64 = 1e-9;
+pub(crate) const EXACT_EPSILON: f64 = 1e-9;
 
 /// True when `v` is within [`EXACT_EPSILON`] of `target`.
 fn near(v: f64, target: f64) -> bool {
@@ -203,7 +203,7 @@ fn exact_form(m: &Affine) -> Option<Exact> {
 /// support (including taps that fall outside the source, which contribute
 /// nothing) so edges fade toward transparency instead of smearing the border.
 #[derive(Clone, Copy)]
-enum Kernel {
+pub(crate) enum Kernel {
     /// Triangle filter, 2x2 taps.
     Bilinear,
     /// Catmull-Rom bicubic, 4x4 taps.
@@ -281,7 +281,7 @@ impl Kernel {
 /// Point sampling or one of the interpolating kernels, chosen by the caller's
 /// `RzResizeFilter`.
 #[derive(Clone, Copy)]
-enum Sampler {
+pub(crate) enum Sampler {
     /// Copies the covering source pixel's BYTES, straight alpha included.
     Nearest,
     Kernel(Kernel),
@@ -291,7 +291,7 @@ impl Sampler {
     /// Maps the shared resize-filter enum onto a transform sampler. The
     /// `image` crate's Gaussian filter has no `RzResizeFilter` value, so the
     /// FFI never asks for it; it is refused rather than quietly substituted.
-    fn from_filter(filter: FilterType) -> Option<Self> {
+    pub(crate) fn from_filter(filter: FilterType) -> Option<Self> {
         match filter {
             FilterType::Nearest => Some(Sampler::Nearest),
             FilterType::Triangle => Some(Sampler::Kernel(Kernel::Bilinear)),
@@ -303,16 +303,28 @@ impl Sampler {
 }
 
 /// Maps destination pixel indices to source-LAYER coordinates: the inverse
-/// matrix pre-composed with "destination pixel centre" on one side and the
+/// map pre-composed with "destination pixel centre" on one side and the
 /// layer's offset on the other, so `(u, v)` is a continuous coordinate in the
 /// source layer's own pixel space.
-struct SourceMap {
-    /// Per-destination-column step.
-    step: (f64, f64),
+///
+/// The map is projective in general — numerators `nu`, `nv` and denominator
+/// `nw`, each affine in the destination indices, with `(u, v) =
+/// (nu, nv) / nw` — which is what lets `doc_perspective` reuse the two
+/// resamplers below unchanged. An affine inverse is the `nw ≡ 1` special
+/// case: its steps are zero, its origin is exactly 1.0, and `x / 1.0 == x`
+/// in IEEE arithmetic, so the affine path's results are bit-identical to
+/// what the plain two-component map produced. A destination pixel whose
+/// denominator is not strictly positive lies on or beyond the horizon (the
+/// vanishing line, where the inverse map flips to the mirror image behind
+/// it) and samples as fully transparent; an affine map's constant 1 can
+/// never trip that.
+pub(crate) struct SourceMap {
+    /// Per-destination-column step of `(nu, nv, nw)`.
+    step: (f64, f64, f64),
     /// Per-destination-row step.
-    row: (f64, f64),
-    /// The source coordinate of destination pixel (0, 0).
-    origin: (f64, f64),
+    row: (f64, f64, f64),
+    /// The values at destination pixel (0, 0)'s centre.
+    origin: (f64, f64, f64),
 }
 
 impl SourceMap {
@@ -322,18 +334,58 @@ impl SourceMap {
             f64::from(dest_origin.1) + 0.5,
         );
         SourceMap {
-            step: (inv.a, inv.b),
-            row: (inv.c, inv.d),
-            origin: (u0 - f64::from(offset.0), v0 - f64::from(offset.1)),
+            step: (inv.a, inv.b, 0.0),
+            row: (inv.c, inv.d, 0.0),
+            origin: (u0 - f64::from(offset.0), v0 - f64::from(offset.1), 1.0),
         }
     }
 
-    fn row_start(&self, j: u32) -> (f64, f64) {
+    /// The projective twin of `new`: `g` is a row-major 3x3 INVERSE
+    /// homography in canvas space (any overall scale, but oriented so the
+    /// denominator is positive on the visible side of the horizon). The
+    /// layer offset is folded into the numerators as `nu - offset * nw`,
+    /// which keeps them affine in the indices and — with `nw ≡ 1` — is the
+    /// very subtraction the affine constructor performs.
+    pub(crate) fn projective(g: &[f64; 9], offset: (i32, i32), dest_origin: (i32, i32)) -> Self {
+        let (ox, oy) = (f64::from(offset.0), f64::from(offset.1));
+        let (x0, y0) = (
+            f64::from(dest_origin.0) + 0.5,
+            f64::from(dest_origin.1) + 0.5,
+        );
+        let at = |r: usize| g[3 * r] * x0 + g[3 * r + 1] * y0 + g[3 * r + 2];
+        let (nu0, nv0, nw0) = (at(0), at(1), at(2));
+        SourceMap {
+            step: (g[0] - ox * g[6], g[3] - oy * g[6], g[6]),
+            row: (g[1] - ox * g[7], g[4] - oy * g[7], g[7]),
+            origin: (nu0 - ox * nw0, nv0 - oy * nw0, nw0),
+        }
+    }
+
+    fn row_start(&self, j: u32) -> (f64, f64, f64) {
         (
             self.origin.0 + self.row.0 * f64::from(j),
             self.origin.1 + self.row.1 * f64::from(j),
+            self.origin.2 + self.row.2 * f64::from(j),
         )
     }
+}
+
+/// Coordinates a source lookup may proceed with. A destination pixel whose
+/// denominator is not strictly positive lies on or beyond the horizon and is
+/// transparent by definition; one whose coordinates are wilder than any
+/// layer can be (the pixel budget caps a side at 1e8) samples nothing
+/// anyway, and skipping it keeps the huge values out of the tap index
+/// arithmetic, whose `as`-saturation shields the CAST but whose subsequent
+/// small additions must not be handed an already-saturated i64. NaN (from a
+/// horizon-adjacent divide) fails the `<=` comparisons and is skipped too.
+/// An affine map keeps `nw ≡ 1`, so the horizon half never trips for it;
+/// the coordinate bound CAN trip on an accepted affine (a near-singular
+/// anisotropic scale, det just over 1e-9, throws inverse coordinates past
+/// 1e9), but every such coordinate sits at least an order of magnitude
+/// outside any possible source and sampled as transparent before this
+/// guard existed — affine results are unchanged either way.
+fn visible(u: f64, v: f64, nw: f64) -> bool {
+    nw > 0.0 && u.abs() <= 1e9 && v.abs() <= 1e9
 }
 
 /// Index of the source pixel covering `(u, v)`, or `None` outside the source.
@@ -354,26 +406,34 @@ fn quantize_coverage(acc: f32) -> u8 {
 
 /// Inverse-maps `src` onto the destination extent, interpolating in
 /// PREMULTIPLIED f32 and unpremultiplying on the way out. Destination pixels
-/// whose source neighbourhood is entirely outside `src` come out fully
-/// transparent (all four bytes zero).
-fn resample_rgba(
+/// whose source neighbourhood is entirely outside `src` — or that lie on or
+/// beyond `map`'s horizon — come out fully transparent (all four bytes
+/// zero). `dest` must be the extent `map` was built for.
+pub(crate) fn resample_rgba(
     src: &RgbaImage,
-    offset: (i32, i32),
     dest: (i32, i32, u32, u32),
-    inv: &Affine,
+    map: &SourceMap,
     sampler: Sampler,
 ) -> RgbaImage {
-    let (dx, dy, dw, dh) = dest;
+    let (_, _, dw, dh) = dest;
     let (sw, sh) = src.dimensions();
     let raw = src.as_raw();
-    let map = SourceMap::new(inv, offset, (dx, dy));
     let mut out = RgbaImage::new(dw, dh);
     let dst: &mut [u8] = &mut out;
     let mut wx = [0.0f32; MAX_TAPS];
     let mut wy = [0.0f32; MAX_TAPS];
     for j in 0..dh {
-        let (mut u, mut v) = map.row_start(j);
+        let (mut nu, mut nv, mut nw) = map.row_start(j);
         for i in 0..dw {
+            // For an affine map `nw` is exactly 1.0: the divide is the
+            // identity and the guard never trips.
+            let (u, v) = (nu / nw, nv / nw);
+            if !visible(u, v, nw) {
+                nu += map.step.0;
+                nv += map.step.1;
+                nw += map.step.2;
+                continue;
+            }
             let di = (j as usize * dw as usize + i as usize) * 4;
             match sampler {
                 Sampler::Nearest => {
@@ -425,8 +485,9 @@ fn resample_rgba(
                     }
                 }
             }
-            u += map.step.0;
-            v += map.step.1;
+            nu += map.step.0;
+            nv += map.step.1;
+            nw += map.step.2;
         }
     }
     out
@@ -435,26 +496,31 @@ fn resample_rgba(
 /// The single-channel twin of [`resample_rgba`], run over the same
 /// destination extent with the same map and kernel so the mask lands
 /// pixel-for-pixel on the transformed pixels. Coverage is straight, so there
-/// is nothing to premultiply; outside the source the mask is 0 (hidden), and
-/// the pixels there are transparent anyway.
-fn resample_mask(
+/// is nothing to premultiply; outside the source (and beyond the horizon)
+/// the mask is 0 (hidden), and the pixels there are transparent anyway.
+pub(crate) fn resample_mask(
     src: &GrayImage,
-    offset: (i32, i32),
     dest: (i32, i32, u32, u32),
-    inv: &Affine,
+    map: &SourceMap,
     sampler: Sampler,
 ) -> GrayImage {
-    let (dx, dy, dw, dh) = dest;
+    let (_, _, dw, dh) = dest;
     let (sw, sh) = src.dimensions();
     let raw = src.as_raw();
-    let map = SourceMap::new(inv, offset, (dx, dy));
     let mut out = GrayImage::new(dw, dh);
     let dst: &mut [u8] = &mut out;
     let mut wx = [0.0f32; MAX_TAPS];
     let mut wy = [0.0f32; MAX_TAPS];
     for j in 0..dh {
-        let (mut u, mut v) = map.row_start(j);
+        let (mut nu, mut nv, mut nw) = map.row_start(j);
         for i in 0..dw {
+            let (u, v) = (nu / nw, nv / nw);
+            if !visible(u, v, nw) {
+                nu += map.step.0;
+                nv += map.step.1;
+                nw += map.step.2;
+                continue;
+            }
             let di = j as usize * dw as usize + i as usize;
             match sampler {
                 Sampler::Nearest => {
@@ -485,8 +551,9 @@ fn resample_mask(
                     dst[di] = quantize_coverage(acc);
                 }
             }
-            u += map.step.0;
-            v += map.step.1;
+            nu += map.step.0;
+            nv += map.step.1;
+            nw += map.step.2;
         }
     }
     out
@@ -505,12 +572,18 @@ fn transformed_bounds(layer: &Layer, m: &Affine) -> Option<(i32, i32, u32, u32)>
     let (lw, lh) = layer.pixels.dimensions();
     let (x0, y0) = (f64::from(layer.offset.0), f64::from(layer.offset.1));
     let (x1, y1) = (x0 + f64::from(lw), y0 + f64::from(lh));
-    let corners = [
+    bounds_of_corners([
         m.apply(x0, y0),
         m.apply(x1, y0),
         m.apply(x0, y1),
         m.apply(x1, y1),
-    ];
+    ])
+}
+
+/// The extent shared by both transform pipelines: `transformed_bounds` feeds
+/// it the affinely mapped corners, `doc_perspective` the destination quad
+/// itself (which IS the corners' image, so no mapping residue re-enters).
+pub(crate) fn bounds_of_corners(corners: [(f64, f64); 4]) -> Option<(i32, i32, u32, u32)> {
     let mut min = (f64::INFINITY, f64::INFINITY);
     let mut max = (f64::NEG_INFINITY, f64::NEG_INFINITY);
     for (x, y) in corners {
@@ -586,18 +659,16 @@ impl RzDocument {
                 Arc::new(geom.apply(&*layer.pixels)),
                 layer.mask.as_ref().map(|m| Arc::new(geom.apply(&**m))),
             ),
-            _ => (
-                Arc::new(resample_rgba(
-                    &layer.pixels,
-                    layer.offset,
-                    dest,
-                    &inverse,
-                    sampler,
-                )),
-                layer.mask.as_ref().map(|mask| {
-                    Arc::new(resample_mask(mask, layer.offset, dest, &inverse, sampler))
-                }),
-            ),
+            _ => {
+                let map = SourceMap::new(&inverse, layer.offset, (dx, dy));
+                (
+                    Arc::new(resample_rgba(&layer.pixels, dest, &map, sampler)),
+                    layer
+                        .mask
+                        .as_ref()
+                        .map(|mask| Arc::new(resample_mask(mask, dest, &map, sampler))),
+                )
+            }
         };
 
         let mut doc = self.clone();

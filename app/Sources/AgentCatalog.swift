@@ -212,6 +212,45 @@ extension AgentServer {
                     "document_id": docID,
                 ]),
             tool(
+                "distort_layer",
+                "Perspective/distort of ONE layer: maps the layer's rect corner-for-corner "
+                    + "onto four explicit canvas points — the same projective pipeline as "
+                    + "⌘-dragging a Free Transform corner in the app. Pass the destinations "
+                    + "of the rect's top-left, top-right, bottom-right and bottom-left "
+                    + "corners; they must form a convex quad (a concave or self-crossing "
+                    + "arrangement folds the mapping and is refused). A parallelogram is "
+                    + "committed as the exact affine it is — whole-pixel moves stay "
+                    + "lossless. The layer is resampled once into the corners' "
+                    + "outward-rounded bounding box, so offset AND size change; a layer "
+                    + "mask rides along identically, and other layers and the canvas are "
+                    + "untouched. Like transform_layer, this rewrites pixels, so a "
+                    + "re-editable TEXT layer drops its description (undo restores it). "
+                    + "The result reports the layer's new bounds for verification.",
+                [
+                    "layer": index,
+                    "corners": [
+                        "type": "array",
+                        "description": "Four [x, y] canvas points, the destinations of the "
+                            + "layer rect's TL, TR, BR and BL corners in that order, e.g. "
+                            + "[[0, 0], [80, 10], [75, 60], [5, 50]]. Pixels are y-down: "
+                            + "the canvas origin is its top-left.",
+                        "items": [
+                            "type": "array",
+                            "items": ["type": "number"],
+                            "minItems": 2, "maxItems": 2,
+                        ],
+                        "minItems": 4, "maxItems": 4,
+                    ],
+                    "sampler": [
+                        "type": "string",
+                        "enum": ["nearest", "bilinear", "bicubic", "lanczos"],
+                        "description": "Resampling filter, default bicubic (Catmull-Rom). "
+                            + "Perspective compresses detail toward the quad's narrow side, "
+                            + "where bicubic or lanczos hold up best.",
+                    ],
+                    "document_id": docID,
+                ], required: ["corners"]),
+            tool(
                 "add_layer_mask",
                 "Gives a layer a mask: a grayscale coverage channel that gates the layer's "
                     + "alpha without touching its pixels (white shows, black hides, grays are "

@@ -401,6 +401,40 @@ RzDocument *rz_doc_transform_layer(const RzDocument *doc, size_t idx,
                                    const double *affine,
                                    RzResizeFilter sampler);
 
+/* Perspective (projective) transform of one layer: maps the layer's rect
+ * corner-for-corner onto a destination QUAD. `quad` points to eight doubles
+ * — the canvas coordinates the source rect's corners land on, in the
+ * source rect's own corner order top-left, top-right, bottom-right,
+ * bottom-left (x then y for each, clockwise on the y-down canvas). The
+ * homography realizing the mapping is solved inside the core, so no 3x3
+ * element-order convention crosses this boundary.
+ *
+ * Everything rz_doc_transform_layer documents carries over: the new
+ * offset/size are the quad corners' outward-rounded bounding box (with the
+ * same 1e-9 integer snapping), pixels are inverse-mapped and interpolated in
+ * premultiplied f32 with the same samplers, samples outside the source are
+ * transparent, a layer mask rides along with the same map/extent/kernel, and
+ * meta plus every other layer property survive. Extent pixels outside the
+ * quad itself come out fully transparent. Perspective compresses sampling
+ * density toward the quad's narrow side, so some aliasing there under
+ * NEAREST/BILINEAR is inherent, not a defect.
+ *
+ * A quad that is a PARALLELOGRAM within 1e-9 canvas px (opposite sides
+ * equal; the fourth corner implied by the other three) is an affine
+ * transform and is delegated to rz_doc_transform_layer — an integer
+ * translation handed over as corners is still a lossless pixel copy.
+ *
+ * NULL if doc or quad is NULL, idx is out of range, any coordinate is not
+ * finite, the quad is concave or self-intersecting (the mapping would fold
+ * through the horizon inside the layer; a corner's homogeneous w must stay
+ * >= 1e-6 with w = 1 pinned at the rect's top-left), the quad collapses
+ * toward zero area, the sampler value is unknown, or the destination extent
+ * is empty, falls outside the int32 offset range, or exceeds 100000000
+ * pixels. */
+RzDocument *rz_doc_perspective_layer(const RzDocument *doc, size_t idx,
+                                     const double *quad,
+                                     RzResizeFilter sampler);
+
 /* ------------------------------------------------------------------------ */
 /* Additional filters (pure RzImage operations, NULL on invalid args)       */
 /* ------------------------------------------------------------------------ */

@@ -1789,6 +1789,11 @@ fn null_safety_sweep() {
         let identity = [1.0f64, 0.0, 0.0, 1.0, 0.0, 0.0];
         assert!(rz_doc_transform_layer(null_doc, 0, identity.as_ptr(), FILTER_NEAREST).is_null());
         assert!(rz_doc_transform_layer(null_doc, 0, ptr::null(), FILTER_NEAREST).is_null());
+        let unit_quad = [0.0f64, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+        assert!(
+            rz_doc_perspective_layer(null_doc, 0, unit_quad.as_ptr(), FILTER_NEAREST).is_null()
+        );
+        assert!(rz_doc_perspective_layer(null_doc, 0, ptr::null(), FILTER_NEAREST).is_null());
     }
 
     // NULL name / NULL image arguments on a valid doc.

@@ -45,6 +45,22 @@ enum TransformHandle: CaseIterable {
     /// The four corners drive BOTH axes; the edge midpoints drive one.
     var isCorner: Bool { unit.x != 0 && unit.y != 0 }
 
+    /// The warped-quad corner indices this handle derives from — one for a
+    /// corner handle, the edge's two for a midpoint — in the quad order
+    /// TL, TR, BR, BL.
+    var quadCorners: [Int] {
+        switch self {
+        case .topLeft: return [0]
+        case .top: return [0, 1]
+        case .topRight: return [1]
+        case .right: return [1, 2]
+        case .bottomRight: return [2]
+        case .bottom: return [2, 3]
+        case .bottomLeft: return [3]
+        case .left: return [3, 0]
+        }
+    }
+
     /// Where the handle sits on `rect`, in the rect's own (canvas) space.
     func point(in rect: CGRect) -> CGPoint {
         CGPoint(
@@ -77,12 +93,29 @@ struct LayerTransform {
     var angle: CGFloat = 0
     var scaleX: CGFloat = 1
     var scaleY: CGFloat = 1
+    /// Per-corner displacements in the layer's own SOURCE space, in quad
+    /// order TL, TR, BR, BL — the distort/perspective stage. A warped
+    /// corner is `matrix.apply(rectCorner + offset)`: the offsets ride
+    /// INSIDE the affine, so moving, rotating and scaling carry a warped
+    /// box rigidly along, and the affine parameters stay exactly what the
+    /// options-bar numerics bind to.
+    var cornerOffsets: [CGVector] = [.zero, .zero, .zero, .zero]
 
     /// Scale magnitudes are clamped away from zero (a zero scale is a
     /// singular matrix, which the core refuses) and away from absurd
     /// enlargements (which would blow past the core's pixel ceiling).
     static let minScaleMagnitude: CGFloat = 0.001
     static let maxScaleMagnitude: CGFloat = 100
+
+    /// The core's extent ceiling (`MAX_PIXELS`, restated in the header) —
+    /// the one Swift home for the number, mirrored by the agent's
+    /// pre-checks and the distort drag clamp.
+    static let maxTransformPixels: Double = 100_000_000
+
+    /// Below anything a drag can mean (a millionth of a pixel), so a
+    /// corner pulled exactly back onto its start commits as the plain
+    /// affine it is.
+    static let cornerEpsilon: CGFloat = 1e-6
 
     init(pivot: CGPoint) {
         self.pivot = pivot
@@ -111,9 +144,18 @@ struct LayerTransform {
         set { angle = Self.normalized(CGFloat(newValue) * .pi / 180) }
     }
 
-    /// True when the composed matrix is the identity: nothing moved, so a
-    /// commit must register no edit at all.
+    /// True when any corner is displaced by more than [`cornerEpsilon`] —
+    /// the commit must then take the perspective path.
+    var hasCornerOffsets: Bool {
+        cornerOffsets.contains {
+            abs($0.dx) > Self.cornerEpsilon || abs($0.dy) > Self.cornerEpsilon
+        }
+    }
+
+    /// True when the composed matrix is the identity and no corner is
+    /// displaced: nothing moved, so a commit must register no edit at all.
     var isIdentity: Bool {
+        guard !hasCornerOffsets else { return false }
         let m = matrix
         return abs(m.a - 1) < 1e-9 && abs(m.b) < 1e-9 && abs(m.c) < 1e-9
             && abs(m.d - 1) < 1e-9 && abs(m.tx) < 1e-6 && abs(m.ty) < 1e-6
@@ -124,6 +166,7 @@ struct LayerTransform {
     var isFinite: Bool {
         pivot.x.isFinite && pivot.y.isFinite && translation.dx.isFinite
             && translation.dy.isFinite && angle.isFinite && scaleX.isFinite && scaleY.isFinite
+            && cornerOffsets.allSatisfy { $0.dx.isFinite && $0.dy.isFinite }
     }
 
     // MARK: - Gestures (parameters in, parameters out)
@@ -187,8 +230,13 @@ struct LayerTransform {
         let dy = point.y - origin.y
         let local = CGPoint(x: dx * cosine + dy * sine, y: -dx * sine + dy * cosine)
 
-        let handlePoint = handle.point(in: rect)
-        let anchorPoint = handle.opposite.point(in: rect)
+        // Offset-adjusted source points: on a warped box the VISIBLE handle
+        // is the mapped, corner-offset point, and solving against it keeps
+        // that handle under the pointer (and the visible anchor pinned)
+        // instead of jumping by matrix·offset. Zero offsets reduce these to
+        // the plain rect corners/midpoints.
+        let handlePoint = start.sourceHandlePoint(handle, of: rect)
+        let anchorPoint = start.sourceHandlePoint(handle.opposite, of: rect)
         // Source-space offsets: of the handle from the pivot, of the anchor
         // from the pivot, and of the handle from the anchor.
         let fromPivot = CGPoint(
@@ -258,6 +306,136 @@ struct LayerTransform {
         return result
     }
 
+    /// `start` with `corner` (a quad index, TL 0 … BL 3) dragged so its
+    /// warped position lands on `point`. The pointer is pulled back through
+    /// the affine — always invertible, `clampScale` keeps scales off zero —
+    /// into the source space the offsets live in. A drag that would make
+    /// the quad non-convex (the fold the core refuses), nearly collapse
+    /// it, or blow the destination extent past the core's caps sticks at
+    /// `start` instead: like `clampScale`, the session must never hold a
+    /// transform the commit would refuse.
+    static func distorting(
+        _ start: LayerTransform, corner: Int, to point: CGPoint, in rect: CGRect
+    ) -> LayerTransform {
+        guard (0..<4).contains(corner), point.x.isFinite, point.y.isFinite else { return start }
+        let source = point.applying(start.matrix.inverted())
+        let base = Self.rectCorners(rect)[corner]
+        var result = start
+        result.cornerOffsets[corner] = CGVector(dx: source.x - base.x, dy: source.y - base.y)
+        let quad = result.warpedQuad(of: rect)
+        guard result.isFinite, Self.isUsableQuad(quad),
+              Self.extentIsCommittable(Self.boundingExtent(of: quad))
+        else { return start }
+        return result
+    }
+
+    /// `rect`'s corners in quad order (TL, TR, BR, BL on the y-down
+    /// canvas) — the order `CGAffineTransform.quad(of:)`, `cornerOffsets`
+    /// and the core's `rz_doc_perspective_layer` all share.
+    static func rectCorners(_ rect: CGRect) -> [CGPoint] {
+        [
+            CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY),
+        ]
+    }
+
+    /// The four canvas corners the layer's rect lands on: rect corner plus
+    /// its source-space offset, through the matrix. With zero offsets this
+    /// is `matrix.quad(of: rect)`.
+    func warpedQuad(of rect: CGRect) -> [CGPoint] {
+        let m = matrix
+        return zip(Self.rectCorners(rect), cornerOffsets).map {
+            CGPoint(x: $0.x + $1.dx, y: $0.y + $1.dy).applying(m)
+        }
+    }
+
+    /// Where `handle` sits in SOURCE space with the corner offsets applied:
+    /// a corner plus its offset, an edge handle the average of its two.
+    /// With zero offsets this is exactly `handle.point(in: rect)`. It is
+    /// the source-space preimage of `warpedHandlePoint`, and what `scaling`
+    /// solves against so a drag keeps the VISIBLE handle under the pointer.
+    func sourceHandlePoint(_ handle: TransformHandle, of rect: CGRect) -> CGPoint {
+        let corners = Self.rectCorners(rect)
+        let indices = handle.quadCorners
+        let sum = indices.reduce(CGPoint.zero) {
+            CGPoint(
+                x: $0.x + corners[$1].x + cornerOffsets[$1].dx,
+                y: $0.y + corners[$1].y + cornerOffsets[$1].dy)
+        }
+        return CGPoint(
+            x: sum.x / CGFloat(indices.count), y: sum.y / CGFloat(indices.count))
+    }
+
+    /// Where `handle` sits on the warped box — `sourceHandlePoint` through
+    /// the matrix. An edge handle lands on the average of its two warped
+    /// corners (affine maps commute with averaging), which for a
+    /// parallelogram IS the mapped edge midpoint, so unwarped sessions hit
+    /// exactly where they always did, and warped ones hit where the box
+    /// drawing puts the squares.
+    func warpedHandlePoint(_ handle: TransformHandle, of rect: CGRect) -> CGPoint {
+        sourceHandlePoint(handle, of: rect).applying(matrix)
+    }
+
+    /// The extent the perspective commit will produce — the warped twin of
+    /// `destinationExtent(of:)`, rounded exactly the core's way.
+    func warpedDestinationExtent(of rect: CGRect) -> CGRect {
+        Self.boundingExtent(of: warpedQuad(of: rect))
+    }
+
+    /// True when four canvas points form a strictly convex quad (either
+    /// winding): every consecutive-edge cross product carries one sign,
+    /// above a small area floor. Convexity is the core's fold rule — a
+    /// concave or self-intersecting quad is exactly where a corner's
+    /// homogeneous w crosses zero — held a hair conservatively so a live
+    /// drag stops just before the core would refuse.
+    static func isUsableQuad(_ corners: [CGPoint]) -> Bool {
+        guard corners.count == 4 else { return false }
+        var sign: CGFloat = 0
+        for i in 0..<4 {
+            let a = corners[i]
+            let b = corners[(i + 1) % 4]
+            let c = corners[(i + 2) % 4]
+            let cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
+            guard cross.isFinite, abs(cross) > 1e-3 else { return false }
+            let s: CGFloat = cross > 0 ? 1 : -1
+            if sign == 0 {
+                sign = s
+            } else if s != sign {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// True when `extent` is one the core will accept: at least a pixel on
+    /// each side, offsets inside Int32, area within [`maxTransformPixels`].
+    static func extentIsCommittable(_ extent: CGRect) -> Bool {
+        extent.width >= 1 && extent.height >= 1
+            && extent.minX >= CGFloat(Int32.min) && extent.minY >= CGFloat(Int32.min)
+            && extent.maxX <= CGFloat(Int32.max) && extent.maxY <= CGFloat(Int32.max)
+            && Double(extent.width) * Double(extent.height) <= Self.maxTransformPixels
+    }
+
+    /// The outward-rounded bounding box of `points`, rounded exactly the
+    /// way the core rounds a destination extent — the shared tail of
+    /// `destinationExtent(of:)` and `warpedDestinationExtent(of:)`.
+    static func boundingExtent(of points: [CGPoint]) -> CGRect {
+        let xs = points.map { $0.x }
+        let ys = points.map { $0.y }
+        guard let minX = xs.min(), let maxX = xs.max(),
+              let minY = ys.min(), let maxY = ys.max(),
+              minX.isFinite, maxX.isFinite, minY.isFinite, maxY.isFinite
+        else { return .zero }
+        let x = minX.rounded(.down)
+        let y = minY.rounded(.down)
+        return CGRect(
+            x: x, y: y,
+            width: max(maxX.rounded(.up) - x, 0),
+            height: max(maxY.rounded(.up) - y, 0))
+    }
+
     /// Keeps a scale usable: finite, non-zero (a singular matrix is refused
     /// by the core) and within the magnitude the extent cap allows.
     static func clampScale(_ value: CGFloat) -> CGFloat {
@@ -293,18 +471,6 @@ extension CGAffineTransform {
     /// exactly the way the core rounds it, so the options bar can show the
     /// resulting pixel size without asking the core.
     func destinationExtent(of rect: CGRect) -> CGRect {
-        let points = quad(of: rect)
-        let xs = points.map { $0.x }
-        let ys = points.map { $0.y }
-        guard let minX = xs.min(), let maxX = xs.max(),
-              let minY = ys.min(), let maxY = ys.max(),
-              minX.isFinite, maxX.isFinite, minY.isFinite, maxY.isFinite
-        else { return .zero }
-        let x = minX.rounded(.down)
-        let y = minY.rounded(.down)
-        return CGRect(
-            x: x, y: y,
-            width: max(maxX.rounded(.up) - x, 0),
-            height: max(maxY.rounded(.up) - y, 0))
+        LayerTransform.boundingExtent(of: quad(of: rect))
     }
 }

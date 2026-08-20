@@ -1211,6 +1211,7 @@ final class EditorViewController: NSViewController {
         case move(start: LayerTransform, grab: CGPoint)
         case scale(handle: TransformHandle, start: LayerTransform)
         case rotate(start: LayerTransform, grab: CGPoint)
+        case distort(corner: Int, start: LayerTransform)
     }
 
     /// Samplers offered for the commit-time resample, in popup order.
@@ -1321,18 +1322,18 @@ final class EditorViewController: NSViewController {
             canvas.transformPreview = nil
             return
         }
-        let matrix = session.transform.matrix
         canvas.transformPreview = ImageCanvasView.TransformPreview(
             below: session.below,
             above: session.above,
             layer: session.layerImage,
             mask: session.maskImage,
             sourceRect: session.sourceRect,
-            matrix: matrix,
+            matrix: session.transform.matrix,
             opacity: session.opacity,
-            quad: matrix.quad(of: session.sourceRect),
+            quad: session.transform.warpedQuad(of: session.sourceRect),
             pivot: session.transform.pivotInCanvas,
-            interpolate: session.sampler != RZ_FILTER_NEAREST)
+            interpolate: session.sampler != RZ_FILTER_NEAREST,
+            warped: session.transform.hasCornerOffsets)
     }
 
     /// The parameters → fields half of the binding (the fields' actions are
@@ -1362,20 +1363,26 @@ final class EditorViewController: NSViewController {
 
     // MARK: Free Transform gestures
 
-    /// What a press at `point` grabs: a handle (scale), the ring just
+    /// What a press at `point` grabs: a handle (⌘ on a corner pulls that
+    /// corner alone — distort/perspective — otherwise scale), the ring just
     /// outside a corner (rotate), or the body (move). A press beyond all of
     /// them does nothing — clicking away must not silently commit.
-    private func transformDrag(at point: CGPoint, session: TransformSession) -> TransformDrag? {
+    private func transformDrag(
+        at point: CGPoint, session: TransformSession, modifiers: NSEvent.ModifierFlags
+    ) -> TransformDrag? {
         let scale = canvas.magnification
-        let matrix = session.transform.matrix
         let slop = ImageCanvasView.transformHandleSize / scale
         for handle in TransformHandle.allCases {
-            let world = handle.point(in: session.sourceRect).applying(matrix)
+            let world = session.transform.warpedHandlePoint(handle, of: session.sourceRect)
             if abs(point.x - world.x) <= slop, abs(point.y - world.y) <= slop {
+                if modifiers.contains(.command), handle.isCorner,
+                   let corner = handle.quadCorners.first {
+                    return .distort(corner: corner, start: session.transform)
+                }
                 return .scale(handle: handle, start: session.transform)
             }
         }
-        let corners = matrix.quad(of: session.sourceRect)
+        let corners = session.transform.warpedQuad(of: session.sourceRect)
         guard corners.count == 4 else { return nil }
         let box = NSBezierPath()
         box.move(to: corners[0])
@@ -1395,7 +1402,7 @@ final class EditorViewController: NSViewController {
 
     private func transformMouseDown(_ point: CGPoint, _ modifiers: NSEvent.ModifierFlags) {
         guard let session = transformSession else { return }
-        transformSession?.drag = transformDrag(at: point, session: session)
+        transformSession?.drag = transformDrag(at: point, session: session, modifiers: modifiers)
     }
 
     private func transformMouseDragged(_ point: CGPoint, _ modifiers: NSEvent.ModifierFlags) {
@@ -1415,6 +1422,9 @@ final class EditorViewController: NSViewController {
         case let .rotate(start, grab):
             updated = LayerTransform.rotating(
                 start, from: grab, to: point, snap: proportional)
+        case let .distort(corner, start):
+            updated = LayerTransform.distorting(
+                start, corner: corner, to: point, in: session.sourceRect)
         }
         guard updated.isFinite else { return }
         transformSession?.transform = updated
@@ -1524,13 +1534,18 @@ final class EditorViewController: NSViewController {
         let describesSource = document.layerDescribesSource(idx)
         if describesSource, !document.confirmRasterize(layer: idx) { return false }
         let matrix = session.transform.matrix
+        // A distorted box commits through the perspective op with its warped
+        // corners; a plain affine keeps the matrix path and its lossless
+        // exact forms.
+        let quad = session.transform.hasCornerOffsets
+            ? session.transform.warpedQuad(of: session.sourceRect) : nil
         let sampler = session.sampler
         let before = document.doc
         isCommittingTransform = true
         document.applyEdit("Transform Layer") { doc in
-            guard let transformed = doc.transformingLayer(idx, matrix, sampler: sampler) else {
-                return nil
-            }
+            let transformed = quad.map { doc.perspectiveLayer(idx, quad: $0, sampler: sampler) }
+                ?? doc.transformingLayer(idx, matrix, sampler: sampler)
+            guard let transformed else { return nil }
             guard describesSource else { return transformed }
             return transformed.withLayerMeta(idx, nil) ?? transformed
         }

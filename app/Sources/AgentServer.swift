@@ -33,7 +33,7 @@ final class AgentServer {
     /// whose pixels are the RENDERING of a description — a text layer's
     /// string, a live photo layer's frame — stops being that the moment
     /// something paints over them.
-    private enum DroppedDescription: String {
+    enum DroppedDescription: String {
         case text
         case livePhoto = "live photo"
     }
@@ -135,6 +135,7 @@ final class AgentServer {
         "reorder_layer": reorderLayer,
         "set_layer_properties": setLayerProperties,
         "transform_layer": transformLayer,
+        "distort_layer": { $0.distortLayer },
         // Layer masks and clipping
         "add_layer_mask": addLayerMask,
         "remove_layer_mask": removeLayerMask,
@@ -504,7 +505,7 @@ final class AgentServer {
     /// when it writes somewhere else (a layer MASK), which leaves a
     /// description valid. Returns the kind of description that was dropped.
     @discardableResult
-    private func performPixelEdit(
+    func performPixelEdit(
         _ document: ImageDocument, _ actionName: String, pixelLayer: Int?,
         _ transform: (RasterDocument) -> RasterDocument?
     ) throws -> DroppedDescription? {
@@ -530,7 +531,7 @@ final class AgentServer {
 
     /// A pixel-edit result, with the rasterization report appended when the
     /// edit dropped a layer's description.
-    private func pixelEditResult(
+    func pixelEditResult(
         _ fields: [String: Any], layer: Int, rasterized: DroppedDescription?
     ) throws -> String {
         var result = fields
@@ -761,7 +762,7 @@ final class AgentServer {
     /// Transform options bar offers ("bicubic" IS Catmull-Rom). image_size's
     /// spellings are accepted too, so one vocabulary covers both tools; the
     /// canonical name is what the result echoes back.
-    private static let transformSamplers: [String: (name: String, filter: RzResizeFilter)] = [
+    static let transformSamplers: [String: (name: String, filter: RzResizeFilter)] = [
         "nearest": ("nearest", RZ_FILTER_NEAREST),
         "bilinear": ("bilinear", RZ_FILTER_BILINEAR),
         "bicubic": ("bicubic", RZ_FILTER_CATMULL_ROM),
@@ -772,8 +773,9 @@ final class AgentServer {
 
     /// The core's ceiling on one layer's pixels (doc.rs MAX_PIXELS), mirrored
     /// so an oversized request is refused with a message that names the cap
-    /// instead of a bare NULL from the core.
-    private static let maxLayerPixels = 100_000_000.0
+    /// instead of a bare NULL from the core. The number itself lives with
+    /// the transform model, which shares it with the distort drag clamp.
+    static let maxLayerPixels = LayerTransform.maxTransformPixels
 
     /// A finite number argument; nil when the caller omitted it.
     private func finiteArg(_ a: [String: Any], _ key: String) throws -> Double? {
@@ -804,7 +806,7 @@ final class AgentServer {
     /// the 0.001 floor. Anything smaller than half a hundredth keeps two
     /// significant digits instead, so the echo stays tidy but never claims a
     /// value the call would have rejected.
-    private static func transformNumber(_ value: Double) -> Double {
+    static func transformNumber(_ value: Double) -> Double {
         guard value.isFinite, value != 0 else { return 0 }
         let rounded = (value * 100).rounded() / 100
         if rounded != 0 { return rounded }
@@ -1260,7 +1262,7 @@ final class AgentServer {
 
     /// The layer a painting call targets ("layer" arg, default active) —
     /// same convention as apply_filter.
-    private func paintLayerIndex(_ a: [String: Any], _ document: ImageDocument) throws -> Int {
+    func paintLayerIndex(_ a: [String: Any], _ document: ImageDocument) throws -> Int {
         let index = intArg(a, "layer") ?? document.activeLayerIndex
         let count = document.doc?.layerCount ?? 0
         guard index >= 0, index < count else {

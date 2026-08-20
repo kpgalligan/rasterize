@@ -729,6 +729,25 @@ final class RasterDocument {
         }
     }
 
+    /// Perspective transform of ONE layer: maps its canvas rect
+    /// corner-for-corner onto `quad` — four canvas points in the source
+    /// rect's corner order TL, TR, BR, BL. The homography is solved in the
+    /// core; a parallelogram quad delegates to the affine path, exact fast
+    /// paths included, and everything `transformingLayer` preserves
+    /// survives here too. nil for a non-finite coordinate, a concave,
+    /// self-intersecting or collapsed quad, an out-of-range index, or an
+    /// extent the core caps.
+    func perspectiveLayer(
+        _ idx: Int, quad: [CGPoint], sampler: RzResizeFilter
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), quad.count == 4 else { return nil }
+        let corners: [Double] = quad.flatMap { [Double($0.x), Double($0.y)] }
+        guard corners.allSatisfy({ $0.isFinite }) else { return nil }
+        return corners.withUnsafeBufferPointer { buffer in
+            wrap(rz_doc_perspective_layer(ptr, idx, buffer.baseAddress, sampler))
+        }
+    }
+
     /// Writes the native RZDC format (all layers preserved).
     func saveNative(to url: URL) throws {
         var err: UnsafeMutablePointer<CChar>? = nil

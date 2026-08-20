@@ -93,6 +93,10 @@ final class ImageCanvasView: NSView {
         /// False for the nearest-neighbour sampler, so the preview shows the
         /// hard pixel edges the commit will produce.
         var interpolate: Bool
+        /// True when corner offsets are live: `quad` is then no longer the
+        /// affine image of `sourceRect`, and the layer previews through the
+        /// Core Image warp instead of the CTM concat.
+        var warped: Bool
     }
 
     /// Non-nil for the duration of a Free Transform session; the canvas then
@@ -103,6 +107,11 @@ final class ImageCanvasView: NSView {
             needsDisplay = true
             if (transformPreview == nil) != (oldValue == nil) {
                 window?.invalidateCursorRects(for: self)
+            }
+            // The warp preview's mask bake is keyed to this session's
+            // images; ending the preview is what makes them garbage.
+            if transformPreview == nil {
+                PerspectivePreview.invalidate()
             }
         }
     }
@@ -511,7 +520,12 @@ final class ImageCanvasView: NSView {
         if let below = preview.below {
             drawFlipped(below, in: context)
         }
-        if let layer = preview.layer, preview.sourceRect.width > 0, preview.sourceRect.height > 0 {
+        if preview.warped {
+            // A distorted quad is beyond the CTM (affine-only): the Core
+            // Image warp in PerspectivePreview draws the layer instead.
+            PerspectivePreview.drawLayer(preview, in: context, visible: bounds)
+        } else if let layer = preview.layer, preview.sourceRect.width > 0,
+                  preview.sourceRect.height > 0 {
             context.saveGState()
             context.interpolationQuality = preview.interpolate ? .high : .none
             context.setAlpha(preview.opacity)

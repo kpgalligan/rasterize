@@ -69,7 +69,13 @@ decoding, encoding, and manipulation.
   preview and the whole session commits as **one undo step** — the layer is
   resampled exactly once, in premultiplied alpha so rotated edges stay clean
   instead of fringing dark. A layer mask transforms with its layer, and whole-
-  pixel moves and mirrors copy pixels losslessly. Text layers ask to rasterize
+  pixel moves and mirrors copy pixels losslessly. **⌘-drag a corner** to pull
+  that corner alone — distort/perspective: the box becomes an arbitrary convex
+  quad (drags that would fold it simply stop), the live preview warps with it,
+  and the commit resamples through a true projective homography, mask riding
+  along; rotating, scaling and moving carry a warped box rigidly, and a box
+  whose corners are pulled back to a parallelogram commits as the exact affine
+  it is, lossless fast paths included. Text layers ask to rasterize
   first (as any destructive edit does). Selections are not transformable yet —
   a session always transforms the whole layer and hides the marquee while it
   runs
@@ -207,7 +213,7 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 46 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 47 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG, and `sample_color` reads single pixels off the flattened
 composite — the eyedropper), layer operations, blend modes, layer masks (add
@@ -218,8 +224,10 @@ adjustment layers (`add_adjustment_layer` / `edit_adjustment_layer` over all
 nine ops with the same mask-on-creation rule as the UI's; `get_document`
 reports each one's op and params), filters, geometry —
 including `transform_layer`, the Free Transform pipeline with named parameters
-(rotate in degrees, positive is clockwise; scale, translate, pivot, sampler),
-reporting the layer's new bounds — brush and eraser strokes (polyline points
+(rotate in degrees, positive is clockwise; scale, translate, pivot, sampler)
+and `distort_layer`, its perspective twin (four explicit corner destinations,
+the ⌘-corner drag as a tool), both reporting the layer's new bounds — brush
+and eraser strokes (polyline points
 with size/color/opacity, and a
 `target` choosing the layer's pixels or its mask), text — `add_text_layer`
 and `edit_text_layer` for re-editable text layers with an `alignment`
