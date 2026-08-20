@@ -113,18 +113,22 @@ final class AssistantPanelViewController: NSViewController {
         root.addSubview(keyBox)
 
         NSLayoutConstraint.activate([
-            tabs.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
-            tabs.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            // The tab row runs edge to edge; the clear button (and spinner)
+            // sit in a slim strip below it, over the transcript's top edge.
+            tabs.topAnchor.constraint(equalTo: root.topAnchor),
+            tabs.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            tabs.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            tabs.heightAnchor.constraint(equalToConstant: DS.tabHeight),
 
-            clearButton.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
+            clearButton.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 4),
             clearButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
 
-            transcriptScroll.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 10),
+            transcriptScroll.topAnchor.constraint(equalTo: clearButton.bottomAnchor, constant: 4),
             transcriptScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             transcriptScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             transcriptScroll.bottomAnchor.constraint(equalTo: inputRow.topAnchor, constant: -10),
 
-            spinner.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
+            spinner.centerYAnchor.constraint(equalTo: clearButton.centerYAnchor),
             spinner.trailingAnchor.constraint(equalTo: clearButton.leadingAnchor, constant: -8),
 
             inputRow.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),

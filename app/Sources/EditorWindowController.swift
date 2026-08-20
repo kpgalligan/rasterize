@@ -12,11 +12,12 @@ final class EditorWindowController: NSWindowController {
         window.titlebarAppearsTransparent = false
 
         // Initial content size: canvas size plus the editor chrome (layers
-        // panel 304 + separator, toolbar 58, status bar 30), clamped to 80%
-        // of the main screen's visible frame, minimum 560x360.
+        // panel 304 + separator, tool rail 48, options bar 36, status bar
+        // 26), clamped to 80% of the main screen's visible frame, minimum
+        // 560x360.
         var contentSize = document.doc?.canvasSize ?? NSSize(width: 480, height: 320)
-        contentSize.width += DS.panelWidth + 1
-        contentSize.height += DS.toolbarHeight + DS.statusBarHeight
+        contentSize.width += DS.panelWidth + 1 + DS.railWidth
+        contentSize.height += DS.optionsBarHeight + DS.statusBarHeight
         if let screen = NSScreen.main {
             let limit = screen.visibleFrame
             contentSize.width = min(contentSize.width, limit.width * 0.8)
@@ -43,8 +44,8 @@ final class EditorWindowController: NSWindowController {
         fatalError("EditorWindowController does not support NSCoder")
     }
 
-    /// Mirrors the editor's current tool into the toolbar pill. Display
-    /// only: setting the selection does not re-dispatch the segment action.
+    /// Mirrors the editor's current tool into the tool rail. Display
+    /// only: setting the selection does not re-dispatch the slot action.
     func reflectSelectedTool(_ tool: EditorTool) {
         (contentViewController as? EditorViewController)?.reflectSelectedTool(tool)
     }

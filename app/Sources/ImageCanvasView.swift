@@ -36,6 +36,11 @@ final class ImageCanvasView: NSView {
             {
                 setSelection(nil)
             }
+            // So is a clone source: it is a canvas coordinate, and a crop
+            // or resize moved the ground out from under it.
+            if image?.width != oldValue?.width || image?.height != oldValue?.height {
+                cloneSource = nil
+            }
             // A Quick Mask buffer made at a different canvas size is
             // meaningless: discard the session (no selection comes back —
             // there is nothing valid to convert). Same-size doc swaps
@@ -137,6 +142,13 @@ final class ImageCanvasView: NSView {
             gradientAnchor = nil
             gradientCurrent = nil
             eyedropperDragActive = false
+            shapeAnchor = nil
+            shapePreview = nil
+            zoomAnchor = nil
+            zoomAnchorWindow = nil
+            zoomMarquee = nil
+            handPanAnchorWindow = nil
+            handPanScrollOrigin = nil
             if moveDragOrigin != nil {
                 // A tool switch mid-drag must still close the live edit so
                 // the drag-so-far becomes one undo step.
@@ -152,6 +164,67 @@ final class ImageCanvasView: NSView {
     var brushSize: CGFloat = 24
     var paintColor: NSColor = .black
     var brushOpacity: CGFloat = 1.0
+
+    // Selection options, kept current by EditorViewController: the options
+    // bar's combine mode (a gesture's modifiers still override it) and the
+    // feather applied as a gesture commits.
+    var selectionCombineBase: SelectionCombineMode = .replace
+    var selectionFeather: Double = 0
+
+    // Clone stamp: the ⌥-clicked source point, and the projection snapshot
+    // plus source offset the active stroke stamps from — both latched at
+    // mouse-down so nothing can change what is being cloned mid-drag.
+    var cloneSource: CGPoint? {
+        didSet {
+            if cloneSource != oldValue { needsDisplay = true }
+        }
+    }
+    private var cloneSnapshot: CGImage?
+    private var cloneOffset = CGVector.zero
+
+    // The View options' scrubby-zoom preference, kept current by
+    // EditorViewController: a zoom-tool drag scrubs instead of marqueeing.
+    var scrubbyZoom = false
+
+    // Crop session overlay: owned by EditorViewController+Crop, which does
+    // the geometry; the canvas draws it and routes the gesture.
+    var cropOverlay: CropOverlay? {
+        didSet { needsDisplay = true }
+    }
+    var onCropMouseDown: ((CGPoint) -> Void)?
+    var onCropMouseDragged: ((CGPoint) -> Void)?
+    var onCropMouseUp: ((CGPoint) -> Void)?
+    /// Return, keypad Enter, or a double-click.
+    var onCropCommit: (() -> Void)?
+    /// Escape.
+    var onCropCancel: (() -> Void)?
+
+    // Shape tools: the live drag preview (geometry in ShapeTool.swift) and
+    // the style it draws with, kept current by EditorViewController.
+    var shapePreview: ShapeToolPreview? {
+        didSet { needsDisplay = true }
+    }
+    var shapeStyle = ShapeToolStyle()
+    /// Fired when a shape drag commits: the shape's box and, for a line,
+    /// whether it runs bottom-left → top-right.
+    var onShapeCommit: ((_ box: CGRect, _ flipped: Bool) -> Void)?
+    private var shapeAnchor: CGPoint?
+
+    // Zoom and hand gestures. Zoom reports; the editor owns magnification.
+    var onZoomClick: ((_ point: CGPoint, _ out: Bool) -> Void)?
+    /// Scrubby target magnification (absolute, from the drag's start value).
+    var onZoomTo: ((CGFloat) -> Void)?
+    var onZoomRect: ((CGRect) -> Void)?
+    private var zoomAnchor: CGPoint?
+    private var zoomAnchorWindow: NSPoint?
+    private var zoomStartMagnification: CGFloat = 1
+    private var zoomMarquee: CGRect?
+    /// True once a scrubby drag actually scrubbed, so a plain click with
+    /// scrubby on still steps the ladder instead of doing nothing.
+    private var zoomDidScrub = false
+    private var handPanAnchorWindow: NSPoint?
+    private var handPanScrollOrigin: NSPoint?
+
     var textFont: NSFont = .systemFont(ofSize: 48)
     /// How text-session lines align. The live session aligns within its
     /// editing box; the commit aligns within the laid-out block
@@ -422,7 +495,20 @@ final class ImageCanvasView: NSView {
         if let preview = transformPreview {
             drawTransformPreview(preview, in: context)
         } else if let cgImage = previewImage ?? image {
-            drawFlipped(cgImage, in: context)
+            if let crop = cropOverlay, crop.angle != 0 {
+                // Straighten preview: the image rotates about the crop
+                // box's center while the box stays axis-aligned — the same
+                // matrix (sign included) the commit hands the core.
+                context.saveGState()
+                let center = CGPoint(x: crop.rect.midX, y: crop.rect.midY)
+                context.translateBy(x: center.x, y: center.y)
+                context.rotate(by: -crop.angle * .pi / 180)
+                context.translateBy(x: -center.x, y: -center.y)
+                drawFlipped(cgImage, in: context)
+                context.restoreGState()
+            } else {
+                drawFlipped(cgImage, in: context)
+            }
         }
 
         // A mask stroke in progress: the projection has not moved, so the
@@ -440,7 +526,8 @@ final class ImageCanvasView: NSView {
         // smaller than the canvas, show the boundary so strokes and text
         // outside it don't silently vanish. Quick Mask strokes land on the
         // canvas-sized buffer instead, so the boundary would mislead there.
-        if tool == .brush || tool == .eraser || tool == .text, !isTransforming,
+        if tool == .brush || tool == .eraser || tool == .clone || tool == .dodge
+            || tool == .text, !isTransforming,
            !quickMaskActive,
            let layerRect = activeLayerRect,
            layerRect != CGRect(origin: .zero, size: bounds.size) {
@@ -472,9 +559,64 @@ final class ImageCanvasView: NSView {
             drawTextSessionBorder(textView.frame)
         }
 
+        if let crop = cropOverlay, !isTransforming {
+            drawCropOverlay(crop)
+        }
+
+        if let preview = shapePreview, !isTransforming {
+            drawShapePreview(preview)
+        }
+
+        if tool == .clone, let source = cloneSource, !isTransforming {
+            drawCloneSourceMarker(source)
+        }
+
+        if let marquee = zoomMarquee {
+            drawZoomMarquee(marquee)
+        }
+
         if let preview = transformPreview {
             drawTransformBox(preview)
         }
+    }
+
+    /// The clone tool's ⌥-set source point: a small crosshair ring, scaled
+    /// to keep its screen size at any zoom.
+    private func drawCloneSourceMarker(_ source: CGPoint) {
+        let scale = magnification
+        let radius = 5 / scale
+        let ring = NSBezierPath(
+            ovalIn: CGRect(
+                x: source.x - radius, y: source.y - radius,
+                width: radius * 2, height: radius * 2))
+        let arms = NSBezierPath()
+        for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+            arms.move(to: CGPoint(x: source.x + dx * radius, y: source.y + dy * radius))
+            arms.line(to: CGPoint(
+                x: source.x + dx * radius * 1.9, y: source.y + dy * radius * 1.9))
+        }
+        for (path, width) in [(ring, 2.5 / scale), (arms, 2.5 / scale)] {
+            path.lineWidth = width
+            NSColor.black.withAlphaComponent(0.45).setStroke()
+            path.stroke()
+        }
+        for (path, width) in [(ring, 1 / scale), (arms, 1 / scale)] {
+            path.lineWidth = width
+            NSColor.white.withAlphaComponent(0.95).setStroke()
+            path.stroke()
+        }
+    }
+
+    /// The zoom tool's drag rectangle: a plain dashed hairline (not the
+    /// coral marquee — this is a view gesture, not a selection).
+    private func drawZoomMarquee(_ rect: CGRect) {
+        let scale = magnification
+        let path = NSBezierPath(rect: rect)
+        path.lineWidth = 1 / scale
+        let dash: [CGFloat] = [4 / scale, 3 / scale]
+        path.setLineDash(dash, count: dash.count, phase: 0)
+        NSColor.white.withAlphaComponent(0.9).setStroke()
+        path.stroke()
     }
 
     /// Un-flips the context so the CGImage is not drawn upside down, then
@@ -786,26 +928,31 @@ final class ImageCanvasView: NSView {
             shape: shape, canvasWidth: Int(bounds.width), canvasHeight: Int(bounds.height))
     }
 
-    /// Applies a completed selection gesture: combines the new shape with
-    /// the gesture's base selection under `mode`. A nil (empty) new shape
-    /// deselects in replace mode and keeps the base otherwise.
+    /// Applies a completed selection gesture: feathers the new shape by the
+    /// options bar's radius, then combines it with the gesture's base
+    /// selection under `mode`. A nil (empty) new shape deselects in replace
+    /// mode and keeps the base otherwise.
     private func commitSelection(
         _ new: CanvasSelection?, mode: SelectionCombineMode, base: CanvasSelection?
     ) {
-        guard let new = new else {
+        guard var new = new else {
             setSelection(mode == .replace ? nil : base)
             return
+        }
+        if selectionFeather > 0, let feathered = new.feathered(by: selectionFeather) {
+            new = feathered
         }
         setSelection(CanvasSelection.combine(base, with: new, mode: mode))
     }
 
-    /// Reads a gesture's combine mode from its modifier flags.
-    private static func combineMode(for event: NSEvent) -> SelectionCombineMode {
+    /// Reads a gesture's combine mode: an explicit modifier wins, otherwise
+    /// the options bar's mode applies.
+    private func combineMode(for event: NSEvent) -> SelectionCombineMode {
         switch (event.modifierFlags.contains(.shift), event.modifierFlags.contains(.option)) {
         case (true, true): return .intersect
         case (true, false): return .add
         case (false, true): return .subtract
-        case (false, false): return .replace
+        case (false, false): return selectionCombineBase
         }
     }
 
@@ -859,6 +1006,10 @@ final class ImageCanvasView: NSView {
         gradientAnchor = nil
         gradientCurrent = nil
         dragAnchor = nil
+        // A shape drag caught mid-flight (Q lands during it) must not
+        // commit a document edit into the mode.
+        shapeAnchor = nil
+        shapePreview = nil
         quickMaskWidth = image.width
         quickMaskHeight = image.height
         quickMaskBuffer =
@@ -968,17 +1119,21 @@ final class ImageCanvasView: NSView {
             if tool == .text { return }
         }
         // Quick Mask mode: only brush (add coverage) and eraser (remove)
-        // strokes are live — they edit the mode's buffer. Every other
-        // tool's canvas interaction is inert, like the locked states'
-        // no-ops (zoom/pan/scroll live outside this view and stay live).
+        // strokes are live — they edit the mode's buffer. The view tools
+        // stay live too (they change what you see, never the document,
+        // exactly like the scroll view's own pan and pinch); every other
+        // tool's canvas interaction is inert.
         if quickMaskActive {
             switch tool {
             case .brush, .eraser:
                 beginStroke(at: clamp(point: convert(event.locationInWindow, from: nil)))
+                return
+            case .zoom, .hand:
+                break
             default:
                 NSSound.beep()
+                return
             }
-            return
         }
         // Eyedropper: the tool itself, or Option temporarily borrowing it
         // from brush/fill/gradient (whose Option is otherwise free — unlike
@@ -997,7 +1152,7 @@ final class ImageCanvasView: NSView {
         switch tool {
         case .select, .ellipseSelect:
             dragAnchor = point
-            dragCombineMode = Self.combineMode(for: event)
+            dragCombineMode = combineMode(for: event)
             dragBaseSelection = selection
         case .lasso:
             if event.clickCount >= 2 {
@@ -1011,17 +1166,17 @@ final class ImageCanvasView: NSView {
             } else {
                 if lassoPoints.isEmpty {
                     // The click that starts a new polygon decides the mode.
-                    lassoCombineMode = Self.combineMode(for: event)
+                    lassoCombineMode = combineMode(for: event)
                 }
                 lassoPoints.append(point)
                 needsDisplay = true
             }
         case .wand:
-            onWandClick?(point, Self.combineMode(for: event))
+            onWandClick?(point, combineMode(for: event))
         case .subject:
             // Same modifier conventions as the marquee gestures, decided
             // at mouse-down and held for the whole press.
-            dragCombineMode = Self.combineMode(for: event)
+            dragCombineMode = combineMode(for: event)
             dragBaseSelection = selection
             if subjectSession.hover(point, in: image) { needsDisplay = true }
             // Nothing salient in the picture at all is worth saying;
@@ -1044,6 +1199,34 @@ final class ImageCanvasView: NSView {
             onTextClick?(point)
         case .eyedropper:
             break // handled before the switch
+        case .crop:
+            if event.clickCount >= 2 {
+                onCropCommit?()
+            } else {
+                onCropMouseDown?(point)
+            }
+        case .clone:
+            // ⌥ sets the source; a stroke without one has nothing to stamp.
+            if event.modifierFlags.contains(.option) {
+                cloneSource = point
+            } else if cloneSource == nil {
+                NSSound.beep()
+            } else {
+                beginStroke(at: point)
+            }
+        case .dodge:
+            beginStroke(at: point)
+        case .shapeRect, .shapeEllipse, .shapeLine:
+            shapeAnchor = point
+        case .zoom:
+            zoomAnchor = point
+            zoomAnchorWindow = event.locationInWindow
+            zoomStartMagnification = magnification
+            zoomDidScrub = false
+        case .hand:
+            handPanAnchorWindow = event.locationInWindow
+            handPanScrollOrigin = enclosingScrollView?.contentView.bounds.origin
+            NSCursor.closedHand.set()
         }
     }
 
@@ -1081,13 +1264,49 @@ final class ImageCanvasView: NSView {
             guard let origin = moveDragOrigin else { return }
             NSCursor.closedHand.set()
             onMoveUpdate?(Int((raw.x - origin.x).rounded()), Int((raw.y - origin.y).rounded()))
-        case .brush, .eraser:
+        case .brush, .eraser, .clone, .dodge:
             // No clamping: the image-sized overlay context clips naturally,
             // so a stroke that leaves the canvas paints up to the edge and
             // stops instead of smearing along the border.
             continueStroke(to: raw)
         case .text:
             break
+        case .crop:
+            onCropMouseDragged?(clamp(point: raw))
+        case .shapeRect, .shapeEllipse, .shapeLine:
+            guard let anchor = shapeAnchor else { return }
+            shapePreview = ShapeToolPreview(
+                kind: tool, from: anchor, to: clamp(point: raw),
+                constrained: event.modifierFlags.contains(.shift), style: shapeStyle)
+        case .zoom:
+            guard let anchorWindow = zoomAnchorWindow, let anchor = zoomAnchor else { return }
+            if scrubbyZoom {
+                // Right scrubs in, left scrubs out; a full doubling per
+                // 120 screen points feels like Photoshop's pace. A couple
+                // of points of jitter is still a click, not a scrub.
+                let dx = event.locationInWindow.x - anchorWindow.x
+                guard zoomDidScrub || abs(dx) > 2 else { return }
+                zoomDidScrub = true
+                onZoomTo?(zoomStartMagnification * pow(2, dx / 120))
+            } else {
+                zoomMarquee = rect(from: anchor, to: clamp(point: raw))
+                needsDisplay = true
+            }
+        case .hand:
+            guard let anchorWindow = handPanAnchorWindow,
+                  let origin = handPanScrollOrigin,
+                  let scrollView = enclosingScrollView
+            else { return }
+            NSCursor.closedHand.set()
+            // The clip view scrolls in the flipped document space, so a
+            // window-up drag is a negative flipped-y delta; the content
+            // follows the pointer.
+            let scale = magnification
+            let dx = (event.locationInWindow.x - anchorWindow.x) / scale
+            let dy = (event.locationInWindow.y - anchorWindow.y) / scale
+            scrollView.contentView.setBoundsOrigin(
+                NSPoint(x: origin.x - dx, y: origin.y + dy))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
     }
 
@@ -1152,10 +1371,51 @@ final class ImageCanvasView: NSView {
             moveDragOrigin = nil
             window?.invalidateCursorRects(for: self)
             onMoveEnd?()
-        case .brush, .eraser:
+        case .brush, .eraser, .clone, .dodge:
             endStroke()
         case .text:
             break
+        case .crop:
+            onCropMouseUp?(clamp(point: convert(event.locationInWindow, from: nil)))
+        case .shapeRect, .shapeEllipse, .shapeLine:
+            guard let anchor = shapeAnchor else { return }
+            shapeAnchor = nil
+            let preview = shapePreview
+            shapePreview = nil
+            needsDisplay = true
+            // A tiny drag is a misclick, not a shape (~2 screen points,
+            // like the marquee's click threshold).
+            guard let preview = preview,
+                  max(preview.box.width, preview.box.height) * magnification >= 2
+            else { return }
+            onShapeCommit?(preview.box, preview.flipped)
+        case .zoom:
+            let anchor = zoomAnchor
+            let marquee = zoomMarquee
+            zoomAnchor = nil
+            zoomAnchorWindow = nil
+            zoomMarquee = nil
+            if marquee != nil { needsDisplay = true }
+            guard let anchor = anchor else { return }
+            // With scrubby on, the drag already zoomed — but a plain click
+            // still steps the ladder rather than doing nothing.
+            if scrubbyZoom {
+                if !zoomDidScrub {
+                    onZoomClick?(anchor, event.modifierFlags.contains(.option))
+                }
+                return
+            }
+            // A real drag zooms to the marquee; a click steps the ladder.
+            if let marquee = marquee, marquee.width * magnification >= 4,
+               marquee.height * magnification >= 4 {
+                onZoomRect?(marquee)
+            } else {
+                onZoomClick?(anchor, event.modifierFlags.contains(.option))
+            }
+        case .hand:
+            handPanAnchorWindow = nil
+            handPanScrollOrigin = nil
+            window?.invalidateCursorRects(for: self)
         }
     }
 
@@ -1205,7 +1465,11 @@ final class ImageCanvasView: NSView {
         // eraser black (removes), paint color ignored.
         strokeOnMask = strokeOnQuickMask ? false : paintsMask
         let onCoverage = strokeOnMask || strokeOnQuickMask
-        let base: NSColor = onCoverage ? (tool == .eraser ? .black : .white) : paintColor
+        // A dodge/burn stroke is pure coverage too: the retouch op reads
+        // only the overlay's alpha, so it paints white at full alpha (the
+        // exposure lives in the op, not the stroke).
+        let coverageWhite = onCoverage || tool == .dodge
+        let base: NSColor = coverageWhite ? (tool == .eraser ? .black : .white) : paintColor
         let color = (base.usingColorSpace(.sRGB) ?? base)
             .withAlphaComponent(onCoverage ? brushOpacity : 1)
         context.setStrokeColor(color.cgColor)
@@ -1226,11 +1490,22 @@ final class ImageCanvasView: NSView {
         }
         strokeActive = true
         strokeLastPoint = point
-        // Starting dot so a plain click leaves a mark.
-        let dot = CGRect(
-            x: point.x - brushSize / 2, y: point.y - brushSize / 2,
-            width: brushSize, height: brushSize)
-        context.fillEllipse(in: dot)
+        if tool == .clone {
+            // Latched here so an agent edit landing mid-drag cannot change
+            // what is being cloned; the offset is the classic aligned-clone
+            // rule (first stamp − source).
+            cloneSnapshot = image
+            if let source = cloneSource {
+                cloneOffset = CGVector(dx: point.x - source.x, dy: point.y - source.y)
+            }
+            stampCloneDab(in: context, at: point)
+        } else {
+            // Starting dot so a plain click leaves a mark.
+            let dot = CGRect(
+                x: point.x - brushSize / 2, y: point.y - brushSize / 2,
+                width: brushSize, height: brushSize)
+            context.fillEllipse(in: dot)
+        }
         emitStrokeUpdate()
     }
 
@@ -1242,11 +1517,51 @@ final class ImageCanvasView: NSView {
             // off-canvas points still exit cleanly instead of edge-pinning.
             point = CGPoint(x: floor(point.x) + 0.5, y: floor(point.y) + 0.5)
         }
+        if tool == .clone {
+            // Clone stamps dabs along the segment instead of stroking a
+            // path (each dab is a clipped draw of the snapshot, not a fill).
+            // The last point only advances per stamp, so spacing carries
+            // across ticks instead of resetting at every event.
+            var from = last
+            let spacing = max(brushSize / 4, 1)
+            var distance = hypot(point.x - from.x, point.y - from.y)
+            while distance >= spacing {
+                let step = spacing / distance
+                from = CGPoint(
+                    x: from.x + (point.x - from.x) * step,
+                    y: from.y + (point.y - from.y) * step)
+                stampCloneDab(in: context, at: from)
+                distance = hypot(point.x - from.x, point.y - from.y)
+            }
+            strokeLastPoint = from
+            emitStrokeUpdate()
+            return
+        }
         context.move(to: last)
         context.addLine(to: point)
         context.strokePath()
         strokeLastPoint = point
         emitStrokeUpdate()
+    }
+
+    /// Stamps the clone snapshot through a round dab at `point`: the whole
+    /// snapshot drawn displaced by the stroke's offset and clipped to the
+    /// dab, so the pixel that lands at p is the snapshot's p − offset.
+    private func stampCloneDab(in context: CGContext, at point: CGPoint) {
+        guard let snapshot = cloneSnapshot else { return }
+        context.saveGState()
+        context.addEllipse(in: CGRect(
+            x: point.x - brushSize / 2, y: point.y - brushSize / 2,
+            width: brushSize, height: brushSize))
+        context.clip()
+        // The overlay context is flipped (row 0 = top); flip back locally
+        // so the snapshot lands right side up at the displaced position.
+        context.translateBy(x: 0, y: CGFloat(overlayHeight))
+        context.scaleBy(x: 1, y: -1)
+        context.draw(snapshot, in: CGRect(
+            x: cloneOffset.dx, y: -cloneOffset.dy,
+            width: CGFloat(snapshot.width), height: CGFloat(snapshot.height)))
+        context.restoreGState()
     }
 
     /// Hands the accumulated overlay to the receiver, which repaints it onto
@@ -1280,6 +1595,7 @@ final class ImageCanvasView: NSView {
         overlayContext?.restoreGState()
         strokeActive = false
         strokeLastPoint = nil
+        cloneSnapshot = nil
         if strokeOnQuickMask {
             // The stroke lands in the Quick Mask buffer and nowhere else:
             // no document edit, no undo step, no stroke-end callback (there
@@ -1309,13 +1625,19 @@ final class ImageCanvasView: NSView {
         if strokeOnMask {
             return tool == .eraser ? "Erase Mask" : "Paint Mask"
         }
-        return tool == .eraser ? "Erase" : "Brush Stroke"
+        switch tool {
+        case .eraser: return "Erase"
+        case .clone: return "Clone Stamp"
+        case .dodge: return "Dodge / Burn"
+        default: return "Brush Stroke"
+        }
     }
 
     /// Abandons any in-progress stroke without committing (tool switches,
     /// Escape, window close); the receiver rolls the live edit back.
     private func cancelStroke() {
         strokeLastPoint = nil
+        cloneSnapshot = nil
         guard strokeActive else { return }
         overlayContext?.restoreGState()
         strokeActive = false
@@ -1510,6 +1832,21 @@ final class ImageCanvasView: NSView {
             }
             return
         }
+        // A crop session's keys: Return commits, Escape resets the box.
+        // Inert in Quick Mask mode, like the crop clicks — a commit is a
+        // document edit, and only the mode's buffer may change there.
+        if tool == .crop, cropOverlay != nil, !quickMaskActive {
+            switch event.keyCode {
+            case 53:
+                onCropCancel?()
+                return
+            case 36, 76:
+                onCropCommit?()
+                return
+            default:
+                break
+            }
+        }
         if event.keyCode == 53 { // Escape
             if strokeActive {
                 // Abandon the in-progress stroke; the live edit rolls back.
@@ -1560,10 +1897,10 @@ final class ImageCanvasView: NSView {
                 // the letter from every text field.
                 onQuickMaskKey?()
                 return
-            case "[" where tool == .brush || tool == .eraser:
+            case "[" where tool == .brush || tool == .eraser || tool == .clone || tool == .dodge:
                 onBrushSizeKey?(min(max(brushSize * 0.8, 1), 200))
                 return
-            case "]" where tool == .brush || tool == .eraser:
+            case "]" where tool == .brush || tool == .eraser || tool == .clone || tool == .dodge:
                 onBrushSizeKey?(min(max(brushSize * 1.25, 1), 200))
                 return
             default:
@@ -1580,9 +1917,10 @@ final class ImageCanvasView: NSView {
             addCursorRect(bounds, cursor: .arrow)
             return
         }
-        // The enum knows each tool's resting cursor; the move tool's hand
-        // closes while a drag is in flight.
-        let dragging = tool == .move && moveDragOrigin != nil
+        // The enum knows each tool's resting cursor; the move and hand
+        // tools' hands close while a drag is in flight.
+        let dragging = (tool == .move && moveDragOrigin != nil)
+            || (tool == .hand && handPanAnchorWindow != nil)
         addCursorRect(bounds, cursor: dragging ? .closedHand : tool.cursor)
     }
 }

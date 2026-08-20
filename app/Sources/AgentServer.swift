@@ -31,10 +31,11 @@ final class AgentServer {
 
     /// What a pixel edit dropped from a layer, for the report back: a layer
     /// whose pixels are the RENDERING of a description — a text layer's
-    /// string, a live photo layer's frame — stops being that the moment
-    /// something paints over them.
+    /// string, a shape layer's geometry, a live photo layer's frame — stops
+    /// being that the moment something paints over them.
     enum DroppedDescription: String {
         case text
+        case shape
         case livePhoto = "live photo"
     }
 
@@ -149,9 +150,14 @@ final class AgentServer {
         "brush_stroke": brushStroke,
         "eraser_stroke": eraserStroke,
         "add_text": addText,
+        // Retouch strokes (AgentServer+Retouch.swift)
+        "clone_stamp": { $0.cloneStamp },
+        "dodge_burn": { $0.dodgeBurn },
         // Text layers
         "add_text_layer": addTextLayer,
         "edit_text_layer": editTextLayer,
+        // Shape layers (AgentServer+Shapes.swift)
+        "add_shape_layer": { $0.addShapeLayer },
         // Live photo layers (AgentServer+LivePhoto.swift)
         "add_live_photo_layer": addLivePhotoLayer,
         "set_live_photo_frame": setLivePhotoFrame,
@@ -170,7 +176,8 @@ final class AgentServer {
         // Whole-document geometry
         "rotate": rotate,
         "flip": flip,
-        "crop": crop,
+        // crop's body (rect + straighten angle) lives in AgentServer+Retouch.swift
+        "crop": { $0.crop },
         "image_size": imageSize,
         "canvas_size": canvasSize,
         // Undo, export
@@ -270,7 +277,9 @@ final class AgentServer {
         return first
     }
 
-    private func summary(_ document: ImageDocument) -> [String: Any] {
+    // Internal, not private, like target and the helpers around it: the
+    // +Feature handler files report documents with it.
+    func summary(_ document: ImageDocument) -> [String: Any] {
         [
             "id": id(for: document),
             "title": document.displayName ?? "Untitled",
@@ -350,6 +359,21 @@ final class AgentServer {
             layer["is_adjustment"] = isAdjustment
             if isAdjustment, let payload = doc.adjustmentPayload(index) {
                 layer["adjustment"] = ["op": payload.op, "params": payload.params]
+            }
+            // A SHAPE layer carries the parametric description its pixels
+            // were rendered from (position is the layer's offset).
+            if let payload = doc.shapePayload(index) {
+                var shape: [String: Any] = [
+                    "kind": payload.kind,
+                    "w": payload.w,
+                    "h": payload.h,
+                    "fill": payload.fill,
+                    "stroke": payload.stroke,
+                    "stroke_width": payload.strokeWidth,
+                ]
+                if payload.kind == "rect" { shape["radius"] = payload.radius }
+                if payload.kind == "line" { shape["flipped"] = payload.flipped }
+                layer["shape"] = shape
             }
             // A LIVE PHOTO layer shows one frame of a clip and remembers
             // which; those are the layers set_live_photo_frame can re-render.
@@ -525,6 +549,7 @@ final class AgentServer {
     ) -> DroppedDescription? {
         guard let doc = document.doc else { return nil }
         if doc.textPayload(idx) != nil { return .text }
+        if doc.shapePayload(idx) != nil { return .shape }
         if doc.livePhotoPayload(idx) != nil { return .livePhoto }
         return nil
     }
@@ -543,6 +568,13 @@ final class AgentServer {
                 + "editable as text: the string, font, size, color and alignment it was "
                 + "rendered from were dropped and edit_text_layer no longer works on it. The "
                 + "pixels are intact; undo restores the text layer."
+        case .shape:
+            result["rasterized_shape"] = true
+            result["note"] =
+                "This edit painted over layer \(layer)'s pixels, so the layer is no longer "
+                + "editable as a shape: the kind, size, fill, stroke and radius it was "
+                + "rendered from were dropped. The pixels are intact; undo restores the "
+                + "shape layer."
         case .livePhoto:
             result["rasterized_live_photo"] = true
             result["note"] =
@@ -1027,7 +1059,9 @@ final class AgentServer {
     /// would silently change nothing. The agent mirror of the UI's
     /// refuseAdjustmentPixelEdit alert, word for word. Mask, move, transform,
     /// property and stacking tools deliberately do NOT come through here.
-    private func rejectAdjustmentPixelEdit(_ document: ImageDocument, _ index: Int) throws {
+    /// Internal, not private: the +Feature pixel-edit handlers refuse
+    /// through it too.
+    func rejectAdjustmentPixelEdit(_ document: ImageDocument, _ index: Int) throws {
         guard document.doc?.layerIsAdjustment(index) == true else { return }
         throw ToolError(
             message: "Adjustment layers have no pixels to edit. Paint on the layer's mask "
@@ -1320,7 +1354,9 @@ final class AgentServer {
         }
     }
 
-    private func parsePoints(_ a: [String: Any]) throws -> [CGPoint] {
+    // Internal, not private: the +Feature stroke handlers parse the same
+    // points argument.
+    func parsePoints(_ a: [String: Any]) throws -> [CGPoint] {
         guard let raw = a["points"] as? [Any], !raw.isEmpty else {
             throw ToolError(message: "points must be a non-empty array of [x, y] pairs")
         }
@@ -1699,7 +1735,9 @@ final class AgentServer {
 
     // MARK: - Selection, fill, gradient
 
-    private func editor(_ document: ImageDocument) -> EditorViewController? {
+    // Internal, not private: the +Feature stroke handlers reach the shared
+    // selection through it.
+    func editor(_ document: ImageDocument) -> EditorViewController? {
         document.windowControllers
             .compactMap { $0.contentViewController as? EditorViewController }
             .first
@@ -1964,15 +2002,6 @@ final class AgentServer {
         }
     }
 
-    private func crop(_ a: [String: Any]) throws -> String {
-        guard let x = intArg(a, "x"), let y = intArg(a, "y"),
-            let w = intArg(a, "width"), let h = intArg(a, "height")
-        else {
-            throw ToolError(message: "crop requires x, y, width, height")
-        }
-        return try docEdit(a, "Crop") { $0.cropped(x: x, y: y, w: w, h: h) }
-    }
-
     private func imageSize(_ a: [String: Any]) throws -> String {
         guard let w = intArg(a, "width"), let h = intArg(a, "height") else {
             throw ToolError(message: "image_size requires width and height")
@@ -2082,7 +2111,7 @@ final class AgentServer {
         (a[key] as? NSNumber)?.doubleValue ?? (a[key] as? String).flatMap(Double.init)
     }
 
-    private func boolArg(_ a: [String: Any], _ key: String) -> Bool? {
+    func boolArg(_ a: [String: Any], _ key: String) -> Bool? {
         // Like intArg/doubleArg, a string spelling of the value is accepted.
         if let number = a[key] as? NSNumber { return number.boolValue }
         switch a[key] as? String {

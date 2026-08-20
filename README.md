@@ -55,7 +55,10 @@ decoding, encoding, and manipulation.
   photos display upright
 - Export a copy to PNG, JPEG (with quality control), TIFF, BMP, GIF, WebP;
   failed saves never truncate or delete an existing destination file
-- Smooth zoom (pinch, ⌘+/⌘-, fit, actual size) and pan
+- Smooth zoom (pinch, ⌘+/⌘-, fit, actual size) and pan — plus a Zoom tool
+  (Z: click steps in, ⌥-click out, drag a marquee to fill the window with
+  it, or turn on scrubby zoom and drag left/right) and a Hand tool (H) that
+  drags the view
 - Rotate 90°/180°, flip horizontal/vertical
 - **Free Transform** (Layer > Free Transform, ⌘T): rotate, scale and move the
   active layer in one session — drag the eight handles to scale (Shift keeps
@@ -118,23 +121,53 @@ decoding, encoding, and manipulation.
   and does it proportionally where coverage is partial — a feathered
   selection leaves a soft-edged hole, not a hard one (text layers ask to
   rasterize first, as any destructive edit does)
+- **Crop tool** (C): an interactive crop box over the whole canvas — drag
+  the eight handles (aspect presets: Original, Free, 1:1, 4:3, 3:2, 16:9,
+  plus editable W/H), move it from inside, draw a fresh one from outside,
+  with a rule-of-thirds grid and a Straighten angle that live-rotates the
+  image behind the fixed box; Return or a double-click commits (straighten
+  rotates every layer about the box's center, then crops) as one undo
+  step, Escape resets. Cropping only moves the canvas window — layer
+  pixels outside it are kept and can be revealed again
 - Fill tool (K): bucket flood fill on the active layer with tolerance,
-  and a Gradient tool (G): drag to paint linear or radial two-color
-  gradients (default fades the paint color to transparent), both
-  selection-aware
+  contiguous and opacity options, and a Gradient tool (G): drag to paint
+  linear or radial gradients from the foreground to the background color
+  (Reverse swaps them, Opacity fades both), both selection-aware
+- **Clone Stamp** (J): ⌥-click sets the source, then strokes stamp the
+  composite from that fixed offset through round dabs — the classic
+  aligned clone, live-previewed through the projection like every stroke,
+  `[`/`]` resize, selections confine it
+- **Dodge / Burn** (D): brush-local tonal retouch — dodge brightens, burn
+  darkens, banded to shadows / midtones / highlights with an exposure
+  setting, applied by a Rust core op through the stroke's own coverage so
+  soft edges fade the effect out
+- **Shape layers** (R — repeated presses cycle Rectangle, Ellipse, Line):
+  drag out a shape (Shift constrains squares, circles and 45° lines) and
+  it lands as its own parametric layer — fill, stroke, weight and corner
+  radius from the options bar, the description stored in the layer's meta
+  like text, so Move keeps it honest and the `.rz` format round-trips it
 - Eyedropper (I): picks the color under the cursor into the shared paint
   color, sampled from the flattened composite — what you actually see, not
-  one layer — with a swatch and monospaced hex + RGBA readout in the
-  options bar; a drag keeps sampling, and Option-click borrows the
-  eyedropper mid-tool from brush, fill, and gradient
-- Brush and eraser (size, opacity, color; `[`/`]` resize; 1 px pixel-snapped
-  mode; strokes confine to an active selection) and on-canvas text
-  (font/size/color and left/center/right alignment, ⌘Return commits,
-  Escape cancels) — tools switch via toolbar, Tools menu, or
-  M/O/L/W/V/B/E/K/G/T/I. Related tools share one toolbar button: the four
-  selection tools sit on one, brush and eraser on another, each showing
-  whichever member is current with a chevron on its right that drops a menu
-  of the rest (with their keys). A group remembers the member last used
+  one layer — point, 3×3 or 5×5 mean sampling, a monospaced hex readout in
+  the options bar and an optional copy-to-clipboard on pick; a drag keeps
+  sampling, and Option-click borrows the eyedropper mid-tool from brush,
+  fill, and gradient
+- Brush and eraser (per-tool size and opacity, shared color; `[`/`]`
+  resize; 1 px pixel-snapped mode; strokes confine to an active selection)
+  and on-canvas text (font/weight/size/color and left/center/right
+  alignment, ⌘Return commits, Escape cancels) — tools switch via the left
+  tool rail, Tools menu, or M/O/L/W/S/C/V/B/E/J/D/K/G/R/T/I/Z/H. Related
+  tools share one rail slot: the five selection tools, the four paint
+  tools (brush, eraser, clone, dodge), the three shapes, and zoom + hand,
+  each slot showing whichever member is current with a corner triangle
+  that drops a menu of the rest (with their keys). A group remembers the
+  member last used
+- **The redesigned chrome**: a 48pt icon rail down the left with the
+  foreground/background swatches at its foot, and a fixed-height options
+  bar under the title bar that never resizes the canvas — each tool
+  declares its options in priority order and whatever doesn't fit at the
+  current window width folds into a `More` popover instead of wrapping.
+  Options persist per tool across documents and launches
 - **Re-editable text layers**: committing text adds its own layer that
   remembers the string, font, size, color and alignment it was rendered
   from — click it again with the text tool to reopen the editor pre-filled,
@@ -213,7 +246,7 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 47 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 50 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG, and `sample_color` reads single pixels off the flattened
 composite — the eyedropper), layer operations, blend modes, layer masks (add

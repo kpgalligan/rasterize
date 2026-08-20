@@ -75,11 +75,20 @@ enum DS {
             ])
     }
 
-    // MARK: - Metrics
+    // MARK: - Metrics (the redesign's fixed chrome dimensions)
 
-    static let toolbarHeight: CGFloat = 58
-    static let statusBarHeight: CGFloat = 30
+    static let railWidth: CGFloat = 48
+    static let railSlot: CGFloat = 34
+    static let railSlotRadius: CGFloat = 5
+    static let optionsBarHeight: CGFloat = 36
+    static let controlHeight: CGFloat = 22
+    static let controlRadius: CGFloat = 3
+    static let statusBarHeight: CGFloat = 26
     static let panelWidth: CGFloat = 304
+    static let tabHeight: CGFloat = 32
+    static let layerRow: CGFloat = 44
+    static let popoverWidth: CGFloat = 268
+    static let menuMinWidth: CGFloat = 206
     static let canvasInset: CGFloat = 36
 
     // MARK: - Motion

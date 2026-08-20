@@ -2,7 +2,7 @@ import AppKit
 
 /// Right-hand layers panel: blend mode + opacity for the active layer on
 /// top, the layer stack (row 0 = TOPMOST layer) in the middle, and the
-/// add/delete/duplicate/merge buttons below. All edits route through
+/// add/adjustment/duplicate/delete buttons below. All edits route through
 /// ImageDocument.applyEdit (or the live-edit API for opacity scrubs); the
 /// footer buttons send the same nil-target actions the Layer menu uses, so
 /// EditorViewController handles both.
@@ -46,9 +46,9 @@ final class LayersPanelViewController: NSViewController {
     private let tableView = NSTableView()
     private let tableScroll = NSScrollView()
     private var addButton: NSButton!
-    private var removeButton: NSButton!
+    private var adjustmentButton: NSButton!
     private var duplicateButton: NSButton!
-    private var mergeButton: NSButton!
+    private var deleteButton: NSButton!
 
     private let rowMenu = NSMenu()
 
@@ -135,7 +135,7 @@ final class LayersPanelViewController: NSViewController {
         // inline rename focuses its own field editor, but arrow keys must
         // keep nudging/tool keys working instead of walking the layer list.
         tableView.refusesFirstResponder = true
-        tableView.rowHeight = 48
+        tableView.rowHeight = DS.layerRow
         tableView.allowsMultipleSelection = false
         tableView.allowsEmptySelection = false
         tableView.dataSource = self
@@ -161,23 +161,26 @@ final class LayersPanelViewController: NSViewController {
         tableScroll.autohidesScrollers = true
         tableScroll.drawsBackground = false
 
-        // Footer: four 30x26 ghost icon buttons, mono layer count right.
-        // nil targets: actions resolve through the responder chain to the
+        // Footer: four ghost icon buttons, mono layer count right. nil
+        // targets: actions resolve through the responder chain to the
         // EditorViewController, the same handlers the Layer menu items use.
+        // The adjustment button is the exception — it pops the same per-op
+        // menu as Layer > New Adjustment Layer, so it targets the panel.
         addButton = GhostButton(
             symbol: "plus", fallback: "+", caption: nil, tooltip: "New Layer",
             action: #selector(EditorViewController.newLayer(_:)))
-        removeButton = GhostButton(
-            symbol: "minus", fallback: "−", caption: nil, tooltip: "Delete Layer",
-            action: #selector(EditorViewController.deleteLayer(_:)))
+        adjustmentButton = GhostButton(
+            symbol: "circle.righthalf.filled", fallback: "◐", caption: nil,
+            tooltip: "New Adjustment Layer",
+            action: #selector(showNewAdjustmentMenu(_:)))
+        adjustmentButton.target = self
         duplicateButton = GhostButton(
             symbol: "plus.square.on.square", fallback: "⧉", caption: nil,
             tooltip: "Duplicate Layer",
             action: #selector(EditorViewController.duplicateLayer(_:)))
-        mergeButton = GhostButton(
-            symbol: "arrow.triangle.merge", fallback: "⤵", caption: nil,
-            tooltip: "Merge Down",
-            action: #selector(EditorViewController.mergeDown(_:)))
+        deleteButton = GhostButton(
+            symbol: "trash", fallback: "✕", caption: nil, tooltip: "Delete Layer",
+            action: #selector(EditorViewController.deleteLayer(_:)))
 
         layerCountLabel.translatesAutoresizingMaskIntoConstraints = false
         layerCountLabel.font = DS.mono(10)
@@ -190,7 +193,7 @@ final class LayersPanelViewController: NSViewController {
 
         let footerSpacer = NSView()
         let footer = NSStackView(views: [
-            addButton, removeButton, duplicateButton, mergeButton,
+            addButton, adjustmentButton, duplicateButton, deleteButton,
             footerSpacer, layerCountLabel,
         ])
         footer.translatesAutoresizingMaskIntoConstraints = false
@@ -208,8 +211,12 @@ final class LayersPanelViewController: NSViewController {
         root.addSubview(footer)
 
         NSLayoutConstraint.activate([
-            tab.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
-            tab.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            // The tab row runs edge to edge; the content below keeps its
+            // 12px insets.
+            tab.topAnchor.constraint(equalTo: root.topAnchor),
+            tab.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            tab.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            tab.heightAnchor.constraint(equalToConstant: DS.tabHeight),
 
             blendContainer.topAnchor.constraint(equalTo: tab.bottomAnchor, constant: 12),
             blendContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
@@ -248,7 +255,7 @@ final class LayersPanelViewController: NSViewController {
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            footer.heightAnchor.constraint(equalToConstant: 30),
+            footer.heightAnchor.constraint(equalToConstant: 36),
         ])
 
         view = root
@@ -412,17 +419,37 @@ final class LayersPanelViewController: NSViewController {
 
     private func updateButtonStates() {
         updateLayerCount()
-        let doc = document?.doc
-        let count = doc?.layerCount ?? 0
-        let active = document?.activeLayerIndex ?? 0
+        let count = document?.doc?.layerCount ?? 0
         let hasDoc = count > 0
         addButton.isEnabled = hasDoc
+        adjustmentButton.isEnabled = hasDoc
         duplicateButton.isEnabled = hasDoc
-        removeButton.isEnabled = count > 1
-        // Merge Down needs a VISIBLE layer below the active one; the core
-        // refuses to merge into a hidden layer.
-        mergeButton.isEnabled = hasDoc && active >= 1
-            && (doc?.layerInfo(active - 1)?.visible ?? false)
+        deleteButton.isEnabled = count > 1
+    }
+
+    /// The footer's adjustment button: pops the same per-op menu as
+    /// Layer > New Adjustment Layer (same titles, same nil-target selectors,
+    /// so the editor's validation covers both).
+    @objc private func showNewAdjustmentMenu(_ sender: Any?) {
+        let menu = NSMenu(title: "New Adjustment Layer")
+        func add(_ title: String, _ action: Selector) {
+            menu.addItem(NSMenuItem(title: title, action: action, keyEquivalent: ""))
+        }
+        add(
+            "Brightness/Contrast/Saturation…",
+            #selector(EditorViewController.newAdjustmentLayerBCS(_:)))
+        add("Curves…", #selector(EditorViewController.newAdjustmentLayerCurves(_:)))
+        add("Levels…", #selector(EditorViewController.newAdjustmentLayerLevels(_:)))
+        add("Hue Rotate…", #selector(EditorViewController.newAdjustmentLayerHueRotate(_:)))
+        add("Posterize…", #selector(EditorViewController.newAdjustmentLayerPosterize(_:)))
+        add("Threshold…", #selector(EditorViewController.newAdjustmentLayerThreshold(_:)))
+        menu.addItem(.separator())
+        add("Invert", #selector(EditorViewController.newAdjustmentLayerInvert(_:)))
+        add("Grayscale", #selector(EditorViewController.newAdjustmentLayerGrayscale(_:)))
+        add("Sepia", #selector(EditorViewController.newAdjustmentLayerSepia(_:)))
+        guard let button = adjustmentButton else { return }
+        menu.popUp(
+            positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 2), in: button)
     }
 
     // MARK: - Header actions
@@ -495,6 +522,7 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
             isText: doc.textPayload(idx) != nil,
             isAdjustment: doc.layerIsAdjustment(idx),
             isLivePhoto: doc.livePhotoPayload(idx) != nil,
+            isShape: doc.shapePayload(idx) != nil,
             clipped: doc.layerClipped(idx),
             selected: idx == document.activeLayerIndex, paintTarget: paintTarget)
         cell.onSelectTarget = { [weak self] target in

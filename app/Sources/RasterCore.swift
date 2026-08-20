@@ -530,6 +530,22 @@ final class RasterDocument {
         return wrap(rz_doc_painting_layer(ptr, idx, data, UInt32(w), UInt32(h), mode, Float(alpha)))
     }
 
+    /// Dodge/burn layer `idx` where the stroke overlay covers it — the same
+    /// canvas-sized premultiplied overlay `paintingLayer` takes; only its
+    /// alpha (the stroke's coverage) is read. `range`: 0 shadows, 1 midtones,
+    /// 2 highlights. nil when nothing would change.
+    func dodgeBurnLayer(
+        _ idx: Int, overlay data: UnsafePointer<UInt8>, w: Int, h: Int,
+        exposure: Double, range: Int, burn: Bool
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), w == width, h == height, (0...2).contains(range) else {
+            return nil
+        }
+        return wrap(
+            rz_doc_dodge_burn_layer(
+                ptr, idx, data, UInt32(w), UInt32(h), Float(exposure), UInt8(range), burn))
+    }
+
     // MARK: - Selection regions and region painting
 
     /// Similar-color mask from the flattened composite: canvas-sized

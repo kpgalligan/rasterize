@@ -641,6 +641,49 @@ pub unsafe extern "C" fn rz_doc_painting_layer(
     }
 }
 
+/// Dodges (brightens, `burn` false) or burns (darkens, `burn` true) layer
+/// `idx` where a stroke overlay covers it. `src` is the same canvas-frame
+/// premultiplied RGBA8 overlay `rz_doc_painting_layer` takes (`w`/`h` must
+/// equal the canvas size); only its alpha channel is read, as per-pixel
+/// stroke coverage. `exposure` is clamped to [0, 1]; `range` selects the
+/// tonal band (0 shadows, 1 midtones, 2 highlights). Layer alpha is never
+/// touched. NULL on NULL args, dimension mismatch, non-finite exposure,
+/// range > 2, out-of-range idx, a layer extent that misses the canvas, or
+/// when no pixel would change.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `src` must
+/// be NULL or a valid pointer to at least `w * h * 4` readable bytes.
+// The parameter list mirrors the C declaration one-for-one; bundling the
+// arguments into a struct would only move the count somewhere else.
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_dodge_burn_layer(
+    doc: *const RzDocument,
+    idx: usize,
+    src: *const u8,
+    w: u32,
+    h: u32,
+    exposure: f32,
+    range: u8,
+    burn: bool,
+) -> *mut RzDocument {
+    if src.is_null() {
+        return ptr::null_mut();
+    }
+    let body = |d: &RzDocument| {
+        // Validate against the canvas dimensions before touching `src`, so
+        // the raw read below is bounded by the canvas buffer size.
+        if w != d.width || h != d.height {
+            return None;
+        }
+        let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+        let src = unsafe { std::slice::from_raw_parts(src, len) };
+        d.dodge_burn_layer(idx, src, w, h, exposure, range, burn)
+    };
+    unsafe { doc_op(doc, body) }
+}
+
 /// Rotates the whole document 90 degrees clockwise.
 ///
 /// # Safety

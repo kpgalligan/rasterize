@@ -379,24 +379,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func toolsMenu() -> NSMenu {
         // Deliberately no key equivalents: the bare tool keys (v/b/e/t) are
         // handled in ImageCanvasView.keyDown so they never steal keystrokes
-        // from text editing.
+        // from text editing. Built from the rail's own groups, in rail
+        // order, so this menu and the rail can never disagree about the
+        // tool set; a planned tool's item is validation-disabled.
         let menu = NSMenu(title: "Tools")
-        menu.addItem(item("Select Tool", #selector(EditorViewController.selectSelectTool(_:))))
-        menu.addItem(
-            item("Ellipse Select Tool", #selector(EditorViewController.selectEllipseTool(_:))))
-        menu.addItem(item("Lasso Tool", #selector(EditorViewController.selectLassoTool(_:))))
-        menu.addItem(item("Magic Wand Tool", #selector(EditorViewController.selectWandTool(_:))))
-        menu.addItem(
-            item("Subject Select Tool", #selector(EditorViewController.selectSubjectTool(_:))))
-        menu.addItem(item("Move Tool", #selector(EditorViewController.selectMoveTool(_:))))
-        menu.addItem(item("Brush Tool", #selector(EditorViewController.selectBrushTool(_:))))
-        menu.addItem(item("Eraser Tool", #selector(EditorViewController.selectEraserTool(_:))))
-        menu.addItem(item("Fill Tool", #selector(EditorViewController.selectFillTool(_:))))
-        menu.addItem(
-            item("Gradient Tool", #selector(EditorViewController.selectGradientTool(_:))))
-        menu.addItem(item("Text Tool", #selector(EditorViewController.selectTextTool(_:))))
-        menu.addItem(
-            item("Eyedropper Tool", #selector(EditorViewController.selectEyedropperTool(_:))))
+        for group in EditorTool.railGroups {
+            for tool in group {
+                menu.addItem(item("\(tool.displayName) Tool", tool.action))
+            }
+        }
         menu.addItem(.separator())
         menu.addItem(item("Allow Agent Connections", #selector(toggleAgentServer(_:))))
         return menu

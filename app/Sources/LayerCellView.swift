@@ -1,13 +1,18 @@
 import AppKit
 
-/// Rounded accent-tinted selection behind the active layer's row.
+/// Rounded accent-tinted selection behind the active layer's row, ringed by
+/// a 1px accent border.
 final class LayerRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
-        let rect = bounds.insetBy(dx: 6, dy: 2)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
+        // Half-pixel inset keeps the 1px stroke crisp.
+        let rect = bounds.insetBy(dx: 6, dy: 2).insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
         DS.selectionFill.setFill()
         path.fill()
+        path.lineWidth = 1
+        DS.accent.setStroke()
+        path.stroke()
     }
 }
 
@@ -109,7 +114,8 @@ final class ThumbnailImageView: NSView {
 
 /// One row of the layers table: 22px visibility eye, framed thumbnail (plus
 /// a second one for the layer's mask), then a two-line stack — editable name
-/// over a mono meta line reading "Soft Light · 62%". A CLIPPED layer indents
+/// over a mono meta line naming the layer's kind (or, for a plain raster
+/// layer, its pixel size). A CLIPPED layer indents
 /// its thumbnail block behind a "↳" arrow — it rides on the layer below. The
 /// active layer rings whichever thumbnail brush/eraser currently edit.
 /// Callbacks route edits back to the panel controller.
@@ -266,7 +272,7 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
     func configure(
         info: RasterDocument.LayerInfo, thumbnail: NSImage?, hasMask: Bool,
         maskThumbnail: NSImage?, maskEnabled: Bool, isText: Bool, isAdjustment: Bool,
-        isLivePhoto: Bool, clipped: Bool, selected: Bool, paintTarget: PaintTarget
+        isLivePhoto: Bool, isShape: Bool, clipped: Bool, selected: Bool, paintTarget: PaintTarget
     ) {
         committedName = info.name
         nameField.stringValue = info.name
@@ -276,8 +282,21 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
         } else {
             nameField.textColor = selected ? DS.accent : DS.textStrong
         }
-        let percent = Int((Double(info.opacity) * 100).rounded())
-        metaLabel.stringValue = "\(RzBlendMode.displayName(for: info.blendMode)) · \(percent)%"
+        // The meta line names the layer's KIND — blend and opacity already
+        // sit in the header above for the selected layer. A plain raster
+        // layer reports its pixel size instead.
+        if isAdjustment {
+            metaLabel.stringValue = "adjustment"
+        } else if isText {
+            metaLabel.stringValue = "text"
+        } else if isLivePhoto {
+            metaLabel.stringValue = "live photo"
+        } else if isShape {
+            metaLabel.stringValue = "shape"
+        } else {
+            metaLabel.stringValue = "\(info.width) × \(info.height)"
+        }
+        metaLabel.textColor = selected ? DS.accent : DS.textFaint
 
         self.hasMask = hasMask
         // The clip indent shifts the whole thumbnail block (name and meta

@@ -11,6 +11,7 @@ pub mod assistant;
 mod blend;
 pub mod doc;
 pub mod doc_perspective;
+pub mod doc_retouch;
 pub mod doc_select;
 pub mod doc_transform;
 pub mod ffi;

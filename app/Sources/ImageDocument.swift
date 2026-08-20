@@ -288,6 +288,7 @@ final class ImageDocument: NSDocument {
     func layerDescribesSource(_ idx: Int) -> Bool {
         guard let doc = doc else { return false }
         return doc.textPayload(idx) != nil || doc.livePhotoPayload(idx) != nil
+            || doc.shapePayload(idx) != nil
     }
 
     /// Asks — once, app-modally — whether a destructive edit may drop layer
@@ -302,6 +303,9 @@ final class ImageDocument: NSDocument {
         }
         if doc.livePhotoPayload(idx) != nil {
             return LivePhoto.confirmRasterize(layerName: name)
+        }
+        if doc.shapePayload(idx) != nil {
+            return ShapeLayer.confirmRasterize(layerName: name)
         }
         return true
     }

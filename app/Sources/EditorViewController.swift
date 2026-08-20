@@ -20,66 +20,28 @@ final class EditorViewController: NSViewController {
     let canvas = ImageCanvasView()
     private var didRunInitialZoom = false
 
-    // Design chrome: 58px toolbar, floating zoom pill, 30px status bar with
-    // border-separated mono segments.
-    private var toolPill: ToolPillControl!
-    private let toolbarBar = BarView(border: .bottom)
+    // Design chrome: fixed 36px options bar under the title bar, 48px left
+    // tool rail, floating zoom pill, 26px status bar with mono segments.
+    // Not private, like `canvas`: the +ToolOptions extension file builds the
+    // bar's descriptor clusters and the rail mirrors its swatches.
+    var toolRail: ToolRailView!
+    let optionsBar = ToolOptionsBar()
     private let zoomPill = ZoomPillView(frame: .zero)
     private let statusDims = StatusSegment(separator: false)
-    private let statusLayer = StatusSegment(separator: true)
-    private let statusBlend = StatusSegment(separator: true)
+    private let statusMode = StatusSegment(separator: true)
+    private let statusSelection = StatusSegment(separator: true)
     private let statusTool = StatusSegment(separator: false)
-    private let statusZoom = StatusSegment(separator: true)
 
     private(set) var currentTool: EditorTool = .select
 
-    // Options bar (between the window content top and the scroll view).
-    private let optionsBar = NSStackView()
-    private let sizeLabel = NSTextField(labelWithString: "Size")
-    private let sizeSlider = NSSlider(value: 24, minValue: 1, maxValue: 200, target: nil, action: nil)
-    private let sizeField = NSTextField(string: "24")
-    private let opacityLabel = NSTextField(labelWithString: "Opacity")
-    private let opacitySlider = NSSlider(
-        value: 1.0, minValue: 0.05, maxValue: 1.0, target: nil, action: nil)
-    private let opacityValueLabel = NSTextField(labelWithString: "100%")
-    private let colorWell = NSColorWell()
-    private let fontLabel = NSTextField(labelWithString: "Font")
-    private let fontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let fontSizeField = NSTextField(string: "48")
-    private let alignmentControl = NSSegmentedControl(frame: .zero)
-    private let toleranceLabel = NSTextField(labelWithString: "Tolerance")
-    private let toleranceSlider = NSSlider(
-        value: 32, minValue: 0, maxValue: 255, target: nil, action: nil)
-    private let toleranceValueLabel = NSTextField(labelWithString: "32")
-    private let contiguousCheck = NSButton(
-        checkboxWithTitle: "Contiguous", target: nil, action: nil)
-    private let gradientShapePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let gradientEndLabel = NSTextField(labelWithString: "End")
-    private let gradientEndWell = NSColorWell()
-    // Eyedropper readout: a swatch of the last sampled color plus its hex
-    // and R G B A values. Display only — the sample itself lands in the
-    // shared paint color.
-    private let sampleSwatch = NSBox()
-    private let sampleValueLabel = NSTextField(labelWithString: "Click to sample")
-    // Free Transform: numerics bound both ways to the session's parameters,
-    // plus the sampler the single commit-time resample will use.
-    private let transformAngleLabel = NSTextField(labelWithString: "Angle°")
-    private let transformAngleField = NSTextField(string: "0")
-    private let transformScaleXLabel = NSTextField(labelWithString: "Scale X%")
-    private let transformScaleXField = NSTextField(string: "100")
-    private let transformScaleYLabel = NSTextField(labelWithString: "Y%")
-    private let transformScaleYField = NSTextField(string: "100")
-    private let transformSizeLabel = NSTextField(labelWithString: "W")
-    private let transformSizeWField = NSTextField(string: "0")
-    private let transformSizeHLabel = NSTextField(labelWithString: "H")
-    private let transformSizeHField = NSTextField(string: "0")
-    private let transformSamplerLabel = NSTextField(labelWithString: "Sampler")
-    private let transformSamplerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    // Eyedropper readout shown in the options bar: the last sampled pixel.
+    // Display only — the sample itself lands in the shared paint color.
+    var lastSampleColor: NSColor?
+    var lastSampleText = "—"
 
-    /// Magic wand / bucket fill color tolerance (max per-channel diff).
-    private var tolerance = 32
-    private var scrollTopToRoot: NSLayoutConstraint!
-    private var scrollTopToOptions: NSLayoutConstraint!
+    // True after a rail swatch pointed the shared color panel at this
+    // editor; deinit then clears the panel's (unretained) target.
+    private var colorPanelTargetsSelf = false
 
     // Right panel (Layers/Assistant tabs, toggled by View > Show/Hide Layers).
     private var layersPanel: LayersPanelViewController!
@@ -106,24 +68,35 @@ final class EditorViewController: NSViewController {
     // it nil — they never live-edit, they commit once on mouse-up.
     private var strokeBase: RasterDocument?
     private var strokeTargetsMask = false
+    // The tool the stroke began with, so ticks route to the right op
+    // (dodge/burn is a retouch op, everything else paints the overlay).
+    private var strokeTool: EditorTool = .brush
+
+    // The open crop session (logic in EditorViewController+Crop.swift; the
+    // canvas draws its overlay and routes the gesture).
+    var cropSession: CropSession?
 
     // What brush/eraser edit (see PaintTarget), plus the layer it was chosen
     // for: selecting a different layer drops the choice back to .layer.
     private(set) var paintTarget: PaintTarget = .layer
     private var paintTargetLayer = 0
 
-    // Last-used paint options (session-only; no persistence).
-    private var brushSize: CGFloat = 24
-    private var brushOpacity: CGFloat = 1.0
-    private var paintColor: NSColor = .black
-    private var fontFamily = "Helvetica Neue"
-    private var fontSize: CGFloat = 48
+    // Live copies of the shared colors and text parameters — the canvas and
+    // payload builders read these as native types; ToolOptionsStore keeps
+    // the persisted form. Internal: the +ToolOptions descriptors bind them.
+    var paintColor: NSColor =
+        TextLayer.color(fromHex: ToolOptionsStore.shared.sharedState.foreground) ?? .black
+    var backgroundColor: NSColor =
+        TextLayer.color(fromHex: ToolOptionsStore.shared.sharedState.background) ?? .white
+    var fontFamily = ToolOptionsStore.shared.text.family
+    var fontSize = CGFloat(min(max(ToolOptionsStore.shared.text.size, 6), 500))
     /// Text-tool line alignment, in the options bar's segment order
     /// (0 left, 1 center, 2 right).
-    private var textAlignment: NSTextAlignment = .left
+    var textAlignment: NSTextAlignment = EditorViewController.alignmentSegmentValues[
+        min(max(ToolOptionsStore.shared.text.alignmentIndex, 0), 2)]
     /// Sampler a Free Transform commit resamples with; remembered between
     /// sessions, like the paint options above.
-    private var transformSampler = RZ_FILTER_CATMULL_ROM
+    var transformSampler = RZ_FILTER_CATMULL_ROM
 
     private static let zoomLadder: [CGFloat] = [
         0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32,
@@ -141,6 +114,14 @@ final class EditorViewController: NSViewController {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        // The shared color panel's target is unretained: if a rail swatch
+        // pointed it at this editor, a pick after the window closes would
+        // message a freed controller. There is no target getter, so the
+        // guard is the flag set when this editor took the panel over.
+        if colorPanelTargetsSelf {
+            NSColorPanel.shared.setTarget(nil)
+            NSColorPanel.shared.setAction(nil)
+        }
     }
 
     // MARK: - View construction
@@ -180,15 +161,23 @@ final class EditorViewController: NSViewController {
             guard let self = self, let document = self.document, let doc = document.doc,
                   doc.layerInfo(document.activeLayerIndex)?.visible == true
             else { return false } // hidden layer: refuse instead of painting invisibly
+            self.strokeTool = self.currentTool
             // An adjustment layer's pixels are ignored by the compositor, so
             // strokes ALWAYS land on its mask; with the mask deleted there
-            // is nothing left to paint — refuse (the canvas beeps).
+            // is nothing left to paint — refuse (the canvas beeps). Clone
+            // and dodge rewrite pixels, which an adjustment layer hasn't
+            // got, so they refuse outright.
             let idx = document.activeLayerIndex
             let isAdjustment = doc.layerIsAdjustment(idx)
+            if self.strokeTool == .clone || self.strokeTool == .dodge, isAdjustment {
+                return false
+            }
             if isAdjustment, !doc.layerHasMask(idx) { return false }
             // Decided once per stroke so a target change mid-drag can never
-            // split it across the layer and its mask.
-            let targetsMask = isAdjustment || self.paintsActiveMask
+            // split it across the layer and its mask. Only brush and eraser
+            // ever target a mask.
+            let paintsMaskTool = self.strokeTool == .brush || self.strokeTool == .eraser
+            let targetsMask = isAdjustment || (paintsMaskTool && self.paintsActiveMask)
             self.strokeTargetsMask = targetsMask
             self.canvas.paintsMask = targetsMask
             guard !targetsMask else {
@@ -207,8 +196,20 @@ final class EditorViewController: NSViewController {
             let idx = document.activeLayerIndex
             // nil = the stroke has missed the layer's extent entirely so far;
             // skip the tick (the projection is already correct).
-            if let updated = base.paintingLayer(idx, overlay: data, w: base.width, h: base.height,
-                                                mode: mode, alpha: alpha) {
+            let updated: RasterDocument?
+            if self.strokeTool == .dodge {
+                // The overlay is coverage here; exposure/range/burn come
+                // from the tool's options.
+                let options = ToolOptionsStore.shared.dodge
+                updated = base.dodgeBurnLayer(
+                    idx, overlay: data, w: base.width, h: base.height,
+                    exposure: min(max(options.opacity, 0), 100) / 100,
+                    range: min(max(options.rangeIndex, 0), 2), burn: options.burn)
+            } else {
+                updated = base.paintingLayer(
+                    idx, overlay: data, w: base.width, h: base.height, mode: mode, alpha: alpha)
+            }
+            if let updated = updated {
                 document.updateLiveEdit(updated)
             }
         }
@@ -275,19 +276,13 @@ final class EditorViewController: NSViewController {
             // Drops the layer-hidden preview a re-edit session put up.
             self?.canvas.previewImage = nil
         }
-        canvas.onToolKey = { [weak self] tool in self?.selectTool(tool) }
+        canvas.onToolKey = { [weak self] tool in self?.selectToolForKey(tool) }
         canvas.onQuickMaskKey = { [weak self] in self?.toggleQuickMask(nil) }
         canvas.onWandClick = { [weak self] point, mode in self?.wandClicked(point, mode: mode) }
         canvas.onFillClick = { [weak self] point in self?.fillClicked(point) }
         canvas.onEyedropper = { [weak self] point in self?.sampleColor(at: point) }
         canvas.onGradientCommit = { [weak self] a, b in self?.gradientCommitted(a, b) }
-        canvas.onBrushSizeKey = { [weak self] newSize in
-            guard let self = self else { return }
-            self.brushSize = newSize
-            self.sizeSlider.doubleValue = Double(newSize)
-            self.sizeField.integerValue = Int(newSize.rounded())
-            self.canvas.brushSize = newSize
-        }
+        canvas.onBrushSizeKey = { [weak self] newSize in self?.brushSizeKeyChanged(newSize) }
         canvas.onMoveBegin = { [weak self] in
             guard let self = self, let document = self.document, let doc = document.doc,
                   let info = doc.layerInfo(document.activeLayerIndex)
@@ -329,50 +324,45 @@ final class EditorViewController: NSViewController {
         canvas.onTransformCommit = { [weak self] in self?.commitTransformSession() }
         canvas.onTransformCancel = { [weak self] in self?.endTransformSession() }
         canvas.onTransformNudge = { [weak self] dx, dy in self?.transformNudge(dx, dy) }
+        canvas.onCropMouseDown = { [weak self] point in self?.cropMouseDown(point) }
+        canvas.onCropMouseDragged = { [weak self] point in self?.cropMouseDragged(point) }
+        canvas.onCropMouseUp = { [weak self] point in self?.cropMouseUp(point) }
+        canvas.onCropCommit = { [weak self] in self?.commitCropSession() }
+        canvas.onCropCancel = { [weak self] in self?.resetCropSession() }
+        canvas.onShapeCommit = { [weak self] box, flipped in
+            self?.commitShapeLayer(box: box, flipped: flipped)
+        }
+        canvas.onZoomClick = { [weak self] point, out in self?.zoomStep(at: point, out: out) }
+        canvas.onZoomTo = { [weak self] target in self?.applyZoom(target) }
+        canvas.onZoomRect = { [weak self] rect in self?.zoomToRect(rect) }
 
-        buildOptionsBar()
-        canvas.brushSize = brushSize
         canvas.paintColor = paintColor
-        canvas.brushOpacity = brushOpacity
         canvas.textFont = currentFont()
         canvas.textAlignment = textAlignment
+        syncCanvasPaintState()
 
-        // Toolbar: pill tool group left, ghost zoom cluster, on a card bar
-        // with a subtle bottom border. The pill's contents — including
-        // which tools share a button — come from EditorTool.toolbarGroups.
-        toolbarBar.translatesAutoresizingMaskIntoConstraints = false
-        toolPill = ToolPillControl(groups: EditorTool.toolbarGroups)
-        toolPill.translatesAutoresizingMaskIntoConstraints = false
-        let zoomOutButton = GhostButton(
-            symbol: "minus.magnifyingglass", fallback: "−", caption: "Zoom Out",
-            tooltip: "Zoom Out", action: #selector(zoomOutAction(_:)))
-        let zoomInButton = GhostButton(
-            symbol: "plus.magnifyingglass", fallback: "+", caption: "Zoom In",
-            tooltip: "Zoom In", action: #selector(zoomInAction(_:)))
-        let fitButton = GhostButton(
-            symbol: "arrow.up.left.and.down.right.magnifyingglass", fallback: "⤢",
-            caption: "Fit", tooltip: "Zoom to Fit", action: #selector(zoomFitAction(_:)))
-        let actualButton = GhostButton(
-            symbol: "1.magnifyingglass", fallback: "1", caption: "Actual",
-            tooltip: "Actual Size", action: #selector(zoomActualAction(_:)))
-        let toolbarStack = NSStackView(views: [
-            toolPill, zoomOutButton, zoomInButton, fitButton, actualButton,
-            NSView(),
-        ])
-        toolbarStack.translatesAutoresizingMaskIntoConstraints = false
-        toolbarStack.orientation = .horizontal
-        toolbarStack.alignment = .centerY
-        toolbarStack.spacing = 14
-        toolbarStack.setCustomSpacing(20, after: toolPill)
-        toolbarBar.addSubview(toolbarStack)
+        // Fixed-height options bar under the title bar; the +ToolOptions
+        // extension builds its per-tool clusters.
+        optionsBar.translatesAutoresizingMaskIntoConstraints = false
+        optionsBar.onAnyEdit = { [weak self] in self?.toolOptionsEdited() }
+
+        // Left tool rail: the slots — including which tools share one —
+        // come from EditorTool.railGroups; its swatches are the shared
+        // foreground/background colors.
+        toolRail = ToolRailView(groups: EditorTool.railGroups)
+        toolRail.translatesAutoresizingMaskIntoConstraints = false
+        toolRail.foregroundSwatchColor = paintColor
+        toolRail.backgroundSwatchColor = backgroundColor
+        toolRail.onPickForeground = { [weak self] in self?.pickForegroundColor() }
+        toolRail.onPickBackground = { [weak self] in self?.pickBackgroundColor() }
 
         let statusBar = BarView(border: .top)
         statusBar.translatesAutoresizingMaskIntoConstraints = false
-        let statusLeft = NSStackView(views: [statusDims, statusLayer, statusBlend])
+        let statusLeft = NSStackView(views: [statusDims, statusMode, statusSelection])
         statusLeft.translatesAutoresizingMaskIntoConstraints = false
         statusLeft.orientation = .horizontal
         statusLeft.spacing = 14
-        let statusRight = NSStackView(views: [statusTool, statusZoom])
+        let statusRight = NSStackView(views: [statusTool])
         statusRight.translatesAutoresizingMaskIntoConstraints = false
         statusRight.orientation = .horizontal
         statusRight.spacing = 14
@@ -429,8 +419,8 @@ final class EditorViewController: NSViewController {
         panelSeparator.boxType = .separator
         panelSeparator.translatesAutoresizingMaskIntoConstraints = false
 
-        root.addSubview(toolbarBar)
         root.addSubview(optionsBar)
+        root.addSubview(toolRail)
         root.addSubview(scrollView)
         root.addSubview(zoomPill)
         root.addSubview(panelSeparator)
@@ -438,27 +428,21 @@ final class EditorViewController: NSViewController {
         root.addSubview(assistantView)
         root.addSubview(statusBar)
 
-        guard let toolbarStackView = toolbarBar.subviews.first else {
-            fatalError("toolbar stack missing")
-        }
         NSLayoutConstraint.activate([
-            toolbarBar.topAnchor.constraint(equalTo: root.topAnchor),
-            toolbarBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            toolbarBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            toolbarBar.heightAnchor.constraint(equalToConstant: DS.toolbarHeight),
-
-            toolbarStackView.leadingAnchor.constraint(
-                equalTo: toolbarBar.leadingAnchor, constant: 14),
-            toolbarStackView.trailingAnchor.constraint(
-                equalTo: toolbarBar.trailingAnchor, constant: -14),
-            toolbarStackView.centerYAnchor.constraint(equalTo: toolbarBar.centerYAnchor),
-
-            optionsBar.topAnchor.constraint(equalTo: toolbarBar.bottomAnchor),
+            // The bar is fixed-height and always present, so the canvas
+            // well's frame never depends on which tool is active.
+            optionsBar.topAnchor.constraint(equalTo: root.topAnchor),
             optionsBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             optionsBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            optionsBar.heightAnchor.constraint(equalToConstant: 30),
+            optionsBar.heightAnchor.constraint(equalToConstant: DS.optionsBarHeight),
 
-            scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            toolRail.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            toolRail.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
+            toolRail.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+            toolRail.widthAnchor.constraint(equalToConstant: DS.railWidth),
+
+            scrollView.leadingAnchor.constraint(equalTo: toolRail.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
             scrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             zoomPill.leadingAnchor.constraint(
@@ -495,10 +479,6 @@ final class EditorViewController: NSViewController {
                 equalTo: statusBar.trailingAnchor, constant: -14),
             statusRight.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
         ])
-        // The scroll view's top swaps between the toolbar's bottom (select/
-        // move tools, options bar hidden) and the options bar's bottom.
-        scrollTopToRoot = scrollView.topAnchor.constraint(equalTo: toolbarBar.bottomAnchor)
-        scrollTopToOptions = scrollView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor)
         // The scroll view's trailing swaps between the panel separator
         // (layers visible) and the window edge (layers hidden).
         scrollTrailingToRoot = scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor)
@@ -508,225 +488,6 @@ final class EditorViewController: NSViewController {
 
         view = root
         updateOptionsBar()
-    }
-
-    private func buildOptionsBar() {
-        optionsBar.translatesAutoresizingMaskIntoConstraints = false
-        optionsBar.orientation = .horizontal
-        optionsBar.alignment = .centerY
-        optionsBar.spacing = 8
-        optionsBar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
-
-        for label in [
-            sizeLabel, opacityLabel, fontLabel, transformAngleLabel, transformScaleXLabel,
-            transformScaleYLabel, transformSizeLabel, transformSizeHLabel,
-            transformSamplerLabel,
-        ] {
-            label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        }
-
-        sizeSlider.isContinuous = true
-        sizeSlider.controlSize = .small
-        sizeSlider.target = self
-        sizeSlider.action = #selector(sizeSliderChanged(_:))
-        sizeSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
-        sizeSlider.doubleValue = Double(brushSize)
-
-        let sizeFormatter = NumberFormatter()
-        sizeFormatter.numberStyle = .none
-        sizeFormatter.allowsFloats = false
-        sizeFormatter.minimum = 1
-        sizeFormatter.maximum = 200
-        sizeField.formatter = sizeFormatter
-        sizeField.controlSize = .small
-        sizeField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        sizeField.integerValue = Int(brushSize)
-        sizeField.target = self
-        sizeField.action = #selector(sizeFieldChanged(_:))
-        sizeField.widthAnchor.constraint(equalToConstant: 44).isActive = true
-
-        opacitySlider.isContinuous = true
-        opacitySlider.controlSize = .small
-        opacitySlider.target = self
-        opacitySlider.action = #selector(opacitySliderChanged(_:))
-        opacitySlider.widthAnchor.constraint(equalToConstant: 100).isActive = true
-        opacitySlider.doubleValue = Double(brushOpacity)
-
-        opacityValueLabel.font = NSFont.monospacedDigitSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        opacityValueLabel.alignment = .right
-        opacityValueLabel.widthAnchor.constraint(equalToConstant: 40).isActive = true
-
-        colorWell.color = paintColor
-        colorWell.target = self
-        colorWell.action = #selector(colorChanged(_:))
-        colorWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        colorWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
-
-        let families = NSFontManager.shared.availableFontFamilies.sorted()
-        fontPopup.controlSize = .small
-        fontPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        fontPopup.addItems(withTitles: families)
-        if !families.contains(fontFamily) {
-            fontFamily = families.first ?? NSFont.systemFont(ofSize: fontSize).fontName
-        }
-        fontPopup.selectItem(withTitle: fontFamily)
-        fontPopup.target = self
-        fontPopup.action = #selector(fontFamilyChanged(_:))
-        fontPopup.widthAnchor.constraint(equalToConstant: 160).isActive = true
-
-        let fontSizeFormatter = NumberFormatter()
-        fontSizeFormatter.numberStyle = .none
-        fontSizeFormatter.allowsFloats = false
-        fontSizeFormatter.minimum = 6
-        fontSizeFormatter.maximum = 500
-        fontSizeField.formatter = fontSizeFormatter
-        fontSizeField.controlSize = .small
-        fontSizeField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        fontSizeField.integerValue = Int(fontSize)
-        fontSizeField.target = self
-        fontSizeField.action = #selector(fontSizeChanged(_:))
-        fontSizeField.widthAnchor.constraint(equalToConstant: 44).isActive = true
-
-        // Alignment: a compact 3-segment control in the payload's order
-        // (left, center, right). SF Symbols on the systems that have them,
-        // short labels otherwise.
-        alignmentControl.segmentCount = 3
-        alignmentControl.trackingMode = .selectOne
-        alignmentControl.controlSize = .small
-        alignmentControl.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        let alignmentSegments = [
-            ("text.alignleft", "Left"), ("text.aligncenter", "Center"),
-            ("text.alignright", "Right"),
-        ]
-        for (segment, (symbol, label)) in alignmentSegments.enumerated() {
-            if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
-                alignmentControl.setImage(image, forSegment: segment)
-            } else {
-                alignmentControl.setLabel(label, forSegment: segment)
-            }
-            alignmentControl.setToolTip("Align \(label.lowercased())", forSegment: segment)
-        }
-        alignmentControl.selectedSegment = Self.alignmentIndex(textAlignment)
-        alignmentControl.target = self
-        alignmentControl.action = #selector(alignmentChanged(_:))
-
-        toleranceSlider.isContinuous = true
-        toleranceSlider.controlSize = .small
-        toleranceSlider.target = self
-        toleranceSlider.action = #selector(toleranceChanged(_:))
-        toleranceSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
-
-        toleranceValueLabel.font = NSFont.monospacedDigitSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        toleranceValueLabel.alignment = .right
-        toleranceValueLabel.widthAnchor.constraint(equalToConstant: 32).isActive = true
-
-        contiguousCheck.state = .on
-        contiguousCheck.controlSize = .small
-        contiguousCheck.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-
-        gradientShapePopup.controlSize = .small
-        gradientShapePopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        gradientShapePopup.addItems(withTitles: ["Linear", "Radial"])
-        gradientShapePopup.widthAnchor.constraint(equalToConstant: 90).isActive = true
-
-        // Default end color: fade to transparent.
-        gradientEndWell.color = .clear
-        gradientEndWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        gradientEndWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
-
-        // Eyedropper readout: swatch + monospaced hex / R G B A values of the
-        // last sampled pixel. A plain bordered box, not a color well — it
-        // displays the sample, it is not an editable color.
-        sampleSwatch.boxType = .custom
-        sampleSwatch.titlePosition = .noTitle
-        sampleSwatch.borderWidth = 1
-        sampleSwatch.borderColor = NSColor.separatorColor
-        sampleSwatch.cornerRadius = 3
-        sampleSwatch.fillColor = .clear
-        sampleSwatch.widthAnchor.constraint(equalToConstant: 24).isActive = true
-        sampleSwatch.heightAnchor.constraint(equalToConstant: 16).isActive = true
-        sampleValueLabel.font = NSFont.monospacedSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .regular)
-
-        // Free Transform numerics: the session's parameters, editable. Angle
-        // in degrees (clockwise), scales in percent, and the layer's own
-        // scaled pixel size — W/H write the scales through the base size.
-        let angleFormatter = NumberFormatter()
-        angleFormatter.numberStyle = .decimal
-        angleFormatter.usesGroupingSeparator = false
-        angleFormatter.maximumFractionDigits = 2
-        angleFormatter.minimum = -360
-        angleFormatter.maximum = 360
-        transformAngleField.formatter = angleFormatter
-        transformAngleField.controlSize = .small
-        transformAngleField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        transformAngleField.target = self
-        transformAngleField.action = #selector(transformAngleChanged(_:))
-        transformAngleField.widthAnchor.constraint(equalToConstant: 56).isActive = true
-
-        for field in [transformScaleXField, transformScaleYField] {
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .decimal
-            formatter.usesGroupingSeparator = false
-            formatter.maximumFractionDigits = 2
-            formatter.minimum = NSNumber(value: -Self.maxScalePercent)
-            formatter.maximum = NSNumber(value: Self.maxScalePercent)
-            field.formatter = formatter
-            field.controlSize = .small
-            field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-            field.target = self
-            field.widthAnchor.constraint(equalToConstant: 60).isActive = true
-        }
-        transformScaleXField.action = #selector(transformScaleXChanged(_:))
-        transformScaleYField.action = #selector(transformScaleYChanged(_:))
-
-        // W/H: the layer's OWN scaled dimensions (|scale| × base pixel
-        // size), not the rotated bounding box — that is what keeps them
-        // cleanly two-way bindable. Whole pixels; the scale clamp bounds
-        // them, so the formatter only rules out empty/zero/negative input.
-        for field in [transformSizeWField, transformSizeHField] {
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .decimal
-            formatter.usesGroupingSeparator = false
-            formatter.maximumFractionDigits = 0
-            formatter.minimum = 1
-            field.formatter = formatter
-            field.controlSize = .small
-            field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-            field.target = self
-            field.widthAnchor.constraint(equalToConstant: 60).isActive = true
-        }
-        transformSizeWField.action = #selector(transformSizeWChanged(_:))
-        transformSizeHField.action = #selector(transformSizeHChanged(_:))
-
-        transformSamplerPopup.controlSize = .small
-        transformSamplerPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        transformSamplerPopup.addItems(withTitles: Self.transformSamplers.map { $0.title })
-        transformSamplerPopup.selectItem(at: Self.transformSamplerIndex(transformSampler))
-        transformSamplerPopup.target = self
-        transformSamplerPopup.action = #selector(transformSamplerChanged(_:))
-        transformSamplerPopup.widthAnchor.constraint(equalToConstant: 170).isActive = true
-
-        let controls: [NSView] = [
-            sizeLabel, sizeSlider, sizeField,
-            opacityLabel, opacitySlider, opacityValueLabel,
-            colorWell,
-            toleranceLabel, toleranceSlider, toleranceValueLabel, contiguousCheck,
-            gradientShapePopup, gradientEndLabel, gradientEndWell,
-            sampleSwatch, sampleValueLabel,
-            fontLabel, fontPopup, fontSizeField, alignmentControl,
-            transformAngleLabel, transformAngleField,
-            transformScaleXLabel, transformScaleXField,
-            transformScaleYLabel, transformScaleYField,
-            transformSizeLabel, transformSizeWField,
-            transformSizeHLabel, transformSizeHField,
-            transformSamplerLabel, transformSamplerPopup,
-        ]
-        for control in controls {
-            optionsBar.addArrangedSubview(control)
-        }
     }
 
     override func viewDidLoad() {
@@ -769,23 +530,83 @@ final class EditorViewController: NSViewController {
     // MARK: - Tools
 
     func selectTool(_ tool: EditorTool) {
+        // A planned tool has no behavior yet; menu validation already
+        // disables its items, this backstops the rail and bare keys.
+        guard !tool.planned else {
+            NSSound.beep()
+            return
+        }
         // Switching tools leaves the transform session, which commits it
-        // rather than silently dropping the drag.
+        // rather than silently dropping the drag; leaving the crop tool
+        // quietly drops its (uncommitted) box.
         commitPendingTransform()
         if currentTool == .text, tool != .text {
             canvas.commitTextSession()
+        }
+        if currentTool == .crop, tool != .crop {
+            endCropSession()
         }
         currentTool = tool
         canvas.tool = tool
         // Only brush and eraser edit masks; picking one of the other paint
         // tools silently points the target back at the layer rather than
         // blocking the tool or painting the wrong thing.
-        if tool == .fill || tool == .gradient || tool == .text {
+        if tool == .fill || tool == .gradient || tool == .text
+            || tool == .clone || tool == .dodge {
             setPaintTarget(.layer)
         }
+        if tool == .crop {
+            beginCropSession()
+        }
+        syncCanvasPaintState()
         updateOptionsBar()
         reflectSelectedTool(tool)
         updateStatus()
+    }
+
+    /// A bare tool key. A key shared by several tools (the shape group's R)
+    /// cycles them on repeated presses; a key owned by one tool just selects
+    /// it, exactly as before.
+    func selectToolForKey(_ tool: EditorTool) {
+        let peers = EditorTool.allCases.filter {
+            $0.keyCharacter == tool.keyCharacter && !$0.planned
+        }
+        guard let first = peers.first else {
+            NSSound.beep()
+            return
+        }
+        if let index = peers.firstIndex(of: currentTool), peers.count > 1 {
+            selectTool(peers[(index + 1) % peers.count])
+        } else {
+            selectTool(first)
+        }
+    }
+
+    /// Pushes the options-store state the canvas consumes — the active
+    /// paint tool's size and opacity, the shared color, the selection
+    /// gesture options, the shape style, scrubby zoom — into the canvas.
+    func syncCanvasPaintState() {
+        let store = ToolOptionsStore.shared
+        canvas.paintColor = paintColor
+        if let paint = store.paintOptions(for: currentTool) {
+            canvas.brushSize = CGFloat(min(max(paint.size, 1), 200))
+            canvas.brushOpacity = CGFloat(min(max(paint.opacity, 0), 100) / 100)
+        }
+        let modes: [SelectionCombineMode] = [.replace, .add, .subtract, .intersect]
+        canvas.selectionCombineBase = modes[min(max(store.select.modeIndex, 0), 3)]
+        canvas.selectionFeather = max(store.select.feather, 0)
+        canvas.scrubbyZoom = store.view.scrubbyZoom
+        syncCanvasShapeStyle()
+    }
+
+    /// Bare [ and ] on the canvas: steps the active paint tool's size and
+    /// mirrors it into the store, the canvas and the options bar.
+    func brushSizeKeyChanged(_ newSize: CGFloat) {
+        guard var paint = ToolOptionsStore.shared.paintOptions(for: currentTool) else { return }
+        paint.size = Double(newSize)
+        ToolOptionsStore.shared.setPaintOptions(paint, for: currentTool)
+        canvas.brushSize = newSize
+        optionsBar.refreshValues()
     }
 
     // MARK: - Paint target (layer vs. its mask)
@@ -842,11 +663,11 @@ final class EditorViewController: NSViewController {
         }
     }
 
-    /// Mirrors tool selection into the toolbar pill (display only). A
-    /// grouped segment also starts standing for this tool, so the group
-    /// remembers what was last used in it.
+    /// Mirrors tool selection into the rail (display only). A grouped slot
+    /// also starts standing for this tool, so the group remembers what was
+    /// last used in it.
     func reflectSelectedTool(_ tool: EditorTool) {
-        toolPill?.setSelectedTool(tool)
+        toolRail?.setSelectedTool(tool)
     }
 
     @objc func selectSelectTool(_ sender: Any?) { selectTool(.select) }
@@ -861,56 +682,21 @@ final class EditorViewController: NSViewController {
     @objc func selectGradientTool(_ sender: Any?) { selectTool(.gradient) }
     @objc func selectTextTool(_ sender: Any?) { selectTool(.text) }
     @objc func selectEyedropperTool(_ sender: Any?) { selectTool(.eyedropper) }
+    @objc func selectCropTool(_ sender: Any?) { selectTool(.crop) }
+    @objc func selectCloneTool(_ sender: Any?) { selectTool(.clone) }
+    @objc func selectDodgeTool(_ sender: Any?) { selectTool(.dodge) }
+    @objc func selectShapeRectTool(_ sender: Any?) { selectTool(.shapeRect) }
+    @objc func selectShapeEllipseTool(_ sender: Any?) { selectTool(.shapeEllipse) }
+    @objc func selectShapeLineTool(_ sender: Any?) { selectTool(.shapeLine) }
+    @objc func selectZoomTool(_ sender: Any?) { selectTool(.zoom) }
+    @objc func selectHandTool(_ sender: Any?) { selectTool(.hand) }
 
-    private func updateOptionsBar() {
-        // A Free Transform session takes the whole bar over: it is modal on
-        // the canvas, so the active tool's own options cannot be used.
-        let transforming = isTransforming
-        let tool = currentTool
-        let paintTool = !transforming && (tool == .brush || tool == .eraser)
-        let toleranceTool = !transforming && (tool == .wand || tool == .fill)
-        for control in [sizeLabel, sizeSlider, sizeField] as [NSView] {
-            control.isHidden = !paintTool
-        }
-        for control in [opacityLabel, opacitySlider, opacityValueLabel] as [NSView] {
-            control.isHidden = !paintTool
-        }
-        colorWell.isHidden = transforming
-            || !(tool == .brush || tool == .text || tool == .fill || tool == .gradient)
-        let textTool = !transforming && tool == .text
-        fontLabel.isHidden = !textTool
-        fontPopup.isHidden = !textTool
-        fontSizeField.isHidden = !textTool
-        alignmentControl.isHidden = !textTool
-        for control in [toleranceLabel, toleranceSlider, toleranceValueLabel] as [NSView] {
-            control.isHidden = !toleranceTool
-        }
-        contiguousCheck.isHidden = !toleranceTool
-        let gradientTool = !transforming && tool == .gradient
-        gradientShapePopup.isHidden = !gradientTool
-        gradientEndLabel.isHidden = !gradientTool
-        gradientEndWell.isHidden = !gradientTool
-        let eyedropperTool = !transforming && tool == .eyedropper
-        sampleSwatch.isHidden = !eyedropperTool
-        sampleValueLabel.isHidden = !eyedropperTool
-        for control in [
-            transformAngleLabel, transformAngleField, transformScaleXLabel, transformScaleXField,
-            transformScaleYLabel, transformScaleYField, transformSizeLabel, transformSizeWField,
-            transformSizeHLabel, transformSizeHField, transformSamplerLabel, transformSamplerPopup,
-        ] as [NSView] {
-            control.isHidden = !transforming
-        }
-
-        // Tools with nothing to configure hide the bar rather than show an
-        // empty one. Subject select is deliberately among them: the whole
-        // point of it is that there is no tolerance to tune.
-        let barHidden = !transforming
-            && (tool == .select || tool == .ellipseSelect || tool == .lasso || tool == .move
-                || tool == .subject)
-        optionsBar.isHidden = barHidden
-        scrollTopToRoot.isActive = false
-        scrollTopToOptions.isActive = false
-        (barHidden ? scrollTopToRoot : scrollTopToOptions).isActive = true
+    /// Rebuilds the fixed-height options bar for the current state. The
+    /// descriptor lists live in EditorViewController+ToolOptions.swift; a
+    /// Free Transform session takes the whole bar over (it is modal on the
+    /// canvas, so the active tool's own options cannot be used).
+    func updateOptionsBar() {
+        presentToolOptions()
     }
 
     // MARK: - Agent access to the selection
@@ -924,13 +710,6 @@ final class EditorViewController: NSViewController {
 
     // MARK: - Wand, fill, gradient actions
 
-    @objc private func toleranceChanged(_ sender: Any?) {
-        tolerance = Int(toleranceSlider.doubleValue.rounded())
-        toleranceValueLabel.stringValue = "\(tolerance)"
-    }
-
-    private var contiguous: Bool { contiguousCheck.state == .on }
-
     /// sRGB bytes of a color (straight alpha).
     private func colorBytes(_ color: NSColor) -> [UInt8] {
         let c = color.usingColorSpace(.sRGB) ?? .black
@@ -943,15 +722,22 @@ final class EditorViewController: NSViewController {
     }
 
     private func wandClicked(_ point: CGPoint, mode: SelectionCombineMode) {
+        let options = ToolOptionsStore.shared.select
         guard let doc = document?.doc,
             let mask = doc.magicWand(
-                x: Int(point.x), y: Int(point.y), tolerance: tolerance,
-                contiguous: contiguous),
-            let selection = CanvasSelection(
+                x: Int(point.x), y: Int(point.y),
+                tolerance: Int(options.tolerance.rounded()),
+                contiguous: options.contiguous),
+            var selection = CanvasSelection(
                 shape: .mask(mask), canvasWidth: doc.width, canvasHeight: doc.height)
         else {
             NSSound.beep()
             return
+        }
+        // The bar's Feather applies here too — the wand commits outside the
+        // canvas's commitSelection, so it feathers its own result.
+        if options.feather > 0, let feathered = selection.feathered(by: options.feather) {
+            selection = feathered
         }
         // An all-zero combination comes back nil and deselects.
         canvas.setSelection(CanvasSelection.combine(canvas.selection, with: selection, mode: mode))
@@ -962,15 +748,18 @@ final class EditorViewController: NSViewController {
         // A canvas click can't be blocked by menu validation: refuse a fill
         // aimed at an adjustment layer's (ignored) pixels with the alert.
         guard !refuseAdjustmentPixelEdit() else { return }
+        let options = ToolOptionsStore.shared.fill
         let idx = document.activeLayerIndex
-        let rgba = colorBytes(paintColor)
+        // The bar's opacity rides in the fill color's own alpha.
+        let opacity = min(max(options.opacity, 0), 100) / 100
+        let rgba = colorBytes(paintColor.withAlphaComponent(
+            paintColor.alphaComponent * CGFloat(opacity)))
         let mask = canvas.selection?.maskBytes()
-        let tolerance = tolerance
-        let contiguous = contiguous
         document.applyRasterizingEdit("Fill", layer: idx) { doc in
             doc.bucketFilled(
-                idx, x: Int(point.x), y: Int(point.y), tolerance: tolerance,
-                rgba: rgba, contiguous: contiguous, mask: mask)
+                idx, x: Int(point.x), y: Int(point.y),
+                tolerance: Int(options.tolerance.rounded()),
+                rgba: rgba, contiguous: options.contiguous, mask: mask)
         }
     }
 
@@ -982,16 +771,40 @@ final class EditorViewController: NSViewController {
     /// step, no change counting.
     private func sampleColor(at point: CGPoint) {
         guard let document = document,
-              let projection = document.projection ?? document.doc?.flattened(),
-              let sample = projection.pixelRGBA(
-                x: Int(floor(point.x)), y: Int(floor(point.y)))
+              let projection = document.projection ?? document.doc?.flattened()
         else { return }
+        let options = ToolOptionsStore.shared.sample
+        // Sample size: a point, or the plain mean of the 3×3 / 5×5 window
+        // (out-of-bounds pixels just drop out of the mean).
+        let reach = [0, 1, 2][min(max(options.sampleSizeIndex, 0), 2)]
+        let px = Int(floor(point.x))
+        let py = Int(floor(point.y))
+        var sum = (r: 0, g: 0, b: 0, a: 0)
+        var count = 0
+        for dy in -reach...reach {
+            for dx in -reach...reach {
+                guard let pixel = projection.pixelRGBA(x: px + dx, y: py + dy) else { continue }
+                sum.r += Int(pixel.r)
+                sum.g += Int(pixel.g)
+                sum.b += Int(pixel.b)
+                sum.a += Int(pixel.a)
+                count += 1
+            }
+        }
+        guard count > 0 else { return }
+        let sample = (
+            r: UInt8(sum.r / count), g: UInt8(sum.g / count),
+            b: UInt8(sum.b / count), a: UInt8(sum.a / count))
         setPaintColor(NSColor(
             srgbRed: CGFloat(sample.r) / 255, green: CGFloat(sample.g) / 255,
             blue: CGFloat(sample.b) / 255, alpha: CGFloat(sample.a) / 255))
-        sampleSwatch.fillColor = paintColor
-        sampleValueLabel.stringValue =
-            "\(RasterImage.hexString(sample))  \(sample.r) \(sample.g) \(sample.b) \(sample.a)"
+        lastSampleColor = paintColor
+        lastSampleText = RasterImage.hexString(sample)
+        if options.copyOnPick {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(lastSampleText, forType: .string)
+        }
+        optionsBar.refreshValues()
     }
 
     private func gradientCommitted(_ a: CGPoint, _ b: CGPoint) {
@@ -999,20 +812,32 @@ final class EditorViewController: NSViewController {
         // Same rule as fillClicked: a gradient drag ends on the canvas,
         // outside menu validation's reach.
         guard !refuseAdjustmentPixelEdit() else { return }
+        let options = ToolOptionsStore.shared.gradient
         let idx = document.activeLayerIndex
-        let start = colorBytes(paintColor)
-        let end = colorBytes(gradientEndWell.color)
+        // Foreground → background (the rail's swatches); Reverse swaps them
+        // and the bar's opacity rides in both colors' alpha.
+        let opacity = CGFloat(min(max(options.opacity, 0), 100) / 100)
+        let fade: (NSColor) -> [UInt8] = { [weak self] color in
+            self?.colorBytes(color.withAlphaComponent(color.alphaComponent * opacity))
+                ?? [0, 0, 0, 0]
+        }
+        let start = fade(options.reverse ? backgroundColor : paintColor)
+        let end = fade(options.reverse ? paintColor : backgroundColor)
         let kind: RzGradientKind =
-            gradientShapePopup.indexOfSelectedItem == 1
-            ? RZ_GRADIENT_RADIAL : RZ_GRADIENT_LINEAR
+            options.typeIndex == 1 ? RZ_GRADIENT_RADIAL : RZ_GRADIENT_LINEAR
         let mask = canvas.selection?.maskBytes()
         document.applyRasterizingEdit("Gradient", layer: idx) { doc in
             doc.gradiented(idx, from: a, to: b, start: start, end: end, kind: kind, mask: mask)
         }
     }
 
-    private func currentFont() -> NSFont {
-        NSFontManager.shared.font(withFamily: fontFamily, traits: [], weight: 5, size: fontSize)
+    /// The face the text tool draws with: the live family/size plus the
+    /// store's NSFontManager weight. Internal — the +ToolOptions descriptors
+    /// rebuild the canvas font through it.
+    func currentFont() -> NSFont {
+        let weight = min(max(ToolOptionsStore.shared.text.weight, 0), 15)
+        return NSFontManager.shared.font(
+            withFamily: fontFamily, traits: [], weight: weight, size: fontSize)
             ?? .systemFont(ofSize: fontSize)
     }
 
@@ -1106,19 +931,27 @@ final class EditorViewController: NSViewController {
     /// what the re-render will produce.
     private func applyTextOptions(_ payload: TextLayerPayload) {
         let font = payload.nsFont
-        if let family = font.familyName, fontPopup.itemTitles.contains(family) {
+        if let family = font.familyName,
+           NSFontManager.shared.availableFontFamilies.contains(family) {
             fontFamily = family
-            fontPopup.selectItem(withTitle: family)
         }
         fontSize = min(max(font.pointSize, 6), 500)
-        fontSizeField.integerValue = Int(fontSize.rounded())
-        paintColor = payload.nsColor
-        colorWell.color = paintColor
+        setPaintColor(payload.nsColor)
         textAlignment = payload.nsAlignment
-        alignmentControl.selectedSegment = Self.alignmentIndex(textAlignment)
         canvas.textFont = font
-        canvas.paintColor = paintColor
         canvas.textAlignment = textAlignment
+        // The bar shows what is being edited; the persisted defaults follow.
+        // The payload renders at the family's regular face (its schema has
+        // no weight), so the stored weight resets too — otherwise the first
+        // options-bar edit would silently rebuild the session's font at
+        // whatever weight the user last painted NEW text with.
+        var text = ToolOptionsStore.shared.text
+        text.family = fontFamily
+        text.size = Double(fontSize)
+        text.alignmentIndex = Self.alignmentIndex(textAlignment)
+        text.weight = 5
+        ToolOptionsStore.shared.text = text
+        optionsBar.refreshValues()
     }
 
     /// Commits a text session: a NEW text layer above the active one, or the
@@ -1215,7 +1048,8 @@ final class EditorViewController: NSViewController {
     }
 
     /// Samplers offered for the commit-time resample, in popup order.
-    private static let transformSamplers: [(title: String, value: RzResizeFilter)] = [
+    /// Internal: the +ToolOptions descriptors list the titles.
+    static let transformSamplers: [(title: String, value: RzResizeFilter)] = [
         ("Nearest", RZ_FILTER_NEAREST),
         ("Bilinear", RZ_FILTER_BILINEAR),
         ("Bicubic (Catmull-Rom)", RZ_FILTER_CATMULL_ROM),
@@ -1224,7 +1058,7 @@ final class EditorViewController: NSViewController {
 
     /// Widest scale the numeric fields accept, mirroring
     /// LayerTransform.maxScaleMagnitude.
-    private static let maxScalePercent = Double(LayerTransform.maxScaleMagnitude) * 100
+    static let maxScalePercent = Double(LayerTransform.maxScaleMagnitude) * 100
 
     /// How far from a corner (SCREEN points) the rotation ring reaches. The
     /// handles are tested first, so the ring is what is left of this radius
@@ -1336,29 +1170,10 @@ final class EditorViewController: NSViewController {
             warped: session.transform.hasCornerOffsets)
     }
 
-    /// The parameters → fields half of the binding (the fields' actions are
-    /// the other half). W/H are the layer's own scaled dimensions (|scale| ×
-    /// base pixel size, whole pixels) — not the rotated bounding box — so
-    /// they read straight off the scales without decomposing anything.
+    /// The parameters → controls half of the binding (the descriptors'
+    /// setters are the other half): the bar re-reads every binding.
     private func updateTransformFields() {
-        guard let session = transformSession else { return }
-        transformAngleField.stringValue = Self.transformNumber(session.transform.degrees)
-        transformScaleXField.stringValue = Self.transformNumber(
-            Double(session.transform.scaleX) * 100)
-        transformScaleYField.stringValue = Self.transformNumber(
-            Double(session.transform.scaleY) * 100)
-        transformSizeWField.stringValue = String(
-            Int((abs(session.transform.scaleX) * session.sourceRect.width).rounded()))
-        transformSizeHField.stringValue = String(
-            Int((abs(session.transform.scaleY) * session.sourceRect.height).rounded()))
-        transformSamplerPopup.selectItem(at: Self.transformSamplerIndex(session.sampler))
-    }
-
-    /// Two decimals with trailing zeros dropped: "45", "-12.5", "133.33".
-    private static func transformNumber(_ value: Double) -> String {
-        let rounded = (value * 100).rounded() / 100
-        guard rounded != rounded.rounded() else { return String(Int(rounded)) }
-        return String(format: "%.2f", rounded)
+        optionsBar.refreshValues()
     }
 
     // MARK: Free Transform gestures
@@ -1441,69 +1256,83 @@ final class EditorViewController: NSViewController {
         updateTransformFields()
     }
 
-    // MARK: Free Transform options bar
+    // MARK: Free Transform options bar (descriptor bindings)
 
-    @objc private func transformAngleChanged(_ sender: Any?) {
-        guard transformSession != nil else { return }
-        transformSession?.transform.degrees = min(
-            max(transformAngleField.doubleValue, -360), 360)
-        refreshTransformPreview()
-        updateTransformFields()
+    // The session and its struct stay private; the +ToolOptions descriptors
+    // read and write the parameters through these. Every setter re-renders
+    // the preview and lets the bar re-read the whole set, so W tracks a
+    // scale edit and vice versa. W = |scaleX| × base width, so typing W
+    // sets scaleX = W / base width — preserving the current sign, so a
+    // mirrored layer stays mirrored — through the same clamp the scale
+    // setters use; bad input just snaps back to the current value.
+
+    var transformDegrees: Double {
+        get { transformSession?.transform.degrees ?? 0 }
+        set {
+            guard transformSession != nil else { return }
+            transformSession?.transform.degrees = min(max(newValue, -360), 360)
+            refreshTransformPreview()
+        }
     }
 
-    @objc private func transformScaleXChanged(_ sender: Any?) {
-        guard transformSession != nil else { return }
-        transformSession?.transform.scaleX = LayerTransform.clampScale(
-            CGFloat(transformScaleXField.doubleValue / 100))
-        refreshTransformPreview()
-        updateTransformFields()
+    var transformScaleXPercent: Double {
+        get { Double(transformSession?.transform.scaleX ?? 1) * 100 }
+        set {
+            guard transformSession != nil else { return }
+            transformSession?.transform.scaleX = LayerTransform.clampScale(CGFloat(newValue / 100))
+            refreshTransformPreview()
+        }
     }
 
-    @objc private func transformScaleYChanged(_ sender: Any?) {
-        guard transformSession != nil else { return }
-        transformSession?.transform.scaleY = LayerTransform.clampScale(
-            CGFloat(transformScaleYField.doubleValue / 100))
-        refreshTransformPreview()
-        updateTransformFields()
+    var transformScaleYPercent: Double {
+        get { Double(transformSession?.transform.scaleY ?? 1) * 100 }
+        set {
+            guard transformSession != nil else { return }
+            transformSession?.transform.scaleY = LayerTransform.clampScale(CGFloat(newValue / 100))
+            refreshTransformPreview()
+        }
     }
 
-    /// W = |scaleX| × base width, so typing W sets scaleX = W / base width —
-    /// preserving the current sign, so a mirrored layer stays mirrored — and
-    /// runs through the same clamp the scale fields use. Bad input (the
-    /// formatter rejects non-numbers; a zero base cannot happen, the session
-    /// refuses empty layers) just snaps the field back to the current value.
-    @objc private func transformSizeWChanged(_ sender: Any?) {
-        guard let session = transformSession else { return }
-        let typed = CGFloat(transformSizeWField.doubleValue)
-        let base = session.sourceRect.width
-        if typed > 0, base > 0 {
+    var transformWidthPixels: Double {
+        get {
+            guard let session = transformSession else { return 0 }
+            return Double((abs(session.transform.scaleX) * session.sourceRect.width).rounded())
+        }
+        set {
+            guard let session = transformSession, newValue > 0,
+                  session.sourceRect.width > 0 else { return }
             let sign: CGFloat = session.transform.scaleX < 0 ? -1 : 1
-            transformSession?.transform.scaleX = LayerTransform.clampScale(sign * typed / base)
+            transformSession?.transform.scaleX = LayerTransform.clampScale(
+                sign * CGFloat(newValue) / session.sourceRect.width)
             refreshTransformPreview()
         }
-        updateTransformFields()
     }
 
-    @objc private func transformSizeHChanged(_ sender: Any?) {
-        guard let session = transformSession else { return }
-        let typed = CGFloat(transformSizeHField.doubleValue)
-        let base = session.sourceRect.height
-        if typed > 0, base > 0 {
+    var transformHeightPixels: Double {
+        get {
+            guard let session = transformSession else { return 0 }
+            return Double((abs(session.transform.scaleY) * session.sourceRect.height).rounded())
+        }
+        set {
+            guard let session = transformSession, newValue > 0,
+                  session.sourceRect.height > 0 else { return }
             let sign: CGFloat = session.transform.scaleY < 0 ? -1 : 1
-            transformSession?.transform.scaleY = LayerTransform.clampScale(sign * typed / base)
+            transformSession?.transform.scaleY = LayerTransform.clampScale(
+                sign * CGFloat(newValue) / session.sourceRect.height)
             refreshTransformPreview()
         }
-        updateTransformFields()
     }
 
-    @objc private func transformSamplerChanged(_ sender: Any?) {
-        let index = min(
-            max(transformSamplerPopup.indexOfSelectedItem, 0), Self.transformSamplers.count - 1)
-        transformSampler = Self.transformSamplers[index].value
-        transformSession?.sampler = transformSampler
-        // Nearest previews without smoothing, so the box shows the hard
-        // pixel edges the commit will produce.
-        refreshTransformPreview()
+    var transformSamplerListIndex: Int {
+        get { Self.transformSamplerIndex(transformSession?.sampler ?? transformSampler) }
+        set {
+            let index = min(max(newValue, 0), Self.transformSamplers.count - 1)
+            transformSampler = Self.transformSamplers[index].value
+            transformSession?.sampler = transformSampler
+            // Nearest previews without smoothing, so the box shows the hard
+            // pixel edges the commit will produce.
+            refreshTransformPreview()
+        }
     }
 
     // MARK: Free Transform commit / cancel
@@ -1579,71 +1408,81 @@ final class EditorViewController: NSViewController {
         commitTransformSession()
     }
 
-    // MARK: - Options bar actions
+    // MARK: - Options bar and rail plumbing
 
-    @objc private func sizeSliderChanged(_ sender: Any?) {
-        brushSize = CGFloat(sizeSlider.doubleValue)
-        sizeField.integerValue = Int(sizeSlider.doubleValue.rounded())
-        canvas.brushSize = brushSize
-    }
-
-    @objc private func sizeFieldChanged(_ sender: Any?) {
-        let clamped = min(max(sizeField.integerValue, 1), 200)
-        sizeField.integerValue = clamped
-        brushSize = CGFloat(clamped)
-        sizeSlider.doubleValue = Double(clamped)
-        canvas.brushSize = brushSize
-    }
-
-    @objc private func opacitySliderChanged(_ sender: Any?) {
-        brushOpacity = CGFloat(opacitySlider.doubleValue)
-        opacityValueLabel.stringValue = "\(Int((opacitySlider.doubleValue * 100).rounded()))%"
-        canvas.brushOpacity = brushOpacity
-    }
-
-    @objc private func colorChanged(_ sender: Any?) {
-        setPaintColor(colorWell.color)
-    }
-
-    /// The single write path for the shared paint color (color well changes,
-    /// eyedropper samples): brush, fill, gradient start, and text all read
-    /// `paintColor`, and the well and canvas mirror it.
-    private func setPaintColor(_ color: NSColor) {
+    /// The single write path for the shared paint color (options-bar
+    /// swatches, eyedropper samples, the rail's foreground swatch): brush,
+    /// fill, gradient start, and text all read `paintColor`, and the rail,
+    /// store and canvas mirror it.
+    func setPaintColor(_ color: NSColor) {
         paintColor = color
-        colorWell.color = color
+        toolRail?.foregroundSwatchColor = color
         canvas.paintColor = color
         canvas.updateActiveTextSessionStyle()
+        var shared = ToolOptionsStore.shared.sharedState
+        shared.foreground = TextLayer.hex(color)
+        ToolOptionsStore.shared.sharedState = shared
     }
 
-    @objc private func fontFamilyChanged(_ sender: Any?) {
-        if let family = fontPopup.titleOfSelectedItem {
-            fontFamily = family
-        }
-        canvas.textFont = currentFont()
-        canvas.updateActiveTextSessionStyle()
+    /// The background color's write path (the rail's second swatch): the
+    /// gradient tool's end color.
+    func setBackgroundColor(_ color: NSColor) {
+        backgroundColor = color
+        toolRail?.backgroundSwatchColor = color
+        var shared = ToolOptionsStore.shared.sharedState
+        shared.background = TextLayer.hex(color)
+        ToolOptionsStore.shared.sharedState = shared
     }
 
-    @objc private func fontSizeChanged(_ sender: Any?) {
-        let clamped = min(max(fontSizeField.integerValue, 6), 500)
-        fontSizeField.integerValue = clamped
-        fontSize = CGFloat(clamped)
+    /// Rail swatch clicks: the shared color panel, retargeted at whichever
+    /// swatch was clicked last.
+    func pickForegroundColor() {
+        openColorPanel(action: #selector(colorPanelPickedForeground(_:)))
+    }
+
+    func pickBackgroundColor() {
+        openColorPanel(action: #selector(colorPanelPickedBackground(_:)))
+    }
+
+    private func openColorPanel(action: Selector) {
+        let panel = NSColorPanel.shared
+        panel.showsAlpha = true
+        panel.setTarget(self)
+        panel.setAction(action)
+        colorPanelTargetsSelf = true
+        panel.color = action == #selector(colorPanelPickedForeground(_:))
+            ? paintColor : backgroundColor
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func colorPanelPickedForeground(_ sender: Any?) {
+        setPaintColor(NSColorPanel.shared.color)
+        optionsBar.refreshValues()
+    }
+
+    @objc private func colorPanelPickedBackground(_ sender: Any?) {
+        setBackgroundColor(NSColorPanel.shared.color)
+        optionsBar.refreshValues()
+    }
+
+    /// Fired by the options bar after any control commits a value: mirror
+    /// whatever may have changed into the canvas and the status line.
+    func toolOptionsEdited() {
+        syncCanvasPaintState()
         canvas.textFont = currentFont()
+        canvas.textAlignment = textAlignment
         canvas.updateActiveTextSessionStyle()
+        toolRail?.foregroundSwatchColor = paintColor
+        toolRail?.backgroundSwatchColor = backgroundColor
+        updateStatus()
     }
 
     /// Segment order of the alignment control, which is also the payload's
     /// `alignments` order.
-    private static let alignmentSegmentValues: [NSTextAlignment] = [.left, .center, .right]
+    static let alignmentSegmentValues: [NSTextAlignment] = [.left, .center, .right]
 
-    private static func alignmentIndex(_ alignment: NSTextAlignment) -> Int {
+    static func alignmentIndex(_ alignment: NSTextAlignment) -> Int {
         alignmentSegmentValues.firstIndex(of: alignment) ?? 0
-    }
-
-    @objc private func alignmentChanged(_ sender: Any?) {
-        let segment = min(max(alignmentControl.selectedSegment, 0), 2)
-        textAlignment = Self.alignmentSegmentValues[segment]
-        canvas.textAlignment = textAlignment
-        canvas.updateActiveTextSessionStyle()
     }
 
     // MARK: - Zoom
@@ -1677,6 +1516,30 @@ final class EditorViewController: NSViewController {
 
     func zoomActual() {
         applyZoom(1.0)
+    }
+
+    /// The zoom tool's click: one ladder step in (or out, with ⌥), keeping
+    /// the clicked point where it is.
+    func zoomStep(at point: CGPoint, out: Bool) {
+        let current = scrollView.magnification
+        let next: CGFloat
+        if out {
+            guard let below = Self.zoomLadder.last(where: { $0 < current - 0.0001 }) else { return }
+            next = below
+        } else {
+            next = Self.zoomLadder.first { $0 > current + 0.0001 } ?? Self.zoomLadder.last ?? 1
+        }
+        scrollView.setMagnification(
+            min(max(next, scrollView.minMagnification), scrollView.maxMagnification),
+            centeredAt: point)
+        updateZoomLabel()
+    }
+
+    /// The zoom tool's marquee: fill the viewport with the dragged rect.
+    func zoomToRect(_ rect: CGRect) {
+        guard rect.width > 0, rect.height > 0 else { return }
+        scrollView.magnify(toFit: rect)
+        updateZoomLabel()
     }
 
     func zoomToFit() {
@@ -1717,6 +1580,11 @@ final class EditorViewController: NSViewController {
             // changes; same-size doc swaps keep the selection as-is.
             canvas.setSelection(nil)
             zoomToFit()
+            // A crop box measured against the old canvas is meaningless:
+            // reopen it over the new one.
+            if currentTool == .crop {
+                beginCropSession()
+            }
         }
         canvas.needsDisplay = true
         syncPaintTarget()
@@ -1727,36 +1595,36 @@ final class EditorViewController: NSViewController {
 
     // MARK: - Status bar
 
+    // The redesign's reduced segment set: dimensions, mode, selection on
+    // the left; the active tool and its key on the right. Layer name, blend
+    // mode, opacity and the zoom percentage were deliberately dropped —
+    // all visible in the Layers panel or the zoom pill.
     private func updateStatus() {
         guard let document = document, let doc = document.doc else {
             statusDims.text = "No document open"
-            statusLayer.text = ""
-            statusBlend.text = ""
+            statusMode.text = ""
+            statusSelection.text = ""
             statusTool.text = "Drop a file, or ⌘O"
-            statusZoom.text = ""
             return
         }
-        var dims = "\(doc.width) × \(doc.height) px"
+        statusDims.text = "\(doc.width) × \(doc.height) px"
+        statusMode.text = "RGB · 8-bit"
         if canvas.quickMaskActive {
             // The selection segment's slot: the mode holds the selection as
             // its editable buffer, so this is what "selected" currently is.
-            dims += " · Quick Mask"
+            statusSelection.text = "Quick Mask"
         } else if let selection = canvas.selectionRect {
-            dims += " · sel \(Int(selection.width)) × \(Int(selection.height))"
-        }
-        statusDims.text = dims
-        if let info = doc.layerInfo(document.activeLayerIndex) {
-            // Brush and eraser hit the mask when it is the paint target; say
-            // so, alongside the panel's focus ring.
-            statusLayer.text = paintTarget == .mask ? "\(info.name) · Mask" : info.name
-            let percent = Int((Double(info.opacity) * 100).rounded())
-            statusBlend.text =
-                "\(RzBlendMode.displayName(for: info.blendMode)) · \(percent)%"
+            statusSelection.text =
+                "Selection: \(Int(selection.width)) × \(Int(selection.height)) px"
         } else {
-            statusLayer.text = ""
-            statusBlend.text = ""
+            statusSelection.text = "Selection: none"
         }
-        statusTool.text = isTransforming ? "Free Transform" : currentTool.displayName
+        // Brush and eraser hit the mask when it is the paint target; say
+        // so, alongside the panel's focus ring.
+        let maskSuffix = paintTarget == .mask ? " · Mask" : ""
+        statusTool.text = isTransforming
+            ? "Free Transform"
+            : "\(currentTool.displayName) · \(currentTool.keyCharacter.uppercased())\(maskSuffix)"
         updateZoomLabel()
     }
 
@@ -1778,7 +1646,28 @@ final class EditorViewController: NSViewController {
     private func updateZoomLabel() {
         let percent = Int((scrollView.magnification * 100).rounded())
         zoomPill.setZoomText("\(percent)%")
-        statusZoom.text = "\(percent)%"
+        // The zoom tool's options show the same number.
+        if currentTool == .zoom || currentTool == .hand {
+            optionsBar.refreshValues()
+        }
+    }
+
+    /// The magnification as the options bar's percentage field, applied
+    /// through the same clamp the menu actions use.
+    var zoomPercent: Double {
+        get { Double(scrollView.magnification) * 100 }
+        set { applyZoom(CGFloat(newValue / 100)) }
+    }
+
+    /// Fill the viewport: the larger of the two fit scales, so the canvas
+    /// covers the well with no letterboxing.
+    func zoomToFill() {
+        guard let doc = document?.doc else { return }
+        let size = doc.canvasSize
+        guard size.width > 0, size.height > 0 else { return }
+        let available = scrollView.contentSize
+        let scale = max(available.width / size.width, available.height / size.height)
+        applyZoom(min(scale, 32))
     }
 
     @objc private func magnificationDidChange(_ note: Notification) {
@@ -2564,6 +2453,14 @@ extension EditorViewController: NSUserInterfaceValidations {
         #selector(selectGradientTool(_:)): .gradient,
         #selector(selectTextTool(_:)): .text,
         #selector(selectEyedropperTool(_:)): .eyedropper,
+        #selector(selectCropTool(_:)): .crop,
+        #selector(selectCloneTool(_:)): .clone,
+        #selector(selectDodgeTool(_:)): .dodge,
+        #selector(selectShapeRectTool(_:)): .shapeRect,
+        #selector(selectShapeEllipseTool(_:)): .shapeEllipse,
+        #selector(selectShapeLineTool(_:)): .shapeLine,
+        #selector(selectZoomTool(_:)): .zoom,
+        #selector(selectHandTool(_:)): .hand,
     ]
 
     /// True while a text-editing responder owns the keyboard: a field
@@ -2590,7 +2487,9 @@ extension EditorViewController: NSUserInterfaceValidations {
             if let menuItem = item as? NSMenuItem {
                 menuItem.state = currentTool == tool ? .on : .off
             }
-            return true
+            // A planned tool stays visible with its "Soon" affordance but
+            // never enabled — in menus, the rail's dropdowns, anywhere.
+            return !tool.planned
         }
 
         // While a text session or a Free Transform is active, only tool

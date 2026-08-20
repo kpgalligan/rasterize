@@ -3,9 +3,14 @@
 **Status: the suggested next phase (bottom of this file) has shipped** —
 adjustment layers (all nine ops, Curves included), clipping masks, the
 eyedropper and crop tools, and selection morphology + Quick Mask are in the
-app, the core, and the MCP catalog, which now stands at 43 tools. The
-follow-ons — layer groups, shape layers, layer styles, retouch brushes —
-remain open.
+app, the core, and the MCP catalog. **A second wave shipped with the UI
+redesign** (tool rail + fixed options bar): the interactive Crop tool with
+straighten, shape layers (rect/ellipse/line as parametric `meta` layers,
+exactly as §"Shape layers" below planned), and the first two retouch
+brushes — Clone Stamp (a canvas-side overlay builder) and Dodge/Burn (a
+core op, `doc_retouch.rs`) — plus Zoom/Hand tools; the catalog now stands
+at 50 tools. The remaining follow-ons — layer groups, layer styles, the
+healing brush and the other per-dab brushes — stay open.
 
 A survey against Photoshop / Photopea / GIMP / Affinity, ranked by value
 per unit of effort **given this codebase's architecture** — pure ops over

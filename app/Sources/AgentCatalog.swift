@@ -56,8 +56,9 @@ extension AgentServer {
                     + "opacity, blend mode, visibility, layer mask (has_mask, mask_enabled), "
                     + "and clipped flag (see set_layer_clipped). "
                     + "A re-editable TEXT layer also reports a text object (string, font, size, "
-                    + "color, alignment) — those are the layers edit_text_layer can change; a "
-                    + "layer without that key is plain pixels. An ADJUSTMENT layer reports "
+                    + "color, alignment) — those are the layers edit_text_layer can change — and "
+                    + "a SHAPE layer a shape object (kind, size, fill, stroke); a "
+                    + "layer without those keys is plain pixels. An ADJUSTMENT layer reports "
                     + "is_adjustment true plus an adjustment object (op, params) — those are "
                     + "the layers edit_adjustment_layer can change. Layer index 0 is the bottom "
                     + "layer; offsets are measured from the canvas top-left corner, y "
@@ -483,6 +484,90 @@ extension AgentServer {
                     "document_id": docID,
                 ], required: ["points"]),
             tool(
+                "clone_stamp",
+                "Clones pixels from one part of the picture onto a layer — the Clone Stamp "
+                    + "tool. A snapshot of the CURRENT flattened composite, displaced by "
+                    + "(first point − source), is painted through a round-capped stroke "
+                    + "along points, so what lands under the stroke comes from a region the "
+                    + "same offset away: source_x,source_y is what appears under the FIRST "
+                    + "point, and the offset stays fixed along the stroke (aligned cloning). "
+                    + "Respects the active selection. Errors on an adjustment layer (no "
+                    + "pixels to rewrite). This rewrites the layer's pixels, so a "
+                    + "re-editable text, shape, or Live Photo layer drops its description "
+                    + "(undo restores it).",
+                [
+                    "source_x": [
+                        "type": "number",
+                        "description": "Canvas x of the point cloned FROM — the pixels there "
+                            + "land under the stroke's first point.",
+                    ],
+                    "source_y": [
+                        "type": "number",
+                        "description": "Canvas y of the point cloned FROM.",
+                    ],
+                    "points": [
+                        "type": "array",
+                        "description": "[[x, y], …] along the stroke, in canvas px.",
+                        "items": [
+                            "type": "array", "items": ["type": "number"],
+                            "minItems": 2, "maxItems": 2,
+                        ],
+                        "minItems": 1, "maxItems": 10_000,
+                    ],
+                    "size": [
+                        "type": "number",
+                        "description": "Stroke width in px (1-200, default 24).",
+                    ],
+                    "opacity": [
+                        "type": "number", "minimum": 0, "maximum": 1,
+                        "description": "Strength of the cloned paint (default 1).",
+                    ],
+                    "layer": index,
+                    "document_id": docID,
+                ], required: ["source_x", "source_y", "points"]),
+            tool(
+                "dodge_burn",
+                "Lightens (dodge) or, with burn: true, darkens a layer's pixels where a "
+                    + "round-capped stroke along points covers them — the Dodge / Burn tool. "
+                    + "exposure is the strength and range picks the tones that move most: "
+                    + "shadows, midtones (default), or highlights. Respects the active "
+                    + "selection; repeat the stroke to build the effect up. Errors on an "
+                    + "adjustment layer (edit its parameters instead). This rewrites the "
+                    + "layer's pixels, so a re-editable text, shape, or Live Photo layer drops its description "
+                    + "(undo restores it).",
+                [
+                    "points": [
+                        "type": "array",
+                        "description": "[[x, y], …] along the stroke, in canvas px.",
+                        "items": [
+                            "type": "array", "items": ["type": "number"],
+                            "minItems": 2, "maxItems": 2,
+                        ],
+                        "minItems": 1, "maxItems": 10_000,
+                    ],
+                    "size": [
+                        "type": "number",
+                        "description": "Stroke width in px (1-200, default 24).",
+                    ],
+                    "exposure": [
+                        "type": "number", "minimum": 0, "maximum": 100,
+                        "description": "Strength in percent (0-100, default 50).",
+                    ],
+                    "range": [
+                        "type": "string",
+                        "enum": ["shadows", "midtones", "highlights"],
+                        "description": "Which tones the stroke moves most (default "
+                            + "midtones).",
+                    ],
+                    "burn": [
+                        "type": "boolean",
+                        "description": "true darkens (burn) instead of lightening (dodge). "
+                            + "Default false.",
+                    ],
+                    "layer": index,
+                    "document_id": docID,
+                ], required: ["points"]),
+            tool(
                 "add_text",
                 "Rasterizes text onto a layer's pixels — the characters become pixels and "
                     + "cannot be changed afterwards, so prefer add_text_layer when the text "
@@ -591,6 +676,71 @@ extension AgentServer {
                     ],
                     "document_id": docID,
                 ]),
+            tool(
+                "add_shape_layer",
+                "Adds a RE-EDITABLE shape layer above the active layer and selects it — "
+                    + "the same parametric layers the app's shape tools drag out: the kind, "
+                    + "box size, fill, stroke and corner radius become the layer's "
+                    + "description and the pixels are only their rendering. x,y is the "
+                    + "TOP-LEFT corner of the shape box in canvas px and w,h its size; the "
+                    + "shape lands exactly there (the layer's raster is a few px larger on "
+                    + "every side for stroke overhang and antialiasing). rect and ellipse "
+                    + "take fill and/or stroke — pass at least one; a line is stroke-only "
+                    + "and runs across the box's diagonal, top-left to bottom-right, or "
+                    + "bottom-left to top-right with flipped: true. Returns the new layer's "
+                    + "index and name. NOTE: painting on the layer afterwards drops the "
+                    + "shape description and leaves plain pixels.",
+                [
+                    "kind": [
+                        "type": "string",
+                        "enum": ShapeLayerPayload.kinds,
+                        "description": "What to draw: rect, ellipse, or line.",
+                    ],
+                    "x": [
+                        "type": "number",
+                        "description": "Shape box top-left x, canvas px.",
+                    ],
+                    "y": [
+                        "type": "number",
+                        "description": "Shape box top-left y, canvas px.",
+                    ],
+                    "w": [
+                        "type": "number",
+                        "description": "Shape box width in px (>= 1; a line may have 0 on "
+                            + "one axis).",
+                    ],
+                    "h": [
+                        "type": "number",
+                        "description": "Shape box height in px (>= 1; a line may have 0 on "
+                            + "one axis).",
+                    ],
+                    "flipped": [
+                        "type": "boolean",
+                        "description": "Line only (default false): false runs top-left to "
+                            + "bottom-right across the box, true bottom-left to top-right.",
+                    ],
+                    "fill": [
+                        "type": "string",
+                        "description": "Hex fill color, #RRGGBB or #RRGGBBAA; omit for no "
+                            + "fill. Ignored for lines.",
+                    ],
+                    "stroke": [
+                        "type": "string",
+                        "description": "Hex stroke color, #RRGGBB or #RRGGBBAA; omit for no "
+                            + "stroke (a line requires one).",
+                    ],
+                    "stroke_width": [
+                        "type": "number",
+                        "description": "Stroke width in px, centered on the path (0-200, "
+                            + "default 2; a line needs at least 1).",
+                    ],
+                    "radius": [
+                        "type": "number",
+                        "description": "Rect corner radius in px (default 0 = square "
+                            + "corners; ignored by ellipse and line).",
+                    ],
+                    "document_id": docID,
+                ], required: ["kind", "x", "y", "w", "h"]),
             tool(
                 "add_live_photo_layer",
                 "Adds an Apple LIVE PHOTO as a new layer above the active one and selects "
@@ -807,10 +957,24 @@ extension AgentServer {
                 ], required: ["axis"]),
             tool(
                 "crop",
-                "Crops the document to a rectangle (canvas coordinates, origin top-left).",
+                "Crops the document to a rectangle (canvas coordinates, origin top-left). "
+                    + "A nonzero angle straightens first — the Crop tool's straighten "
+                    + "slider: every layer is rotated by −angle about the rect's center, "
+                    + "then the canvas is cropped, as one undo step. Straightening "
+                    + "resamples every layer's pixels, so re-editable text, shape and Live "
+                    + "Photo layers rasterize — their descriptions drop, and the result "
+                    + "names which (undo restores them). At angle 0 the crop only moves "
+                    + "the canvas window and every description stays valid.",
                 [
                     "x": ["type": "integer"], "y": ["type": "integer"],
                     "width": ["type": "integer"], "height": ["type": "integer"],
+                    "angle": [
+                        "type": "number", "minimum": -45, "maximum": 45,
+                        "description": "Straighten angle in degrees (-45 to 45, default 0): "
+                            + "the content rotates by −angle, so a positive angle turns the "
+                            + "picture counter-clockwise on screen — the same sign as the "
+                            + "app's Straighten field.",
+                    ],
                     "document_id": docID,
                 ], required: ["x", "y", "width", "height"]),
             tool(

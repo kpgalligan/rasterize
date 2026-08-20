@@ -317,6 +317,21 @@ RzDocument *rz_doc_painting_layer(const RzDocument *doc, size_t idx,
                                   const uint8_t *src, uint32_t w, uint32_t h,
                                   RzCompositeMode mode, float alpha);
 
+/* Dodges (brightens, burn false) or burns (darkens, burn true) layer idx
+ * where a stroke overlay covers it. src is the SAME canvas-frame
+ * premultiplied overlay rz_doc_painting_layer takes (w/h must equal the
+ * canvas size); ONLY its alpha channel is read, as per-pixel stroke
+ * coverage. Each color channel moves toward white (dodge) or black (burn),
+ * banded by its own value — range 0 shadows, 1 midtones, 2 highlights —
+ * and scaled by exposure (clamped to [0, 1]). Layer alpha is never
+ * touched; overlay outside the layer's extent is ignored (the layer does
+ * NOT grow). NULL on dimension mismatch, non-finite exposure, range > 2,
+ * out-of-range idx, a layer extent that misses the canvas, or when no
+ * pixel would change. */
+RzDocument *rz_doc_dodge_burn_layer(const RzDocument *doc, size_t idx,
+                                    const uint8_t *src, uint32_t w, uint32_t h,
+                                    float exposure, uint8_t range, bool burn);
+
 /* Whole-document geometry: every layer's pixels and offset transform
  * together with the canvas. */
 RzDocument *rz_doc_rotate90(const RzDocument *doc);
