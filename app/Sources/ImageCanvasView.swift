@@ -167,12 +167,39 @@ final class ImageCanvasView: NSView {
     /// Edge hardness, 0–1. Below 1 the stroke stamps SoftBrush dabs instead
     /// of stroking a hard path; the dab images below are latched per stroke.
     var brushHardness: CGFloat = 1
+    /// The rest of the tip (per-dab deposit, dab rhythm, squashed/rotated
+    /// footprint) plus the stroke behaviors: any non-default tip value also
+    /// swaps the stroke onto the stamped pipeline (SoftBrush.isStamped).
+    var brushFlow: CGFloat = 1
+    var brushSpacingPercent: CGFloat = BrushTip.defaultSpacingPercent
+    var brushAngle: CGFloat = 0
+    var brushRoundness: CGFloat = 1
+    /// Smoothing, 0–1: the pulled-string leash's length as a fraction of
+    /// 32 screen px (converted to canvas px per stroke at the live zoom).
+    var brushSmoothing: CGFloat = 0
+    var brushPressureSize = false
+    var brushAirbrush = false
     private var strokeSoftDab: CGImage?
     private var cloneDabMask: CGImage?
-    /// Soft COVERAGE strokes (mask / Quick Mask) stamp full-alpha dabs and
-    /// apply the stroke's opacity once, here, where the overlay is
-    /// consumed — per-dab alpha would compound where dabs overlap, pushing
-    /// a 50% stroke's core toward 100%. 1 for every other stroke.
+    /// Latched per stroke with the dab images: an options edit mid-drag
+    /// cannot bend a live stroke.
+    private var strokeTip = BrushTip()
+    private var strokeLeash = StrokeLeash(position: .zero, radius: 0)
+    /// True when Pressure size is on AND the stroke came from a tablet:
+    /// dab diameters then track the pen's pressure. Mouse strokes stay
+    /// constant-size whatever the checkbox says.
+    private var strokeUsesPressure = false
+    /// The latest (leashed) brush position and pressure — where an
+    /// airbrush tick deposits while the hand rests.
+    private var strokeCursor = CGPoint.zero
+    private var strokeCursorPressure: CGFloat = 1
+    private var strokeLastPressure: CGFloat = 1
+    private var airbrushTimer: Timer?
+    /// Stamped COVERAGE strokes (mask / Quick Mask) stamp dabs at the
+    /// tip's FLOW alpha (full by default) and apply the stroke's opacity
+    /// once, here, where the overlay is consumed — per-dab opacity would
+    /// compound where dabs overlap, pushing a 50% stroke's core toward
+    /// 100%. 1 for every other stroke.
     private var strokeCoverageScale: CGFloat = 1
 
     // Selection options, kept current by EditorViewController: the options
@@ -1165,7 +1192,9 @@ final class ImageCanvasView: NSView {
         if quickMaskActive {
             switch tool {
             case .brush, .eraser:
-                beginStroke(at: clamp(point: convert(event.locationInWindow, from: nil)))
+                beginStroke(
+                    at: clamp(point: convert(event.locationInWindow, from: nil)),
+                    pressure: Self.tabletPressure(of: event))
                 return
             case .zoom, .hand:
                 break
@@ -1233,7 +1262,7 @@ final class ImageCanvasView: NSView {
             NSCursor.closedHand.set()
             onMoveBegin?()
         case .brush, .eraser:
-            beginStroke(at: point)
+            beginStroke(at: point, pressure: Self.tabletPressure(of: event))
         case .text:
             onTextClick?(point)
         case .eyedropper:
@@ -1251,10 +1280,10 @@ final class ImageCanvasView: NSView {
             } else if cloneSource == nil {
                 NSSound.beep()
             } else {
-                beginStroke(at: point)
+                beginStroke(at: point, pressure: Self.tabletPressure(of: event))
             }
         case .dodge:
-            beginStroke(at: point)
+            beginStroke(at: point, pressure: Self.tabletPressure(of: event))
         case .shapeRect, .shapeEllipse, .shapeLine:
             if shapeEditOverlay != nil {
                 if event.clickCount >= 2 {
@@ -1317,7 +1346,7 @@ final class ImageCanvasView: NSView {
             // No clamping: the image-sized overlay context clips naturally,
             // so a stroke that leaves the canvas paints up to the edge and
             // stops instead of smearing along the border.
-            continueStroke(to: raw)
+            continueStroke(to: raw, pressure: Self.tabletPressure(of: event))
         case .text:
             break
         case .crop:
@@ -1425,7 +1454,7 @@ final class ImageCanvasView: NSView {
             window?.invalidateCursorRects(for: self)
             onMoveEnd?()
         case .brush, .eraser, .clone, .dodge:
-            endStroke()
+            endStroke(at: convert(event.locationInWindow, from: nil))
         case .text:
             break
         case .crop:
@@ -1492,7 +1521,14 @@ final class ImageCanvasView: NSView {
 
     // MARK: - Brush / eraser strokes
 
-    private func beginStroke(at point: CGPoint) {
+    /// Tablet pressure for a stroke event; nil for a plain mouse (or any
+    /// event without tablet data), which strokes at constant full size.
+    private static func tabletPressure(of event: NSEvent) -> CGFloat? {
+        guard event.subtype == .tabletPoint else { return nil }
+        return CGFloat(min(max(event.pressure, 0), 1))
+    }
+
+    private func beginStroke(at point: CGPoint, pressure: CGFloat? = nil) {
         // A Quick Mask stroke never touches the document: no begin
         // callback (which would open a live-edit session, or refuse for
         // reasons — hidden layer, adjustment routing — that only apply to
@@ -1545,27 +1581,44 @@ final class ImageCanvasView: NSView {
                 x: min(floor(point.x), CGFloat(overlayWidth - 1)) + 0.5,
                 y: min(floor(point.y), CGFloat(overlayHeight - 1)) + 0.5)
         }
-        // A sub-100% hardness swaps the pipeline: the stroke stamps soft
-        // dabs (SoftBrush's falloff) instead of stroking a hard path. Both
-        // dab images are latched here for the stroke's lifetime. Coverage
-        // dabs stamp at FULL alpha with the opacity deferred to
-        // strokeCoverageScale (see its comment); a hard coverage stroke is
-        // one path fill, so it keeps carrying opacity in the color.
+        // Any non-default tip swaps the pipeline: the stroke stamps dabs
+        // (SoftBrush's falloff through the tip's spacing, angle and
+        // roundness, each dab deposited at the tip's flow) instead of
+        // stroking one hard path — as do pressure-tracking and airbrush
+        // strokes, which need per-dab control. The tip and dab images are
+        // latched for the stroke's lifetime. Coverage dabs stamp at FLOW
+        // alpha with the stroke's opacity deferred to strokeCoverageScale
+        // (see its comment); a hard coverage stroke is one path fill, so
+        // it keeps carrying opacity in the color.
         strokeCoverageScale = 1
-        if SoftBrush.isSoft(hardness: brushHardness, size: brushSize) {
-            if tool == .clone {
+        strokeTip = BrushTip(
+            hardness: brushHardness, flow: brushFlow,
+            spacingPercent: brushSpacingPercent, angleDegrees: brushAngle,
+            roundness: brushRoundness)
+        strokeUsesPressure = brushPressureSize && pressure != nil && brushSize > 1
+        // The leash length is a screen-space feel (hand jitter is screen
+        // px), converted to the canvas px the stroke pipeline speaks.
+        strokeLeash = StrokeLeash(
+            position: point, radius: brushSmoothing * 32 / max(magnification, 0.01))
+        let stamped = SoftBrush.isStamped(tip: strokeTip, size: brushSize)
+            || ((strokeUsesPressure || brushAirbrush) && brushSize > 1)
+        if tool == .clone {
+            if SoftBrush.isSoft(hardness: brushHardness, size: brushSize) {
                 cloneDabMask = SoftBrush.dabMask(
                     diameter: brushSize, hardness: brushHardness)
-            } else {
-                if onCoverage { strokeCoverageScale = brushOpacity }
-                strokeSoftDab = SoftBrush.dab(
-                    color: onCoverage ? color.withAlphaComponent(1) : color,
-                    diameter: brushSize, hardness: brushHardness)
             }
+        } else if stamped {
+            if onCoverage { strokeCoverageScale = brushOpacity }
+            strokeSoftDab = SoftBrush.dab(
+                color: color.withAlphaComponent(strokeTip.flow),
+                diameter: brushSize, hardness: brushHardness)
         }
         strokeActive = true
         strokeLastPoint = point
-        strokeSpline.begin(at: point)
+        strokeLastPressure = pressure ?? 1
+        strokeCursor = point
+        strokeCursorPressure = pressure ?? 1
+        strokeSpline.begin(at: point, pressure: pressure ?? 1)
         if tool == .clone {
             // Latched here so an agent edit landing mid-drag cannot change
             // what is being cloned; the offset is the classic aligned-clone
@@ -1574,9 +1627,9 @@ final class ImageCanvasView: NSView {
             if let source = cloneSource {
                 cloneOffset = CGVector(dx: point.x - source.x, dy: point.y - source.y)
             }
-            stampCloneDab(in: context, at: point)
+            stampCloneDab(in: context, at: point, pressure: strokeLastPressure)
         } else if let dab = strokeSoftDab {
-            stampSoftDab(dab, in: context, at: point)
+            stampSoftDab(dab, in: context, at: point, pressure: strokeLastPressure)
         } else {
             // Starting dot so a plain click leaves a mark.
             let dot = CGRect(
@@ -1584,11 +1637,37 @@ final class ImageCanvasView: NSView {
                 width: brushSize, height: brushSize)
             context.fillEllipse(in: dot)
         }
+        if brushAirbrush, tool == .clone || strokeSoftDab != nil {
+            // Airbrush: keep depositing at the (possibly resting) brush
+            // position while the button is down. A main-run-loop Timer —
+            // plain AppKit, no GCD (see the app hygiene rules).
+            airbrushTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) {
+                [weak self] _ in self?.airbrushTick()
+            }
+        }
         emitStrokeUpdate()
     }
 
-    private func continueStroke(to point: CGPoint) {
+    /// One airbrush deposit at the resting brush position.
+    private func airbrushTick() {
+        guard strokeActive, let context = overlayContext else { return }
+        if tool == .clone {
+            stampCloneDab(in: context, at: strokeCursor, pressure: strokeCursorPressure)
+        } else if let dab = strokeSoftDab {
+            stampSoftDab(dab, in: context, at: strokeCursor, pressure: strokeCursorPressure)
+        } else {
+            return
+        }
+        emitStrokeUpdate()
+    }
+
+    private func continueStroke(to cursor: CGPoint, pressure: CGFloat?) {
         guard strokeActive, let last = strokeLastPoint, let context = overlayContext else { return }
+        // The leash (Smoothing) damps hand jitter before anything else
+        // sees the point — the pixel pencil included.
+        let point = strokeLeash.radius > 0 ? strokeLeash.pull(toward: cursor) : cursor
+        strokeCursor = point
+        if let pressure = pressure { strokeCursorPressure = pressure }
         if brushSize <= 1 {
             // Same pixel-center snapping as beginStroke; no clamping, so
             // off-canvas points still exit cleanly instead of edge-pinning.
@@ -1606,65 +1685,76 @@ final class ImageCanvasView: NSView {
         // flick (drags arrive at most once per frame), so every other
         // stroke renders through the spline, one sample behind the cursor;
         // endStroke flushes the tail span.
-        let vertices = strokeSpline.add(point)
+        let vertices = strokeSpline.add(point, pressure: strokeCursorPressure)
         guard !vertices.isEmpty else { return }
         renderStroke(through: vertices, in: context)
         emitStrokeUpdate()
     }
 
     /// Extends the stroke through `vertices` — one flattened spline span.
-    /// Stamped strokes (clone always, the others when soft) walk dabs at
-    /// the stroke's spacing; the walk's origin advances per STAMP, so
-    /// spacing carries across spans instead of resetting at each one.
-    /// Hard strokes extend the path itself, joined and capped round by
-    /// the stroke's gstate.
-    private func renderStroke(through vertices: [CGPoint], in context: CGContext) {
+    /// Stamped strokes (clone always, the others whenever a dab is
+    /// latched) walk dabs at the tip's spacing; the walk's origin and
+    /// pressure advance per STAMP, so the rhythm carries across spans
+    /// instead of resetting at each one, and spacing tracks the local
+    /// (pressure-scaled) diameter. Hard strokes extend the path itself,
+    /// joined and capped round by the stroke's gstate.
+    private func renderStroke(through vertices: [StrokeVertex], in context: CGContext) {
         guard var from = strokeLastPoint, !vertices.isEmpty else { return }
         if tool == .clone || strokeSoftDab != nil {
-            let spacing = SoftBrush.spacing(for: brushSize)
+            var pressure = strokeLastPressure
             for vertex in vertices {
-                var distance = hypot(vertex.x - from.x, vertex.y - from.y)
+                var distance = hypot(vertex.point.x - from.x, vertex.point.y - from.y)
+                var spacing = SoftBrush.spacing(
+                    for: dabDiameter(pressure), percent: strokeTip.spacingPercent)
                 while distance >= spacing {
                     let step = spacing / distance
                     from = CGPoint(
-                        x: from.x + (vertex.x - from.x) * step,
-                        y: from.y + (vertex.y - from.y) * step)
+                        x: from.x + (vertex.point.x - from.x) * step,
+                        y: from.y + (vertex.point.y - from.y) * step)
+                    pressure += (vertex.pressure - pressure) * step
                     if let dab = strokeSoftDab {
-                        stampSoftDab(dab, in: context, at: from)
+                        stampSoftDab(dab, in: context, at: from, pressure: pressure)
                     } else {
-                        stampCloneDab(in: context, at: from)
+                        stampCloneDab(in: context, at: from, pressure: pressure)
                     }
-                    distance = hypot(vertex.x - from.x, vertex.y - from.y)
+                    distance = hypot(vertex.point.x - from.x, vertex.point.y - from.y)
+                    spacing = SoftBrush.spacing(
+                        for: dabDiameter(pressure), percent: strokeTip.spacingPercent)
                 }
             }
             strokeLastPoint = from
+            strokeLastPressure = pressure
         } else {
             context.move(to: from)
             for vertex in vertices {
-                context.addLine(to: vertex)
+                context.addLine(to: vertex.point)
             }
             context.strokePath()
-            strokeLastPoint = vertices.last
+            strokeLastPoint = vertices.last?.point
+            strokeLastPressure = vertices.last?.pressure ?? strokeLastPressure
         }
+    }
+
+    /// The dab's diameter at `pressure`: a pressure-tracking stroke scales
+    /// the tip (floored at 1 px); everything else stamps at brush size.
+    private func dabDiameter(_ pressure: CGFloat) -> CGFloat {
+        strokeUsesPressure ? max(brushSize * min(max(pressure, 0), 1), 1) : brushSize
     }
 
     /// Stamps the clone snapshot through a round dab at `point`: the whole
     /// snapshot drawn displaced by the stroke's offset and clipped to the
     /// dab, so the pixel that lands at p is the snapshot's p − offset.
-    private func stampCloneDab(in context: CGContext, at point: CGPoint) {
+    private func stampCloneDab(in context: CGContext, at point: CGPoint, pressure: CGFloat = 1) {
         guard let snapshot = cloneSnapshot else { return }
         context.saveGState()
-        let dab = CGRect(
-            x: point.x - brushSize / 2, y: point.y - brushSize / 2,
-            width: brushSize, height: brushSize)
-        if let mask = cloneDabMask {
-            // Soft clone: the gray falloff image clips instead of the hard
-            // ellipse — white passes paint (the dab's core), black blocks.
-            context.clip(to: dab, mask: mask)
-        } else {
-            context.addEllipse(in: dab)
-            context.clip()
-        }
+        // The tip's footprint clips — the gray falloff mask when soft
+        // (white passes paint, black blocks), a hard ellipse otherwise —
+        // rotated and squashed by the tip; the dab deposits at the tip's
+        // flow so overlapping dabs build up within the stroke.
+        SoftBrush.clipDab(
+            in: context, at: point, diameter: dabDiameter(pressure),
+            tip: strokeTip, mask: cloneDabMask)
+        if strokeTip.flow < 0.995 { context.setAlpha(strokeTip.flow) }
         // The overlay context is flipped (row 0 = top); flip back locally
         // so the snapshot lands right side up at the displaced position.
         context.translateBy(x: 0, y: CGFloat(overlayHeight))
@@ -1675,12 +1765,14 @@ final class ImageCanvasView: NSView {
         context.restoreGState()
     }
 
-    /// Stamps one soft dab: the pre-rendered falloff image drawn centered at
-    /// `point` (radially symmetric, so the flipped context is moot).
-    private func stampSoftDab(_ dab: CGImage, in context: CGContext, at point: CGPoint) {
-        context.draw(dab, in: CGRect(
-            x: point.x - brushSize / 2, y: point.y - brushSize / 2,
-            width: brushSize, height: brushSize))
+    /// Stamps one dab: the pre-rendered falloff image drawn through the
+    /// tip's rotation and roundness, scaled by pressure when the stroke
+    /// tracks it.
+    private func stampSoftDab(
+        _ dab: CGImage, in context: CGContext, at point: CGPoint, pressure: CGFloat = 1
+    ) {
+        SoftBrush.stamp(
+            dab, in: context, at: point, diameter: dabDiameter(pressure), tip: strokeTip)
     }
 
     /// Hands the accumulated overlay to the receiver, which repaints it onto
@@ -1709,8 +1801,17 @@ final class ImageCanvasView: NSView {
             Double(brushOpacity))
     }
 
-    private func endStroke() {
+    private func endStroke(at cursor: CGPoint? = nil) {
         guard strokeActive else { return }
+        airbrushTimer?.invalidate()
+        airbrushTimer = nil
+        if let cursor = cursor, strokeLeash.radius > 0 {
+            // Stroke catch-up: the leash trails the cursor by up to its
+            // radius, but the release point is where the hand actually
+            // stopped — drop the leash and finish the stroke there.
+            strokeLeash.radius = 0
+            continueStroke(to: cursor, pressure: nil)
+        }
         if let context = overlayContext {
             // The spline runs one sample behind the cursor; its tail span
             // lands now, while the stroke's gstate (color, width, the
@@ -1782,6 +1883,8 @@ final class ImageCanvasView: NSView {
     /// Abandons any in-progress stroke without committing (tool switches,
     /// Escape, window close); the receiver rolls the live edit back.
     private func cancelStroke() {
+        airbrushTimer?.invalidate()
+        airbrushTimer = nil
         strokeLastPoint = nil
         strokeSpline = StrokeSpline()
         cloneSnapshot = nil

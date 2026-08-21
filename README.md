@@ -155,11 +155,20 @@ decoding, encoding, and manipulation.
   the options bar and an optional copy-to-clipboard on pick; a drag keeps
   sampling, and Option-click borrows the eyedropper mid-tool from brush,
   fill, and gradient
-- Brush and eraser (per-tool size, opacity and hardness — below 100% the
-  stroke stamps soft airbrushed dabs, and hardness feathers the eraser,
-  clone stamp and dodge/burn the same way; shared color; `[`/`]` resize;
-  1 px pixel-snapped mode; fast drags render through a smoothing spline,
-  so a flick lands as a curve instead of a chain of straight chords;
+- Brush and eraser with the full tip option set, shared with the clone
+  stamp and dodge/burn (per-tool size, opacity/exposure, hardness, flow,
+  spacing, angle, roundness, smoothing, pressure size and airbrush, plus
+  built-in tip presets: hardness below 100% stamps soft airbrushed dabs;
+  flow deposits per dab so a stroke builds up where it crosses itself,
+  with opacity still capping the stroke once; spacing sets the dab
+  rhythm — 150%+ reads as a dotted line; angle and roundness squash the
+  tip into a calligraphy nib; smoothing steadies the hand with a
+  pulled-string leash that catches up at mouse-up; pressure size tracks
+  a tablet pen's pressure; airbrush keeps depositing while the pointer
+  hovers; and the brush and clone stamp composite their paint through
+  the full layer blend-mode set; shared color; `[`/`]` resize; 1 px
+  pixel-snapped mode; fast drags render through a smoothing spline, so
+  a flick lands as a curve instead of a chain of straight chords;
   strokes confine to an active selection)
   and on-canvas text (font/weight/size/color and left/center/right
   alignment, ⌘Return commits, Escape cancels) — tools switch via the left
@@ -268,8 +277,10 @@ including `transform_layer`, the Free Transform pipeline with named parameters
 and `distort_layer`, its perspective twin (four explicit corner destinations,
 the ⌘-corner drag as a tool), both reporting the layer's new bounds — brush
 and eraser strokes (polyline points
-with size/color/opacity/hardness — the same soft-dab feathering as the
-Hardness option, shared with `clone_stamp` and `dodge_burn` — and a
+with size/color/opacity and the full tip — hardness, flow, spacing, angle,
+roundness, the same stamped pipeline as the options bar's tip, shared with
+`clone_stamp` and `dodge_burn` — a `blend_mode` compositing brush and clone
+paint through the layer blend-mode set, and a
 `target` choosing the layer's pixels or its mask), shape layers
 (`add_shape_layer` / `edit_shape_layer`, the parametric rect / ellipse /
 line layers the shape tools drag out and reopen), text — `add_text_layer`

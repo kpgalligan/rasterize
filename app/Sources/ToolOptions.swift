@@ -54,11 +54,17 @@ struct PaintToolOptions: Codable, Equatable {
     /// 100 = the classic hard round; below that, SoftBrush dab stamping.
     var hardness: Double = 100
     var opacity: Double = 100
+    /// Per-dab deposit; opacity still caps the whole stroke once.
     var flow: Double = 100
+    /// The stroke's blend mode as a RAW RzBlendMode value (stable across
+    /// releases; 0 = Normal). Honored by brush and clone only.
     var blendIndex = 0
-    var spacing: Double = 10
+    /// Dab spacing as % of the diameter; 25 is the classic rhythm (and
+    /// keeps the smoother hard-path pipeline at hardness 100).
+    var spacing: Double = 25
     var angle: Double = 0
     var roundness: Double = 100
+    /// Pulled-string stabilization; 0 turns the leash off.
     var smoothing: Double = 20
     var pressureSize = true
     var airbrush = false
@@ -66,6 +72,24 @@ struct PaintToolOptions: Codable, Equatable {
     var burn = false
     /// 0 shadows, 1 midtones, 2 highlights.
     var rangeIndex = 1
+    /// nil in blobs saved before the tip options went live — those carry
+    /// the redesign's DISABLED placeholder values (spacing 10), which no
+    /// user could have chosen and the pipeline never honored. Decoding nil
+    /// normalizes them to the live defaults (see ToolOptionsStore.load);
+    /// 1 marks a blob whose tip values are real choices.
+    var tipVersion: Int?
+
+    /// A pre-tip blob's placeholders replaced by the live defaults, so an
+    /// upgrade renders every stroke exactly as the previous release did
+    /// (spacing 10 would otherwise walk soft dabs 2.5x denser than the
+    /// classic quarter-diameter rhythm the old pipeline hardcoded).
+    var migratedToLiveTip: PaintToolOptions {
+        guard tipVersion == nil else { return self }
+        var out = self
+        out.spacing = 25
+        out.tipVersion = 1
+        return out
+    }
 }
 
 struct FillToolOptions: Codable, Equatable {
@@ -184,10 +208,10 @@ final class ToolOptionsStore {
         select = Self.load("select") ?? SelectToolOptions()
         crop = Self.load("crop") ?? CropToolOptions()
         move = Self.load("move") ?? MoveToolOptions()
-        brush = Self.load("brush") ?? PaintToolOptions()
-        eraser = Self.load("eraser") ?? PaintToolOptions()
-        clone = Self.load("clone") ?? PaintToolOptions()
-        dodge = Self.load("dodge") ?? PaintToolOptions(opacity: 50)
+        brush = (Self.load("brush") ?? PaintToolOptions()).migratedToLiveTip
+        eraser = (Self.load("eraser") ?? PaintToolOptions()).migratedToLiveTip
+        clone = (Self.load("clone") ?? PaintToolOptions()).migratedToLiveTip
+        dodge = (Self.load("dodge") ?? PaintToolOptions(opacity: 50)).migratedToLiveTip
         fill = Self.load("fill") ?? FillToolOptions()
         gradient = Self.load("gradient") ?? GradientToolOptions()
         shape = Self.load("shape") ?? ShapeToolOptions()

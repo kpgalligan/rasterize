@@ -326,3 +326,43 @@ fn overlay_is_mapped_through_the_layer_offset() {
     unsafe { rz_doc_free(out) };
     unsafe { rz_doc_free(handle) };
 }
+
+#[test]
+fn dissolve_dither_is_canvas_absolute_under_a_layer_offset() {
+    // The dither threshold is a function of CANVAS position, so the same
+    // half-coverage overlay must speckle a pixel identically whether the
+    // layer under it sits at (0, 0) or somewhere else: painting an offset
+    // layer and reading through the canvas mapping must reproduce the
+    // origin layer's speckle for the shared canvas region. A broken kernel
+    // that passed LAYER-local coordinates would agree at (0, 0) and
+    // diverge at any nonzero offset.
+    let dir = TempDir::new().unwrap();
+    let overlay: Vec<u8> = (0..16 * 12).flat_map(|_| [0u8, 128, 0, 128]).collect();
+
+    let origin = doc_from(&dir, "origin.png", &solid(16, 12, [10, 20, 30, 255]));
+    let painted_origin = painted_blend(origin, 0, &overlay, (16, 12), BLEND_DISSOLVE, 1.0)
+        .expect("origin dissolve must paint");
+    let origin_px = layer_pixels(painted_origin, 0);
+
+    // 8x8 layer at offset (5, 3) inside the same canvas.
+    let offset_doc = mask_fixture((16, 12), (8, 8), (5, 3));
+    let handle = Box::into_raw(Box::new(offset_doc));
+    let painted_offset = painted_blend(handle, 1, &overlay, (16, 12), BLEND_DISSOLVE, 1.0)
+        .expect("offset dissolve must paint");
+    let offset_px = layer_pixels(painted_offset, 1);
+    for ly in 0..8u32 {
+        for lx in 0..8u32 {
+            let (cx, cy) = (lx + 5, ly + 3);
+            let spoke = pixel(&offset_px, 8, lx, ly) == [0, 255, 0, 255];
+            let origin_spoke = pixel(&origin_px, 16, cx, cy) == [0, 255, 0, 255];
+            assert_eq!(
+                spoke, origin_spoke,
+                "canvas ({cx},{cy}) must speckle identically at both offsets"
+            );
+        }
+    }
+    unsafe { rz_doc_free(painted_origin) };
+    unsafe { rz_doc_free(origin) };
+    unsafe { rz_doc_free(painted_offset) };
+    unsafe { rz_doc_free(handle) };
+}

@@ -531,8 +531,9 @@ final class RasterDocument {
     }
 
     /// `paintingLayer`, through a layer blend mode — the paint tools' Blend
-    /// option. Normal is byte-identical to `paintingLayer` with
-    /// `RZ_COMPOSITE_OVER`; nil when nothing would change.
+    /// option. Normal delegates to `paintingLayer` with `RZ_COMPOSITE_OVER`
+    /// (byte-identical, refusal rules included); every OTHER mode also
+    /// answers nil when no pixel would change.
     func paintingLayerBlend(
         _ idx: Int, overlay data: UnsafePointer<UInt8>, w: Int, h: Int,
         mode: RzBlendMode, alpha: Double

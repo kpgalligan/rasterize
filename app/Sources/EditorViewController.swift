@@ -71,6 +71,9 @@ final class EditorViewController: NSViewController {
     // The tool the stroke began with, so ticks route to the right op
     // (dodge/burn is a retouch op, everything else paints the overlay).
     private var strokeTool: EditorTool = .brush
+    // The Blend option, latched at stroke begin (brush and clone only):
+    // non-Normal ticks composite through the core's blend-mode paint op.
+    private var strokeBlendMode = RZ_BLEND_NORMAL
 
     // The open crop session (logic in EditorViewController+Crop.swift; the
     // canvas draws its overlay and routes the gesture).
@@ -188,6 +191,10 @@ final class EditorViewController: NSViewController {
                 return true
             }
             self.strokeBase = doc
+            // Blend applies to strokes that PAINT layer pixels: brush and
+            // clone. The eraser is its own composite op and dodge is a
+            // retouch op, so both stay Normal whatever their store says.
+            self.strokeBlendMode = self.paintStrokeBlendMode()
             document.beginLiveEdit()
             return true
         }
@@ -206,6 +213,10 @@ final class EditorViewController: NSViewController {
                     idx, overlay: data, w: base.width, h: base.height,
                     exposure: min(max(options.opacity, 0), 100) / 100,
                     range: min(max(options.rangeIndex, 0), 2), burn: options.burn)
+            } else if mode == RZ_COMPOSITE_OVER, self.strokeBlendMode != RZ_BLEND_NORMAL {
+                updated = base.paintingLayerBlend(
+                    idx, overlay: data, w: base.width, h: base.height,
+                    mode: self.strokeBlendMode, alpha: alpha)
             } else {
                 updated = base.paintingLayer(
                     idx, overlay: data, w: base.width, h: base.height, mode: mode, alpha: alpha)
@@ -608,6 +619,13 @@ final class EditorViewController: NSViewController {
             canvas.brushSize = CGFloat(min(max(paint.size, 1), 200))
             canvas.brushOpacity = CGFloat(min(max(paint.opacity, 0), 100) / 100)
             canvas.brushHardness = CGFloat(min(max(paint.hardness, 0), 100) / 100)
+            canvas.brushFlow = CGFloat(min(max(paint.flow, 1), 100) / 100)
+            canvas.brushSpacingPercent = CGFloat(min(max(paint.spacing, 1), 200))
+            canvas.brushAngle = CGFloat(min(max(paint.angle, -180), 180))
+            canvas.brushRoundness = CGFloat(min(max(paint.roundness, 1), 100) / 100)
+            canvas.brushSmoothing = CGFloat(min(max(paint.smoothing, 0), 100) / 100)
+            canvas.brushPressureSize = paint.pressureSize
+            canvas.brushAirbrush = paint.airbrush
         }
         let modes: [SelectionCombineMode] = [.replace, .add, .subtract, .intersect]
         canvas.selectionCombineBase = modes[min(max(store.select.modeIndex, 0), 3)]

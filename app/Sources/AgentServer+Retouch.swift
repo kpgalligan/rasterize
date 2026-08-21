@@ -57,6 +57,52 @@ extension AgentServer {
         return CGFloat(raw / 100)
     }
 
+    /// The stroke tools' shared tip arguments — hardness plus `flow`
+    /// (1–100%, per-dab deposit), `spacing` (1–200% of the diameter),
+    /// `angle` (degrees, counter-clockwise) and `roundness` (1–100%) —
+    /// resolved to the fractions SoftBrush speaks. The defaults are the
+    /// classic tip, whose strokes render exactly as they did before the
+    /// tip options existed. Internal: all four stroke tools share it.
+    func strokeTip(_ a: [String: Any]) throws -> BrushTip {
+        let flow = doubleArg(a, "flow") ?? 100
+        guard flow.isFinite, flow >= 1, flow <= 100 else {
+            throw ToolError(message: "flow must be between 1 and 100 (percent)")
+        }
+        let spacing = doubleArg(a, "spacing") ?? Double(BrushTip.defaultSpacingPercent)
+        guard spacing.isFinite, spacing >= 1, spacing <= 200 else {
+            throw ToolError(
+                message: "spacing must be between 1 and 200 (percent of the brush diameter)")
+        }
+        let angle = doubleArg(a, "angle") ?? 0
+        guard angle.isFinite, angle >= -180, angle <= 180 else {
+            throw ToolError(message: "angle must be between -180 and 180 (degrees)")
+        }
+        let roundness = doubleArg(a, "roundness") ?? 100
+        guard roundness.isFinite, roundness >= 1, roundness <= 100 else {
+            throw ToolError(message: "roundness must be between 1 and 100 (percent)")
+        }
+        return BrushTip(
+            hardness: try strokeHardness(a), flow: CGFloat(flow / 100),
+            spacingPercent: CGFloat(spacing), angleDegrees: CGFloat(angle),
+            roundness: CGFloat(roundness / 100))
+    }
+
+    /// The optional `blend_mode` argument: a blend-mode display name,
+    /// matched case-insensitively against the layer set (the exact
+    /// vocabulary set_layer_properties speaks), nil when absent. Internal:
+    /// brush_stroke, clone_stamp and set_layer_properties share it.
+    func blendModeArg(_ a: [String: Any]) throws -> RzBlendMode? {
+        guard let name = stringArg(a, "blend_mode") else { return nil }
+        guard let mode = RzBlendMode.allBlendModes.first(where: {
+            $0.1.caseInsensitiveCompare(name) == .orderedSame
+        })?.0
+        else {
+            let names = RzBlendMode.allBlendModes.map { $0.1 }.joined(separator: ", ")
+            throw ToolError(message: "Unknown blend mode \"\(name)\". One of: \(names)")
+        }
+        return mode
+    }
+
     /// The stroke's coverage: the round-capped, round-joined outline of the
     /// polyline through `points`, `size` px wide — the same geometry a
     /// brush stroke paints. A single point gets an epsilon segment so it
@@ -104,7 +150,8 @@ extension AgentServer {
         }
         let size = CGFloat(min(max(rawSize, 1), 200))
         let opacity = min(max(rawOpacity, 0), 1)
-        let hardness = try strokeHardness(a)
+        let tip = try strokeTip(a)
+        let blend = try blendModeArg(a)
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
         let canvasHeight = doc.height
         // The snapshot is latched before the edit, like the interactive
@@ -137,18 +184,23 @@ extension AgentServer {
                                 width: CGFloat(snapshot.width),
                                 height: CGFloat(snapshot.height)))
                     }
-                    // Soft clone stamps the snapshot dab by dab through the
-                    // gray falloff mask — the canvas's soft stampCloneDab.
-                    if SoftBrush.isSoft(hardness: hardness, size: size),
-                        let mask = SoftBrush.dabMask(diameter: size, hardness: hardness) {
-                        let spacing = SoftBrush.spacing(for: size)
+                    // A non-default tip stamps the snapshot dab by dab —
+                    // the canvas's stampCloneDab: the tip's footprint (gray
+                    // falloff mask when soft, hard ellipse otherwise,
+                    // squashed and rotated) clips, and each dab deposits at
+                    // the tip's flow.
+                    if SoftBrush.isStamped(tip: tip, size: size) {
+                        let mask = SoftBrush.isSoft(hardness: tip.hardness, size: size)
+                            ? SoftBrush.dabMask(diameter: size, hardness: tip.hardness)
+                            : nil
+                        let spacing = SoftBrush.spacing(
+                            for: size, percent: tip.spacingPercent)
                         for center in SoftBrush.stampCenters(along: points, spacing: spacing) {
                             context.saveGState()
-                            context.clip(
-                                to: CGRect(
-                                    x: center.x - size / 2, y: center.y - size / 2,
-                                    width: size, height: size),
-                                mask: mask)
+                            SoftBrush.clipDab(
+                                in: context, at: center, diameter: size,
+                                tip: tip, mask: mask)
+                            if tip.flow < 0.995 { context.setAlpha(tip.flow) }
                             drawSnapshot(context)
                             context.restoreGState()
                         }
@@ -159,9 +211,16 @@ extension AgentServer {
                     drawSnapshot(context)
                 },
                 commit: { current, base, w, h in
-                    let out = current.paintingLayer(
-                        index, overlay: base, w: w, h: h,
-                        mode: RZ_COMPOSITE_OVER, alpha: opacity)
+                    let out: RasterDocument?
+                    if let blend = blend, blend != RZ_BLEND_NORMAL {
+                        out = current.paintingLayerBlend(
+                            index, overlay: base, w: w, h: h,
+                            mode: blend, alpha: opacity)
+                    } else {
+                        out = current.paintingLayer(
+                            index, overlay: base, w: w, h: h,
+                            mode: RZ_COMPOSITE_OVER, alpha: opacity)
+                    }
                     if out == nil { opRefused = true }
                     return out
                 })
@@ -169,10 +228,15 @@ extension AgentServer {
             // The paint op answers nil when the stroke never touches the
             // layer's extent; name that instead of the generic edit failure.
             guard opRefused else { throw error }
+            let blendCause = blend == nil
+                ? ""
+                : ", or blend mode \(RzBlendMode.displayName(for: blend ?? RZ_BLEND_NORMAL)) "
+                    + "left every covered pixel exactly as it was (an identity blend, like "
+                    + "multiplying white by white)"
             throw ToolError(
                 message: "Clone Stamp changed nothing: the stroke never landed on layer "
-                    + "\(index)'s pixels — its extent may not reach the points, or the "
-                    + "active selection clipped the whole stroke away.")
+                    + "\(index)'s pixels — its extent may not reach the points, the "
+                    + "active selection clipped the whole stroke away\(blendCause).")
         }
         return try pixelEditResult(
             ["ok": true, "action": "Clone Stamp", "layer": index, "points": points.count],
@@ -199,7 +263,12 @@ extension AgentServer {
         }
         let size = CGFloat(min(max(rawSize, 1), 200))
         let exposurePercent = min(max(rawExposure, 0), 100)
-        let hardness = try strokeHardness(a)
+        let tip = try strokeTip(a)
+        guard stringArg(a, "blend_mode") == nil else {
+            throw ToolError(
+                message: "dodge_burn has no blend_mode — it reshapes tones in place; "
+                    + "blend modes apply to brush_stroke and clone_stamp.")
+        }
         let burn = boolArg(a, "burn") ?? false
         let rangeName = stringArg(a, "range") ?? "midtones"
         let range: Int
@@ -220,21 +289,21 @@ extension AgentServer {
             rasterized = try retouchOverlay(
                 document, layer: index, actionName: "Dodge / Burn",
                 draw: { context in
-                    // Pure coverage, like the interactive stroke: white at
-                    // full alpha — the exposure lives in the op, not the
-                    // stroke. Soft strokes stamp white falloff dabs, so the
-                    // coverage itself feathers.
+                    // Pure coverage, like the interactive stroke: white —
+                    // the exposure lives in the op, not the stroke. A
+                    // non-default tip stamps white falloff dabs through the
+                    // tip's footprint, each deposited at the tip's flow, so
+                    // the coverage itself feathers and builds up.
                     let white = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
-                    if SoftBrush.isSoft(hardness: hardness, size: size),
+                    if SoftBrush.isStamped(tip: tip, size: size),
                         let dab = SoftBrush.dab(
-                            color: white, diameter: size, hardness: hardness) {
-                        let spacing = SoftBrush.spacing(for: size)
+                            color: white.withAlphaComponent(tip.flow),
+                            diameter: size, hardness: tip.hardness) {
+                        let spacing = SoftBrush.spacing(
+                            for: size, percent: tip.spacingPercent)
                         for center in SoftBrush.stampCenters(along: points, spacing: spacing) {
-                            context.draw(
-                                dab,
-                                in: CGRect(
-                                    x: center.x - size / 2, y: center.y - size / 2,
-                                    width: size, height: size))
+                            SoftBrush.stamp(
+                                dab, in: context, at: center, diameter: size, tip: tip)
                         }
                         return
                     }

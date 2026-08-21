@@ -355,6 +355,31 @@ extension EditorViewController {
 
     // MARK: - Paint tools (brush, eraser, clone, dodge)
 
+    /// The Blend option the beginning stroke composites with: the active
+    /// tool's stored mode for brush and clone (the strokes that paint
+    /// layer pixels), Normal for everything else. Called from
+    /// onStrokeBegin, which latches it for the stroke's lifetime.
+    func paintStrokeBlendMode() -> RzBlendMode {
+        guard currentTool == .brush || currentTool == .clone,
+              let paint = ToolOptionsStore.shared.paintOptions(for: currentTool)
+        else { return RZ_BLEND_NORMAL }
+        return Self.blendMode(fromStored: paint.blendIndex)
+    }
+
+    /// The stored `blendIndex` — a raw RzBlendMode value, stable across
+    /// releases — as a mode; Normal for anything unrecognized.
+    static func blendMode(fromStored raw: Int) -> RzBlendMode {
+        guard raw >= 0, raw <= Int(UInt32.max) else { return RZ_BLEND_NORMAL }
+        let mode = RzBlendMode(rawValue: UInt32(raw))
+        return RzBlendMode.allBlendModes.contains { $0.0 == mode } ? mode : RZ_BLEND_NORMAL
+    }
+
+    /// The flat blend-popup row for a stored raw mode (Normal for junk).
+    private static func blendListIndex(of stored: Int) -> Int {
+        let mode = blendMode(fromStored: stored)
+        return RzBlendMode.allBlendModes.firstIndex { $0.0 == mode } ?? 0
+    }
+
     private func paintClusters(_ tool: EditorTool) -> [OptionCluster] {
         let read: () -> PaintToolOptions = {
             ToolOptionsStore.shared.paintOptions(for: tool) ?? PaintToolOptions()
@@ -367,9 +392,22 @@ extension EditorViewController {
                 OptionDescriptor(
                     id: "paint.preset", overflowLabel: "Preset",
                     kind: .popup(
-                        width: 100, items: ["Soft Round"], get: { 0 }, set: { _ in }),
-                    // One built-in tip; presets arrive with the brush engine.
-                    isEnabled: { false }),
+                        width: 100, items: BrushPreset.popupItems,
+                        get: { BrushPreset.matchIndex(of: read()) },
+                        set: { [weak self] index in
+                            // Row 0 is "Custom" — what shows when the values
+                            // match no preset; picking it changes nothing.
+                            guard index >= 1,
+                                  BrushPreset.builtIns.indices.contains(index - 1)
+                            else { return }
+                            // End any live field edit FIRST: a field editor
+                            // skips value refreshes while active, and its
+                            // stale text would commit right back over the
+                            // preset at the next blur.
+                            self?.view.window?.makeFirstResponder(nil)
+                            write(BrushPreset.builtIns[index - 1].applied(to: read()))
+                            self?.syncCanvasPaintState()
+                        })),
             ]),
             OptionCluster([
                 OptionDescriptor(
@@ -444,18 +482,29 @@ extension EditorViewController {
                     kind: .field(
                         width: 52, unit: "%", decimals: 0, min: 1, max: 100,
                         get: { read().flow },
-                        set: { value in
+                        set: { [weak self] value in
                             var options = read()
                             options.flow = value
                             write(options)
-                        }),
-                    isEnabled: { false }),
+                            self?.syncCanvasPaintState()
+                        })),
                 OptionDescriptor(
                     id: "paint.blend", overflowLabel: "Blend",
                     kind: .popup(
-                        width: 84, items: ["Normal"], get: { 0 }, set: { _ in }),
-                    // Painting composites source-over (or erase) only.
-                    isEnabled: { false }),
+                        width: 110, items: RzBlendMode.allBlendModes.map { $0.1 },
+                        get: { Self.blendListIndex(of: read().blendIndex) },
+                        set: { index in
+                            guard RzBlendMode.allBlendModes.indices.contains(index)
+                            else { return }
+                            var options = read()
+                            options.blendIndex =
+                                Int(RzBlendMode.allBlendModes[index].0.rawValue)
+                            write(options)
+                        }),
+                    // Blend applies where a stroke PAINTS layer pixels. The
+                    // eraser is its own composite op and dodge a retouch op,
+                    // so their popups stay pinned to Normal.
+                    isEnabled: { tool == .brush || tool == .clone }),
             ]),
             OptionCluster([
                 OptionDescriptor(
@@ -463,45 +512,45 @@ extension EditorViewController {
                     kind: .field(
                         width: 48, unit: "%", decimals: 0, min: 1, max: 200,
                         get: { read().spacing },
-                        set: { value in
+                        set: { [weak self] value in
                             var options = read()
                             options.spacing = value
                             write(options)
-                        }),
-                    isEnabled: { false }),
+                            self?.syncCanvasPaintState()
+                        })),
                 OptionDescriptor(
                     id: "paint.angle", microLabel: "Angle", overflowLabel: "Angle",
                     kind: .field(
                         width: 48, unit: "°", decimals: 0, min: -180, max: 180,
                         get: { read().angle },
-                        set: { value in
+                        set: { [weak self] value in
                             var options = read()
                             options.angle = value
                             write(options)
-                        }),
-                    isEnabled: { false }),
+                            self?.syncCanvasPaintState()
+                        })),
                 OptionDescriptor(
                     id: "paint.roundness", microLabel: "Round", overflowLabel: "Roundness",
                     kind: .field(
                         width: 48, unit: "%", decimals: 0, min: 1, max: 100,
                         get: { read().roundness },
-                        set: { value in
+                        set: { [weak self] value in
                             var options = read()
                             options.roundness = value
                             write(options)
-                        }),
-                    isEnabled: { false }),
+                            self?.syncCanvasPaintState()
+                        })),
                 OptionDescriptor(
                     id: "paint.smoothing", microLabel: "Smooth", overflowLabel: "Smoothing",
                     kind: .field(
                         width: 48, unit: "%", decimals: 0, min: 0, max: 100,
                         get: { read().smoothing },
-                        set: { value in
+                        set: { [weak self] value in
                             var options = read()
                             options.smoothing = value
                             write(options)
-                        }),
-                    isEnabled: { false }),
+                            self?.syncCanvasPaintState()
+                        })),
             ]),
             OptionCluster([
                 OptionDescriptor(
@@ -509,23 +558,23 @@ extension EditorViewController {
                     kind: .checkbox(
                         label: "Pressure size",
                         get: { read().pressureSize },
-                        set: { value in
+                        set: { [weak self] value in
                             var options = read()
                             options.pressureSize = value
                             write(options)
-                        }),
-                    isEnabled: { false }),
+                            self?.syncCanvasPaintState()
+                        })),
                 OptionDescriptor(
                     id: "paint.airbrush", overflowLabel: "Airbrush",
                     kind: .checkbox(
                         label: "Airbrush",
                         get: { read().airbrush },
-                        set: { value in
+                        set: { [weak self] value in
                             var options = read()
                             options.airbrush = value
                             write(options)
-                        }),
-                    isEnabled: { false }),
+                            self?.syncCanvasPaintState()
+                        })),
             ]),
         ])
         return clusters

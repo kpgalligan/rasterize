@@ -644,10 +644,11 @@ pub unsafe extern "C" fn rz_doc_painting_layer(
 /// Paints a canvas-frame PREMULTIPLIED RGBA8 overlay (`src`, `w`/`h` must
 /// equal the canvas size) onto layer `idx` through blend mode `mode`
 /// (`RzBlendMode`), scaled by `alpha` (clamped to [0, 1]) — the paint
-/// tools' Blend option. `RZ_BLEND_NORMAL` is byte-identical to
-/// `rz_doc_painting_layer` with `RZ_COMPOSITE_OVER`. NULL on NULL args,
-/// dimension mismatch, unknown mode, NaN alpha, out-of-range idx, a layer
-/// extent that misses the canvas, or when no pixel would change.
+/// tools' Blend option. `RZ_BLEND_NORMAL` delegates to
+/// `rz_doc_painting_layer` with `RZ_COMPOSITE_OVER` (byte-identical,
+/// refusal rules included). NULL on NULL args, dimension mismatch, unknown
+/// mode, NaN alpha, out-of-range idx, a layer extent that misses the
+/// canvas, or — non-Normal modes only — when no pixel would change.
 ///
 /// # Safety
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`; `src` must

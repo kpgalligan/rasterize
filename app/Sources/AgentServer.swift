@@ -657,16 +657,7 @@ final class AgentServer {
     private func setLayerProperties(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         let index = try layerIndex(a, document)
-        var blendMode: RzBlendMode?
-        if let name = stringArg(a, "blend_mode") {
-            blendMode = RzBlendMode.allBlendModes.first {
-                $0.1.caseInsensitiveCompare(name) == .orderedSame
-            }?.0
-            guard blendMode != nil else {
-                let names = RzBlendMode.allBlendModes.map { $0.1 }.joined(separator: ", ")
-                throw ToolError(message: "Unknown blend mode \"\(name)\". One of: \(names)")
-            }
-        }
+        let blendMode = try blendModeArg(a)
         let name = stringArg(a, "name")
         let opacity = doubleArg(a, "opacity")
         let visible = boolArg(a, "visible")
@@ -1320,6 +1311,7 @@ final class AgentServer {
     private func paintOverlay(
         _ document: ImageDocument, layer: Int, actionName: String,
         mode: RzCompositeMode, alpha: Double, toMask: Bool = false,
+        blend: RzBlendMode? = nil, onOpRefusal: (() -> Void)? = nil,
         draw: (CGContext) -> Void
     ) throws -> DroppedDescription? {
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
@@ -1348,6 +1340,18 @@ final class AgentServer {
                 if toMask {
                     return current.paintingLayerMask(
                         layer, overlay: base, w: width, h: height)
+                }
+                if let blend = blend, blend != RZ_BLEND_NORMAL {
+                    // The Blend option: composite through the layer
+                    // blend-mode set instead of plain source-over. Unlike
+                    // the classic op, this one also refuses when the blend
+                    // changes no pixel (Multiply by white) — the latch
+                    // lets the caller report that as a no-op, not an error.
+                    let out = current.paintingLayerBlend(
+                        layer, overlay: base, w: width, h: height,
+                        mode: blend, alpha: alpha)
+                    if out == nil { onOpRefusal?() }
+                    return out
                 }
                 return current.paintingLayer(
                     layer, overlay: base, w: width, h: height, mode: mode, alpha: alpha)
@@ -1451,7 +1455,26 @@ final class AgentServer {
         let points = try parsePoints(a)
         let size = CGFloat(min(max(doubleArg(a, "size") ?? 16, 1), 512))
         let opacity = min(max(doubleArg(a, "opacity") ?? 1, 0), 1)
-        let hardness = try strokeHardness(a)
+        let tip = try strokeTip(a)
+        let blend = try blendModeArg(a)
+        if blend != nil, erase {
+            throw ToolError(
+                message: "eraser_stroke has no blend_mode — erasing removes alpha; blend "
+                    + "modes apply to brush_stroke and clone_stamp.")
+        }
+        if blend != nil, toMask {
+            if isAdjustment, !requestedMask {
+                // The caller DID target the layer; the adjustment routing
+                // moved the stroke, so "use the layer target" would loop.
+                throw ToolError(
+                    message: "Layer \(index) is an adjustment layer, so strokes always "
+                        + "paint its MASK — blend_mode cannot apply there. Drop "
+                        + "blend_mode, or stroke a pixel layer.")
+            }
+            throw ToolError(
+                message: "blend_mode does not apply to a mask stroke — a mask is coverage, "
+                    + "not color. Stroke the layer target instead.")
+        }
         // In ERASE mode only the overlay's alpha matters. A MASK is coverage
         // rather than color — white reveals, black hides, whatever color was
         // asked for — and it carries the opacity in the stroke's own alpha,
@@ -1472,54 +1495,67 @@ final class AgentServer {
         } else {
             actionName = erase ? "Eraser Stroke" : "Brush Stroke"
         }
-        let rasterized = try paintOverlay(
-            document, layer: layer, actionName: actionName,
-            mode: erase ? RZ_COMPOSITE_ERASE : RZ_COMPOSITE_OVER, alpha: opacity,
-            toMask: toMask
-        ) { context in
-            context.setFillColor(color.cgColor)
-            context.setStrokeColor(color.cgColor)
-            // Below 100% hardness the stroke stamps SoftBrush falloff dabs
-            // — the interactive soft pipeline — instead of a hard path.
-            // Full-alpha dabs inside ONE transparency layer capped at the
-            // color's own alpha (a mask stroke's opacity rides there):
-            // per-dab alpha would compound where dabs overlap, pushing a
-            // 50% stroke's core toward 100%, where the hard path paints
-            // the whole polyline at one uniform alpha.
-            if SoftBrush.isSoft(hardness: hardness, size: size),
-               let dab = SoftBrush.dab(
-                   color: color.withAlphaComponent(1), diameter: size, hardness: hardness) {
-                let alpha = (color.usingColorSpace(.sRGB) ?? color).alphaComponent
-                context.saveGState()
-                context.setAlpha(alpha)
-                context.beginTransparencyLayer(auxiliaryInfo: nil)
-                let spacing = SoftBrush.spacing(for: size)
-                for center in SoftBrush.stampCenters(along: points, spacing: spacing) {
-                    context.draw(
-                        dab,
-                        in: CGRect(
-                            x: center.x - size / 2, y: center.y - size / 2,
-                            width: size, height: size))
+        // Latched when the BLEND PAINT OP answers nil: with a blend mode
+        // the op also refuses a stroke that changes no pixel (an identity
+        // blend), which is a no-op to report, never a parameter error.
+        var opRefused = false
+        let rasterized: DroppedDescription?
+        do {
+            rasterized = try paintOverlay(
+                document, layer: layer, actionName: actionName,
+                mode: erase ? RZ_COMPOSITE_ERASE : RZ_COMPOSITE_OVER, alpha: opacity,
+                toMask: toMask, blend: blend, onOpRefusal: { opRefused = true }
+            ) { context in
+                context.setFillColor(color.cgColor)
+                context.setStrokeColor(color.cgColor)
+                // Any non-default tip stamps SoftBrush falloff dabs — the
+                // interactive stamped pipeline — instead of a hard path. Dabs
+                // deposit at the tip's FLOW, inside ONE transparency layer
+                // capped at the color's own alpha (a mask stroke's opacity
+                // rides there): per-dab opacity would compound where dabs
+                // overlap, pushing a 50% stroke's core toward 100%, where the
+                // hard path paints the whole polyline at one uniform alpha.
+                if SoftBrush.isStamped(tip: tip, size: size),
+                   let dab = SoftBrush.dab(
+                       color: color.withAlphaComponent(tip.flow), diameter: size,
+                       hardness: tip.hardness) {
+                    let alpha = (color.usingColorSpace(.sRGB) ?? color).alphaComponent
+                    context.saveGState()
+                    context.setAlpha(alpha)
+                    context.beginTransparencyLayer(auxiliaryInfo: nil)
+                    let spacing = SoftBrush.spacing(for: size, percent: tip.spacingPercent)
+                    for center in SoftBrush.stampCenters(along: points, spacing: spacing) {
+                        SoftBrush.stamp(dab, in: context, at: center, diameter: size, tip: tip)
+                    }
+                    context.endTransparencyLayer()
+                    context.restoreGState()
+                    return
                 }
-                context.endTransparencyLayer()
-                context.restoreGState()
-                return
+                if points.count == 1 {
+                    let p = points[0]
+                    context.fillEllipse(
+                        in: CGRect(
+                            x: p.x - size / 2, y: p.y - size / 2, width: size, height: size))
+                    return
+                }
+                context.setLineWidth(size)
+                context.setLineCap(.round)
+                context.setLineJoin(.round)
+                context.move(to: points[0])
+                for point in points.dropFirst() {
+                    context.addLine(to: point)
+                }
+                context.strokePath()
             }
-            if points.count == 1 {
-                let p = points[0]
-                context.fillEllipse(
-                    in: CGRect(
-                        x: p.x - size / 2, y: p.y - size / 2, width: size, height: size))
-                return
-            }
-            context.setLineWidth(size)
-            context.setLineCap(.round)
-            context.setLineJoin(.round)
-            context.move(to: points[0])
-            for point in points.dropFirst() {
-                context.addLine(to: point)
-            }
-            context.strokePath()
+        } catch let error as ToolError {
+            guard opRefused, let blend = blend else { throw error }
+            return try jsonResult([
+                "ok": true, "changed": false, "layer": layer,
+                "note": "Nothing changed: blend mode \(RzBlendMode.displayName(for: blend)) "
+                    + "left every covered pixel exactly as it was (an identity blend, like "
+                    + "Multiply by white), or the stroke never reached layer \(layer)'s "
+                    + "pixels. No undo step was added.",
+            ])
         }
         var fields: [String: Any] = [
             "ok": true, "action": actionName, "layer": layer, "points": points.count,

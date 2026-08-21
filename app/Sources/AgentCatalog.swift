@@ -39,6 +39,39 @@ extension AgentServer {
                 + "clears the selection.",
         ]
         let blendNames = RzBlendMode.allBlendModes.map { $0.1 }
+        // The tip options every stroke tool shares beyond hardness — the
+        // same knobs the options bar's paint tools carry.
+        let flowProperty: [String: Any] = [
+            "type": "number", "minimum": 1, "maximum": 100,
+            "description": "Per-dab deposit in percent (default 100). Below 100 the "
+                + "stroke builds up where it overlaps itself instead of landing at full "
+                + "strength at once.",
+        ]
+        let spacingProperty: [String: Any] = [
+            "type": "number", "minimum": 1, "maximum": 200,
+            "description": "Dab spacing as a percent of the brush diameter (default 25). "
+                + "Above 25 the stroke stamps visibly; 150+ reads as a dotted line.",
+        ]
+        let angleProperty: [String: Any] = [
+            "type": "number", "minimum": -180, "maximum": 180,
+            "description": "Tip rotation in degrees, counter-clockwise (default 0). "
+                + "Visible only when roundness is below 100.",
+        ]
+        let roundnessProperty: [String: Any] = [
+            "type": "number", "minimum": 1, "maximum": 100,
+            "description": "Tip roundness in percent (default 100). Below 100 the dab "
+                + "squashes into an ellipse — with angle, a calligraphy nib.",
+        ]
+        let strokeBlendProperty: [String: Any] = [
+            "type": "string", "enum": blendNames,
+            "description": "Blend mode the stroke's paint composites with (default Normal) "
+                + "— the layer blend-mode names. Not valid with target: \"mask\".",
+        ]
+        let cloneBlendProperty: [String: Any] = [
+            "type": "string", "enum": blendNames,
+            "description": "Blend mode the cloned paint composites with (default Normal) "
+                + "— the layer blend-mode names.",
+        ]
         let catalog: [[String: Any]] = [
             tool(
                 "list_documents",
@@ -440,6 +473,11 @@ extension AgentServer {
                             + "fades from hardness% of the radius out to the rim — an "
                             + "airbrushed edge.",
                     ],
+                    "flow": flowProperty,
+                    "spacing": spacingProperty,
+                    "angle": angleProperty,
+                    "roundness": roundnessProperty,
+                    "blend_mode": strokeBlendProperty,
                     "layer": index,
                     "target": [
                         "type": "string",
@@ -481,6 +519,10 @@ extension AgentServer {
                             + "Below 100 the erase feathers out from hardness% of the "
                             + "radius to the rim.",
                     ],
+                    "flow": flowProperty,
+                    "spacing": spacingProperty,
+                    "angle": angleProperty,
+                    "roundness": roundnessProperty,
                     "layer": index,
                     "target": [
                         "type": "string",
@@ -542,6 +584,11 @@ extension AgentServer {
                             + "the dab radius to the rim, blending it into the "
                             + "surroundings.",
                     ],
+                    "flow": flowProperty,
+                    "spacing": spacingProperty,
+                    "angle": angleProperty,
+                    "roundness": roundnessProperty,
+                    "blend_mode": cloneBlendProperty,
                     "layer": index,
                     "document_id": docID,
                 ], required: ["source_x", "source_y", "points"]),
@@ -590,6 +637,10 @@ extension AgentServer {
                             + "Below 100 the effect feathers out from hardness% of the "
                             + "radius to the rim.",
                     ],
+                    "flow": flowProperty,
+                    "spacing": spacingProperty,
+                    "angle": angleProperty,
+                    "roundness": roundnessProperty,
                     "layer": index,
                     "document_id": docID,
                 ], required: ["points"]),

@@ -27,10 +27,14 @@ impl RzDocument {
     /// dissolve stroke lands the same speckle a dissolve layer would.
     ///
     /// Domain refusals (`None`): `idx` out of range; NaN `alpha`; `src` not
-    /// exactly canvas-sized; a layer extent that misses the canvas; or no
-    /// pixel actually changing (e.g. multiply by white) — an identical copy
-    /// would register a phantom undo step in the app. (`pub(crate)` like
-    /// `painting_layer`; the public surface is `rz_doc_painting_layer_blend`.)
+    /// exactly canvas-sized; a layer extent that misses the canvas; or —
+    /// for every mode but Normal — no pixel actually changing (e.g.
+    /// multiply by white), since an identical copy would register a
+    /// phantom undo step in the app. Normal delegates wholesale, so it
+    /// keeps `painting_layer`'s behavior: byte-identical output and a
+    /// refusal only on the extent miss, never on a no-change overlay.
+    /// (`pub(crate)` like `painting_layer`; the public surface is
+    /// `rz_doc_painting_layer_blend`.)
     pub(crate) fn painting_layer_blend(
         &self,
         idx: usize,

@@ -1777,6 +1777,20 @@ fn null_safety_sweep() {
             rz_doc_painting_layer(null_doc, 0, overlay.as_ptr(), 2, 2, COMPOSITE_OVER, 1.0)
                 .is_null()
         );
+        assert!(rz_doc_painting_layer_blend(
+            null_doc,
+            0,
+            overlay.as_ptr(),
+            2,
+            2,
+            BLEND_MULTIPLY,
+            1.0
+        )
+        .is_null());
+        assert!(
+            rz_doc_painting_layer_blend(null_doc, 0, ptr::null(), 2, 2, BLEND_MULTIPLY, 1.0)
+                .is_null()
+        );
 
         // Geometry.
         assert!(rz_doc_rotate90(null_doc).is_null());
