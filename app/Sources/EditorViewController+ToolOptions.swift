@@ -390,14 +390,12 @@ extension EditorViewController {
                     kind: .field(
                         width: 48, unit: "%", decimals: 0, min: 0, max: 100,
                         get: { read().hardness },
-                        set: { value in
+                        set: { [weak self] value in
                             var options = read()
                             options.hardness = value
                             write(options)
-                        }),
-                    // Dabs are hard-edged today; hardness needs the soft
-                    // brush engine.
-                    isEnabled: { false }),
+                            self?.syncCanvasPaintState()
+                        })),
             ]),
             OptionCluster([
                 OptionDescriptor(
@@ -684,7 +682,7 @@ extension EditorViewController {
                             ?? .clear },
                         set: { [weak self] color in
                             ToolOptionsStore.shared.shape.fill = TextLayer.hex(color)
-                            self?.syncCanvasShapeStyle()
+                            self?.shapeStyleEdited()
                         }),
                     // A line is stroke only.
                     isEnabled: { tool != .shapeLine }),
@@ -697,7 +695,7 @@ extension EditorViewController {
                             ?? .clear },
                         set: { [weak self] color in
                             ToolOptionsStore.shared.shape.stroke = TextLayer.hex(color)
-                            self?.syncCanvasShapeStyle()
+                            self?.shapeStyleEdited()
                         })),
                 OptionDescriptor(
                     id: "shape.weight", overflowLabel: "Stroke weight",
@@ -706,7 +704,7 @@ extension EditorViewController {
                         get: { ToolOptionsStore.shared.shape.strokeWidth },
                         set: { [weak self] value in
                             ToolOptionsStore.shared.shape.strokeWidth = value
-                            self?.syncCanvasShapeStyle()
+                            self?.shapeStyleEdited()
                         })),
             ]),
             OptionCluster([
@@ -717,7 +715,7 @@ extension EditorViewController {
                         get: { ToolOptionsStore.shared.shape.radius },
                         set: { [weak self] value in
                             ToolOptionsStore.shared.shape.radius = value
-                            self?.syncCanvasShapeStyle()
+                            self?.shapeStyleEdited()
                         }),
                     // Radius only rounds rectangles.
                     isEnabled: { tool == .shapeRect }),

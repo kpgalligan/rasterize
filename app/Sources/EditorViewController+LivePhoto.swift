@@ -27,6 +27,10 @@ extension EditorViewController {
             NSSound.beep()
             return
         }
+        // The panel's double-click bypasses menu validation, so an open
+        // shape session commits here — its hidden-layer preview and the
+        // picker's live preview would otherwise fight over previewImage.
+        commitShapeEditSession()
         setActiveLayer(idx)
         // The clip is referenced, not copied into the document, so it can be
         // gone by the time someone asks for another frame. Say so instead of

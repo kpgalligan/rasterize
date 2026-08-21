@@ -164,6 +164,16 @@ final class ImageCanvasView: NSView {
     var brushSize: CGFloat = 24
     var paintColor: NSColor = .black
     var brushOpacity: CGFloat = 1.0
+    /// Edge hardness, 0–1. Below 1 the stroke stamps SoftBrush dabs instead
+    /// of stroking a hard path; the dab images below are latched per stroke.
+    var brushHardness: CGFloat = 1
+    private var strokeSoftDab: CGImage?
+    private var cloneDabMask: CGImage?
+    /// Soft COVERAGE strokes (mask / Quick Mask) stamp full-alpha dabs and
+    /// apply the stroke's opacity once, here, where the overlay is
+    /// consumed — per-dab alpha would compound where dabs overlap, pushing
+    /// a 50% stroke's core toward 100%. 1 for every other stroke.
+    private var strokeCoverageScale: CGFloat = 1
 
     // Selection options, kept current by EditorViewController: the options
     // bar's combine mode (a gesture's modifiers still override it) and the
@@ -209,6 +219,22 @@ final class ImageCanvasView: NSView {
     /// whether it runs bottom-left → top-right.
     var onShapeCommit: ((_ box: CGRect, _ flipped: Bool) -> Void)?
     private var shapeAnchor: CGPoint?
+
+    // A shape layer reopened for editing: owned by EditorViewController's
+    // +Shapes extension, which does the geometry; the canvas draws the
+    // overlay and routes the gesture — the crop session's arrangement.
+    // While non-nil, shape-tool mouse events go to the onShapeEdit*
+    // closures instead of rubber-banding a new shape.
+    var shapeEditOverlay: ShapeToolPreview? {
+        didSet { needsDisplay = true }
+    }
+    var onShapeEditMouseDown: ((CGPoint) -> Void)?
+    var onShapeEditMouseDragged: ((CGPoint) -> Void)?
+    var onShapeEditMouseUp: (() -> Void)?
+    /// Return, keypad Enter, or a double-click.
+    var onShapeEditCommit: (() -> Void)?
+    /// Escape.
+    var onShapeEditCancel: (() -> Void)?
 
     // Zoom and hand gestures. Zoom reports; the editor owns magnification.
     var onZoomClick: ((_ point: CGPoint, _ out: Bool) -> Void)?
@@ -565,6 +591,10 @@ final class ImageCanvasView: NSView {
 
         if let preview = shapePreview, !isTransforming {
             drawShapePreview(preview)
+        }
+
+        if let overlay = shapeEditOverlay, !isTransforming {
+            drawShapeEditOverlay(overlay)
         }
 
         if tool == .clone, let source = cloneSource, !isTransforming {
@@ -1071,10 +1101,18 @@ final class ImageCanvasView: NSView {
               overlayWidth == quickMaskWidth, overlayHeight == quickMaskHeight
         else { return result }
         let bytes = data.assumingMemoryBound(to: UInt8.self)
+        // Soft strokes stamp full-alpha dabs; their opacity applies here,
+        // once (strokeCoverageScale is 1 for the hard path, which bakes
+        // opacity into the stroke color).
+        let scale = Int((strokeCoverageScale * 255).rounded())
         for i in 0..<result.count {
-            let alpha = Int(bytes[i * 4 + 3])
+            var alpha = Int(bytes[i * 4 + 3])
+            var source = Int(bytes[i * 4])
+            if scale < 255 {
+                alpha = alpha * scale / 255
+                source = source * scale / 255
+            }
             guard alpha > 0 else { continue }
-            let source = Int(bytes[i * 4])
             let kept = Int(result[i]) * (255 - alpha) + 127
             result[i] = UInt8(min(255, source + kept / 255))
         }
@@ -1217,7 +1255,17 @@ final class ImageCanvasView: NSView {
         case .dodge:
             beginStroke(at: point)
         case .shapeRect, .shapeEllipse, .shapeLine:
-            shapeAnchor = point
+            if shapeEditOverlay != nil {
+                if event.clickCount >= 2 {
+                    onShapeEditCommit?()
+                } else {
+                    // Unclamped: a reopened shape (and its handles) may
+                    // legitimately sit beyond the canvas edge.
+                    onShapeEditMouseDown?(convert(event.locationInWindow, from: nil))
+                }
+            } else {
+                shapeAnchor = point
+            }
         case .zoom:
             zoomAnchor = point
             zoomAnchorWindow = event.locationInWindow
@@ -1274,6 +1322,10 @@ final class ImageCanvasView: NSView {
         case .crop:
             onCropMouseDragged?(clamp(point: raw))
         case .shapeRect, .shapeEllipse, .shapeLine:
+            if shapeEditOverlay != nil {
+                onShapeEditMouseDragged?(raw)
+                return
+            }
             guard let anchor = shapeAnchor else { return }
             shapePreview = ShapeToolPreview(
                 kind: tool, from: anchor, to: clamp(point: raw),
@@ -1378,6 +1430,10 @@ final class ImageCanvasView: NSView {
         case .crop:
             onCropMouseUp?(clamp(point: convert(event.locationInWindow, from: nil)))
         case .shapeRect, .shapeEllipse, .shapeLine:
+            if shapeEditOverlay != nil {
+                onShapeEditMouseUp?()
+                return
+            }
             guard let anchor = shapeAnchor else { return }
             shapeAnchor = nil
             let preview = shapePreview
@@ -1488,6 +1544,24 @@ final class ImageCanvasView: NSView {
                 x: min(floor(point.x), CGFloat(overlayWidth - 1)) + 0.5,
                 y: min(floor(point.y), CGFloat(overlayHeight - 1)) + 0.5)
         }
+        // A sub-100% hardness swaps the pipeline: the stroke stamps soft
+        // dabs (SoftBrush's falloff) instead of stroking a hard path. Both
+        // dab images are latched here for the stroke's lifetime. Coverage
+        // dabs stamp at FULL alpha with the opacity deferred to
+        // strokeCoverageScale (see its comment); a hard coverage stroke is
+        // one path fill, so it keeps carrying opacity in the color.
+        strokeCoverageScale = 1
+        if SoftBrush.isSoft(hardness: brushHardness, size: brushSize) {
+            if tool == .clone {
+                cloneDabMask = SoftBrush.dabMask(
+                    diameter: brushSize, hardness: brushHardness)
+            } else {
+                if onCoverage { strokeCoverageScale = brushOpacity }
+                strokeSoftDab = SoftBrush.dab(
+                    color: onCoverage ? color.withAlphaComponent(1) : color,
+                    diameter: brushSize, hardness: brushHardness)
+            }
+        }
         strokeActive = true
         strokeLastPoint = point
         if tool == .clone {
@@ -1499,6 +1573,8 @@ final class ImageCanvasView: NSView {
                 cloneOffset = CGVector(dx: point.x - source.x, dy: point.y - source.y)
             }
             stampCloneDab(in: context, at: point)
+        } else if let dab = strokeSoftDab {
+            stampSoftDab(dab, in: context, at: point)
         } else {
             // Starting dot so a plain click leaves a mark.
             let dot = CGRect(
@@ -1517,20 +1593,24 @@ final class ImageCanvasView: NSView {
             // off-canvas points still exit cleanly instead of edge-pinning.
             point = CGPoint(x: floor(point.x) + 0.5, y: floor(point.y) + 0.5)
         }
-        if tool == .clone {
-            // Clone stamps dabs along the segment instead of stroking a
-            // path (each dab is a clipped draw of the snapshot, not a fill).
-            // The last point only advances per stamp, so spacing carries
-            // across ticks instead of resetting at every event.
+        if tool == .clone || strokeSoftDab != nil {
+            // Stamped strokes — clone always, the others when soft — walk
+            // dabs along the segment instead of stroking a path. The last
+            // point only advances per stamp, so spacing carries across
+            // ticks instead of resetting at every event.
             var from = last
-            let spacing = max(brushSize / 4, 1)
+            let spacing = SoftBrush.spacing(for: brushSize)
             var distance = hypot(point.x - from.x, point.y - from.y)
             while distance >= spacing {
                 let step = spacing / distance
                 from = CGPoint(
                     x: from.x + (point.x - from.x) * step,
                     y: from.y + (point.y - from.y) * step)
-                stampCloneDab(in: context, at: from)
+                if let dab = strokeSoftDab {
+                    stampSoftDab(dab, in: context, at: from)
+                } else {
+                    stampCloneDab(in: context, at: from)
+                }
                 distance = hypot(point.x - from.x, point.y - from.y)
             }
             strokeLastPoint = from
@@ -1550,10 +1630,17 @@ final class ImageCanvasView: NSView {
     private func stampCloneDab(in context: CGContext, at point: CGPoint) {
         guard let snapshot = cloneSnapshot else { return }
         context.saveGState()
-        context.addEllipse(in: CGRect(
+        let dab = CGRect(
             x: point.x - brushSize / 2, y: point.y - brushSize / 2,
-            width: brushSize, height: brushSize))
-        context.clip()
+            width: brushSize, height: brushSize)
+        if let mask = cloneDabMask {
+            // Soft clone: the gray falloff image clips instead of the hard
+            // ellipse — white passes paint (the dab's core), black blocks.
+            context.clip(to: dab, mask: mask)
+        } else {
+            context.addEllipse(in: dab)
+            context.clip()
+        }
         // The overlay context is flipped (row 0 = top); flip back locally
         // so the snapshot lands right side up at the displaced position.
         context.translateBy(x: 0, y: CGFloat(overlayHeight))
@@ -1562,6 +1649,14 @@ final class ImageCanvasView: NSView {
             x: cloneOffset.dx, y: -cloneOffset.dy,
             width: CGFloat(snapshot.width), height: CGFloat(snapshot.height)))
         context.restoreGState()
+    }
+
+    /// Stamps one soft dab: the pre-rendered falloff image drawn centered at
+    /// `point` (radially symmetric, so the flipped context is moot).
+    private func stampSoftDab(_ dab: CGImage, in context: CGContext, at point: CGPoint) {
+        context.draw(dab, in: CGRect(
+            x: point.x - brushSize / 2, y: point.y - brushSize / 2,
+            width: brushSize, height: brushSize))
     }
 
     /// Hands the accumulated overlay to the receiver, which repaints it onto
@@ -1596,6 +1691,8 @@ final class ImageCanvasView: NSView {
         strokeActive = false
         strokeLastPoint = nil
         cloneSnapshot = nil
+        strokeSoftDab = nil
+        cloneDabMask = nil
         if strokeOnQuickMask {
             // The stroke lands in the Quick Mask buffer and nowhere else:
             // no document edit, no undo step, no stroke-end callback (there
@@ -1609,6 +1706,15 @@ final class ImageCanvasView: NSView {
         }
         let actionName = strokeActionName()
         if strokeOnMask, let data = overlayData {
+            if strokeCoverageScale < 1 {
+                // The soft pipeline stamped full-alpha dabs; the stroke's
+                // opacity lands here, once, on the premultiplied bytes.
+                let bytes = data.assumingMemoryBound(to: UInt8.self)
+                let scale = Int((strokeCoverageScale * 255).rounded())
+                for i in 0..<(overlayWidth * overlayHeight * 4) {
+                    bytes[i] = UInt8(Int(bytes[i]) * scale / 255)
+                }
+            }
             // The receiver's applyEdit consumes the bytes synchronously.
             onCommitMaskOverlay?(
                 UnsafePointer(data.assumingMemoryBound(to: UInt8.self)), actionName)
@@ -1638,6 +1744,8 @@ final class ImageCanvasView: NSView {
     private func cancelStroke() {
         strokeLastPoint = nil
         cloneSnapshot = nil
+        strokeSoftDab = nil
+        cloneDabMask = nil
         guard strokeActive else { return }
         overlayContext?.restoreGState()
         strokeActive = false
@@ -1842,6 +1950,21 @@ final class ImageCanvasView: NSView {
                 return
             case 36, 76:
                 onCropCommit?()
+                return
+            default:
+                break
+            }
+        }
+        // A shape-edit session's keys mirror the crop session's: Return
+        // commits, Escape cancels — and the same Quick Mask gate, since the
+        // commit is a document edit.
+        if shapeEditOverlay != nil, !quickMaskActive {
+            switch event.keyCode {
+            case 53:
+                onShapeEditCancel?()
+                return
+            case 36, 76:
+                onShapeEditCommit?()
                 return
             default:
                 break

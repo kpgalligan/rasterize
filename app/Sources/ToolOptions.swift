@@ -51,7 +51,8 @@ struct MoveToolOptions: Codable, Equatable {
 /// burn/range pair no other paint tool shows.
 struct PaintToolOptions: Codable, Equatable {
     var size: Double = 24
-    var hardness: Double = 0
+    /// 100 = the classic hard round; below that, SoftBrush dab stamping.
+    var hardness: Double = 100
     var opacity: Double = 100
     var flow: Double = 100
     var blendIndex = 0

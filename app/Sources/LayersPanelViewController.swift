@@ -34,6 +34,11 @@ final class LayersPanelViewController: NSViewController {
     /// opens that layer's frame picker.
     var onLivePhotoEdit: ((Int) -> Void)?
 
+    /// Called when the user double-clicks a shape layer (layer index
+    /// attached): the editor switches to the matching shape tool and
+    /// reopens the layer's box on the canvas.
+    var onShapeEdit: ((Int) -> Void)?
+
     /// What brush/eraser currently edit on the active layer, pushed in by the
     /// editor and drawn as a focus ring around the matching thumbnail.
     private(set) var paintTarget: PaintTarget = .layer
@@ -636,6 +641,8 @@ extension LayersPanelViewController: NSMenuDelegate {
             onTextEdit?(idx)
         } else if doc.livePhotoPayload(idx) != nil {
             onLivePhotoEdit?(idx)
+        } else if doc.shapePayload(idx) != nil {
+            onShapeEdit?(idx)
         }
     }
 

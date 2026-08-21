@@ -145,15 +145,20 @@ decoding, encoding, and manipulation.
   drag out a shape (Shift constrains squares, circles and 45° lines) and
   it lands as its own parametric layer — fill, stroke, weight and corner
   radius from the options bar, the description stored in the layer's meta
-  like text, so Move keeps it honest and the `.rz` format round-trips it
+  like text, so Move keeps it honest and the `.rz` format round-trips it.
+  Double-click a shape layer in the panel to reopen it: drag the eight
+  handles or the interior to re-box it, restyle it from the options bar,
+  Return (or a click away) re-renders it as one undo step, Escape cancels
 - Eyedropper (I): picks the color under the cursor into the shared paint
   color, sampled from the flattened composite — what you actually see, not
   one layer — point, 3×3 or 5×5 mean sampling, a monospaced hex readout in
   the options bar and an optional copy-to-clipboard on pick; a drag keeps
   sampling, and Option-click borrows the eyedropper mid-tool from brush,
   fill, and gradient
-- Brush and eraser (per-tool size and opacity, shared color; `[`/`]`
-  resize; 1 px pixel-snapped mode; strokes confine to an active selection)
+- Brush and eraser (per-tool size, opacity and hardness — below 100% the
+  stroke stamps soft airbrushed dabs, and hardness feathers the eraser,
+  clone stamp and dodge/burn the same way; shared color; `[`/`]` resize;
+  1 px pixel-snapped mode; strokes confine to an active selection)
   and on-canvas text (font/weight/size/color and left/center/right
   alignment, ⌘Return commits, Escape cancels) — tools switch via the left
   tool rail, Tools menu, or M/O/L/W/S/C/V/B/E/J/D/K/G/R/T/I/Z/H. Related
@@ -246,7 +251,7 @@ defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 50 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 51 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG, and `sample_color` reads single pixels off the flattened
 composite — the eyedropper), layer operations, blend modes, layer masks (add
@@ -261,8 +266,11 @@ including `transform_layer`, the Free Transform pipeline with named parameters
 and `distort_layer`, its perspective twin (four explicit corner destinations,
 the ⌘-corner drag as a tool), both reporting the layer's new bounds — brush
 and eraser strokes (polyline points
-with size/color/opacity, and a
-`target` choosing the layer's pixels or its mask), text — `add_text_layer`
+with size/color/opacity/hardness — the same soft-dab feathering as the
+Hardness option, shared with `clone_stamp` and `dodge_burn` — and a
+`target` choosing the layer's pixels or its mask), shape layers
+(`add_shape_layer` / `edit_shape_layer`, the parametric rect / ellipse /
+line layers the shape tools drag out and reopen), text — `add_text_layer`
 and `edit_text_layer` for re-editable text layers with an `alignment`
 parameter (`get_document` reports each layer's text parameters) and
 `add_text` for the rasterizing variant —

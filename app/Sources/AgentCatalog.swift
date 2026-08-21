@@ -433,6 +433,13 @@ extension AgentServer {
                             + "Ignored when target is \"mask\".",
                     ],
                     "opacity": ["type": "number", "minimum": 0, "maximum": 1],
+                    "hardness": [
+                        "type": "number", "minimum": 0, "maximum": 100,
+                        "description": "Edge hardness in percent (default 100 = crisp). "
+                            + "Below 100 the stroke stamps soft round dabs whose alpha "
+                            + "fades from hardness% of the radius out to the rim — an "
+                            + "airbrushed edge.",
+                    ],
                     "layer": index,
                     "target": [
                         "type": "string",
@@ -468,6 +475,12 @@ extension AgentServer {
                         "description": "Stroke width in px (1-512, default 16).",
                     ],
                     "opacity": ["type": "number", "minimum": 0, "maximum": 1],
+                    "hardness": [
+                        "type": "number", "minimum": 0, "maximum": 100,
+                        "description": "Edge hardness in percent (default 100 = crisp). "
+                            + "Below 100 the erase feathers out from hardness% of the "
+                            + "radius to the rim.",
+                    ],
                     "layer": index,
                     "target": [
                         "type": "string",
@@ -522,6 +535,13 @@ extension AgentServer {
                         "type": "number", "minimum": 0, "maximum": 1,
                         "description": "Strength of the cloned paint (default 1).",
                     ],
+                    "hardness": [
+                        "type": "number", "minimum": 0, "maximum": 100,
+                        "description": "Edge hardness in percent (default 100 = crisp). "
+                            + "Below 100 the cloned paint feathers out from hardness% of "
+                            + "the dab radius to the rim, blending it into the "
+                            + "surroundings.",
+                    ],
                     "layer": index,
                     "document_id": docID,
                 ], required: ["source_x", "source_y", "points"]),
@@ -563,6 +583,12 @@ extension AgentServer {
                         "type": "boolean",
                         "description": "true darkens (burn) instead of lightening (dodge). "
                             + "Default false.",
+                    ],
+                    "hardness": [
+                        "type": "number", "minimum": 0, "maximum": 100,
+                        "description": "Edge hardness in percent (default 100 = crisp). "
+                            + "Below 100 the effect feathers out from hardness% of the "
+                            + "radius to the rim.",
                     ],
                     "layer": index,
                     "document_id": docID,
@@ -741,6 +767,62 @@ extension AgentServer {
                     ],
                     "document_id": docID,
                 ], required: ["kind", "x", "y", "w", "h"]),
+            tool(
+                "edit_shape_layer",
+                "Changes an existing SHAPE layer's description and re-renders its pixels "
+                    + "— the box, fill, stroke, stroke width, corner radius or line "
+                    + "direction — as one undo step, the way double-clicking the layer in "
+                    + "the app reopens it. Works only on layers get_document reports a "
+                    + "\"shape\" object for; the kind (rect / ellipse / line) is fixed at "
+                    + "creation. Omitted arguments keep the layer's current values. Pass "
+                    + "fill or stroke as \"\" to remove that paint (at least one visible "
+                    + "paint must remain).",
+                [
+                    "layer": index,
+                    "x": [
+                        "type": "number",
+                        "description": "New shape box top-left x, canvas px (default: keep).",
+                    ],
+                    "y": [
+                        "type": "number",
+                        "description": "New shape box top-left y, canvas px (default: keep).",
+                    ],
+                    "w": [
+                        "type": "number",
+                        "description": "New box width in px (default: keep).",
+                    ],
+                    "h": [
+                        "type": "number",
+                        "description": "New box height in px (default: keep).",
+                    ],
+                    "flipped": [
+                        "type": "boolean",
+                        "description": "Line only: false runs top-left to bottom-right "
+                            + "across the box, true bottom-left to top-right (default: "
+                            + "keep).",
+                    ],
+                    "fill": [
+                        "type": "string",
+                        "description": "Hex fill color, #RRGGBB or #RRGGBBAA; \"\" removes "
+                            + "the fill (default: keep). Ignored for lines.",
+                    ],
+                    "stroke": [
+                        "type": "string",
+                        "description": "Hex stroke color, #RRGGBB or #RRGGBBAA; \"\" removes "
+                            + "the stroke (default: keep; a line requires one).",
+                    ],
+                    "stroke_width": [
+                        "type": "number",
+                        "description": "Stroke width in px, centered on the path (0-200; "
+                            + "default: keep).",
+                    ],
+                    "radius": [
+                        "type": "number",
+                        "description": "Rect corner radius in px (default: keep; ignored by "
+                            + "ellipse and line).",
+                    ],
+                    "document_id": docID,
+                ]),
             tool(
                 "add_live_photo_layer",
                 "Adds an Apple LIVE PHOTO as a new layer above the active one and selects "

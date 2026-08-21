@@ -75,6 +75,7 @@ final class EditorViewController: NSViewController {
     // The open crop session (logic in EditorViewController+Crop.swift; the
     // canvas draws its overlay and routes the gesture).
     var cropSession: CropSession?
+    var shapeEditSession: ShapeEditSession?
 
     // What brush/eraser edit (see PaintTarget), plus the layer it was chosen
     // for: selecting a different layer drops the choice back to .layer.
@@ -332,6 +333,13 @@ final class EditorViewController: NSViewController {
         canvas.onShapeCommit = { [weak self] box, flipped in
             self?.commitShapeLayer(box: box, flipped: flipped)
         }
+        canvas.onShapeEditMouseDown = { [weak self] point in self?.shapeEditMouseDown(point) }
+        canvas.onShapeEditMouseDragged = { [weak self] point in
+            self?.shapeEditMouseDragged(point)
+        }
+        canvas.onShapeEditMouseUp = { [weak self] in self?.shapeEditSession?.drag = nil }
+        canvas.onShapeEditCommit = { [weak self] in self?.commitShapeEditSession() }
+        canvas.onShapeEditCancel = { [weak self] in self?.cancelShapeEditSession() }
         canvas.onZoomClick = { [weak self] point, out in self?.zoomStep(at: point, out: out) }
         canvas.onZoomTo = { [weak self] target in self?.applyZoom(target) }
         canvas.onZoomRect = { [weak self] rect in self?.zoomToRect(rect) }
@@ -392,6 +400,9 @@ final class EditorViewController: NSViewController {
         }
         layersPanel.onTextEdit = { [weak self] idx in
             self?.editTextLayer(idx)
+        }
+        layersPanel.onShapeEdit = { [weak self] idx in
+            self?.editShapeLayer(idx)
         }
         layersPanel.onLivePhotoEdit = { [weak self] idx in
             self?.editLivePhotoLayer(idx)
@@ -546,6 +557,11 @@ final class EditorViewController: NSViewController {
         if currentTool == .crop, tool != .crop {
             endCropSession()
         }
+        // Leaving a reopened shape commits it (the text session's rule);
+        // an untouched session commits nothing.
+        if shapeEditSession != nil, tool != currentTool {
+            commitShapeEditSession()
+        }
         currentTool = tool
         canvas.tool = tool
         // Only brush and eraser edit masks; picking one of the other paint
@@ -591,6 +607,7 @@ final class EditorViewController: NSViewController {
         if let paint = store.paintOptions(for: currentTool) {
             canvas.brushSize = CGFloat(min(max(paint.size, 1), 200))
             canvas.brushOpacity = CGFloat(min(max(paint.opacity, 0), 100) / 100)
+            canvas.brushHardness = CGFloat(min(max(paint.hardness, 0), 100) / 100)
         }
         let modes: [SelectionCombineMode] = [.replace, .add, .subtract, .intersect]
         canvas.selectionCombineBase = modes[min(max(store.select.modeIndex, 0), 3)]
@@ -1570,6 +1587,13 @@ final class EditorViewController: NSViewController {
         if transformSession != nil, !isCommittingTransform {
             endTransformSession()
         }
+        // Same for an open shape-edit session: an external edit (agent,
+        // undo) may have renumbered or rewritten the layer it describes,
+        // so it closes without committing. The session's own commit ends
+        // it before applying, so a commit never lands here.
+        if shapeEditSession != nil {
+            endShapeEditSession()
+        }
         let newSize = doc.canvasSize
         let dimensionsChanged = canvas.frame.size != newSize
         canvas.image = document.projection?.makeCGImage()
@@ -2077,6 +2101,10 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
+        // The panel's double-click bypasses menu validation, so an open
+        // shape session commits here — its hidden-layer preview and the
+        // sheet's live preview would otherwise fight over previewImage.
+        commitShapeEditSession()
         // Editing a layer makes it the active one, like re-opening a text
         // layer does.
         setActiveLayer(idx)
@@ -2297,6 +2325,11 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
+        // A reopened shape commits before the mode takes the canvas — the
+        // same click-away rule the canvas applies.
+        if shapeEditSession != nil {
+            commitShapeEditSession()
+        }
         canvas.toggleQuickMask()
         updateStatus()
     }
@@ -2429,10 +2462,11 @@ extension EditorViewController {
     }
 
     /// Called by ImageDocument on save/close/export so an in-progress canvas
-    /// session — text entry, or a Free Transform — is never silently dropped
-    /// from the written file.
+    /// session — text entry, a reopened shape, or a Free Transform — is
+    /// never silently dropped from the written file.
     func commitPendingSessions() {
         canvas.commitTextSession()
+        commitShapeEditSession()
         commitPendingTransform()
     }
 }
@@ -2492,11 +2526,12 @@ extension EditorViewController: NSUserInterfaceValidations {
             return !tool.planned
         }
 
-        // While a text session or a Free Transform is active, only tool
-        // switching (handled above — it commits the session) and zooming are
-        // safe; edit/filter/clipboard actions must not mutate the image
-        // underneath the session, and Free Transform must not re-enter.
-        if canvas.hasActiveTextSession || isTransforming {
+        // While a text session, a shape-edit session or a Free Transform is
+        // active, only tool switching (handled above — it commits the
+        // session) and zooming are safe; edit/filter/clipboard actions must
+        // not mutate the image underneath the session, and Free Transform
+        // must not re-enter.
+        if canvas.hasActiveTextSession || isTransforming || shapeEditSession != nil {
             if let action = item.action, Self.zoomActions.contains(action) {
                 return true
             }

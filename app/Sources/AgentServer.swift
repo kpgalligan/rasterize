@@ -158,6 +158,7 @@ final class AgentServer {
         "edit_text_layer": editTextLayer,
         // Shape layers (AgentServer+Shapes.swift)
         "add_shape_layer": { $0.addShapeLayer },
+        "edit_shape_layer": { $0.editShapeLayer },
         // Live photo layers (AgentServer+LivePhoto.swift)
         "add_live_photo_layer": addLivePhotoLayer,
         "set_live_photo_frame": setLivePhotoFrame,
@@ -1368,16 +1369,29 @@ final class AgentServer {
                 let x = (pair[0] as? NSNumber)?.doubleValue,
                 let y = (pair[1] as? NSNumber)?.doubleValue
             {
-                return CGPoint(x: x, y: y)
+                return try strokePoint(x, y)
             }
             if let object = entry as? [String: Any],
                 let x = (object["x"] as? NSNumber)?.doubleValue,
                 let y = (object["y"] as? NSNumber)?.doubleValue
             {
-                return CGPoint(x: x, y: y)
+                return try strokePoint(x, y)
             }
             throw ToolError(message: "Each point must be [x, y] or {\"x\": …, \"y\": …}")
         }
+    }
+
+    /// One stroke point, validated: finite and within ±100,000 canvas px —
+    /// far past any real canvas, but a hard wall against coordinates that
+    /// would make the soft-dab walk (one stamp per few px of arc length)
+    /// loop effectively forever.
+    private func strokePoint(_ x: Double, _ y: Double) throws -> CGPoint {
+        guard x.isFinite, y.isFinite, abs(x) <= 100_000, abs(y) <= 100_000 else {
+            throw ToolError(
+                message: "Stroke points must be finite canvas coordinates within "
+                    + "±100,000 px — got (\(x), \(y)). Keep strokes near the canvas.")
+        }
+        return CGPoint(x: x, y: y)
     }
 
     /// Hex color: #RGB, #RRGGBB, or #RRGGBBAA ('#' optional).
@@ -1437,6 +1451,7 @@ final class AgentServer {
         let points = try parsePoints(a)
         let size = CGFloat(min(max(doubleArg(a, "size") ?? 16, 1), 512))
         let opacity = min(max(doubleArg(a, "opacity") ?? 1, 0), 1)
+        let hardness = try strokeHardness(a)
         // In ERASE mode only the overlay's alpha matters. A MASK is coverage
         // rather than color — white reveals, black hides, whatever color was
         // asked for — and it carries the opacity in the stroke's own alpha,
@@ -1464,6 +1479,32 @@ final class AgentServer {
         ) { context in
             context.setFillColor(color.cgColor)
             context.setStrokeColor(color.cgColor)
+            // Below 100% hardness the stroke stamps SoftBrush falloff dabs
+            // — the interactive soft pipeline — instead of a hard path.
+            // Full-alpha dabs inside ONE transparency layer capped at the
+            // color's own alpha (a mask stroke's opacity rides there):
+            // per-dab alpha would compound where dabs overlap, pushing a
+            // 50% stroke's core toward 100%, where the hard path paints
+            // the whole polyline at one uniform alpha.
+            if SoftBrush.isSoft(hardness: hardness, size: size),
+               let dab = SoftBrush.dab(
+                   color: color.withAlphaComponent(1), diameter: size, hardness: hardness) {
+                let alpha = (color.usingColorSpace(.sRGB) ?? color).alphaComponent
+                context.saveGState()
+                context.setAlpha(alpha)
+                context.beginTransparencyLayer(auxiliaryInfo: nil)
+                let spacing = SoftBrush.spacing(for: size)
+                for center in SoftBrush.stampCenters(along: points, spacing: spacing) {
+                    context.draw(
+                        dab,
+                        in: CGRect(
+                            x: center.x - size / 2, y: center.y - size / 2,
+                            width: size, height: size))
+                }
+                context.endTransparencyLayer()
+                context.restoreGState()
+                return
+            }
             if points.count == 1 {
                 let p = points[0]
                 context.fillEllipse(

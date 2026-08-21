@@ -46,6 +46,17 @@ extension AgentServer {
         }
     }
 
+    /// The stroke tools' optional `hardness` argument, 0–100, returned as
+    /// the 0–1 fraction SoftBrush speaks; default 1 (the classic hard
+    /// round). Internal: paint_stroke shares it.
+    func strokeHardness(_ a: [String: Any]) throws -> CGFloat {
+        let raw = doubleArg(a, "hardness") ?? 100
+        guard raw.isFinite, raw >= 0, raw <= 100 else {
+            throw ToolError(message: "hardness must be between 0 and 100 (percent)")
+        }
+        return CGFloat(raw / 100)
+    }
+
     /// The stroke's coverage: the round-capped, round-joined outline of the
     /// polyline through `points`, `size` px wide — the same geometry a
     /// brush stroke paints. A single point gets an epsilon segment so it
@@ -93,6 +104,7 @@ extension AgentServer {
         }
         let size = CGFloat(min(max(rawSize, 1), 200))
         let opacity = min(max(rawOpacity, 0), 1)
+        let hardness = try strokeHardness(a)
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
         let canvasHeight = doc.height
         // The snapshot is latched before the edit, like the interactive
@@ -111,19 +123,40 @@ extension AgentServer {
             rasterized = try retouchOverlay(
                 document, layer: index, actionName: "Clone Stamp",
                 draw: { context in
+                    // The un-flip inside: the overlay context is flipped
+                    // (row 0 = top), so the snapshot flips back locally to
+                    // land right side up at the displaced position —
+                    // stampCloneDab's rule.
+                    let drawSnapshot: (CGContext) -> Void = { context in
+                        context.translateBy(x: 0, y: CGFloat(canvasHeight))
+                        context.scaleBy(x: 1, y: -1)
+                        context.draw(
+                            snapshot,
+                            in: CGRect(
+                                x: offset.dx, y: -offset.dy,
+                                width: CGFloat(snapshot.width),
+                                height: CGFloat(snapshot.height)))
+                    }
+                    // Soft clone stamps the snapshot dab by dab through the
+                    // gray falloff mask — the canvas's soft stampCloneDab.
+                    if SoftBrush.isSoft(hardness: hardness, size: size),
+                        let mask = SoftBrush.dabMask(diameter: size, hardness: hardness) {
+                        let spacing = SoftBrush.spacing(for: size)
+                        for center in SoftBrush.stampCenters(along: points, spacing: spacing) {
+                            context.saveGState()
+                            context.clip(
+                                to: CGRect(
+                                    x: center.x - size / 2, y: center.y - size / 2,
+                                    width: size, height: size),
+                                mask: mask)
+                            drawSnapshot(context)
+                            context.restoreGState()
+                        }
+                        return
+                    }
                     context.addPath(Self.strokeCoverage(points: points, size: size))
                     context.clip()
-                    // The overlay context is flipped (row 0 = top); flip back
-                    // locally so the snapshot lands right side up at the
-                    // displaced position — stampCloneDab's un-flip.
-                    context.translateBy(x: 0, y: CGFloat(canvasHeight))
-                    context.scaleBy(x: 1, y: -1)
-                    context.draw(
-                        snapshot,
-                        in: CGRect(
-                            x: offset.dx, y: -offset.dy,
-                            width: CGFloat(snapshot.width),
-                            height: CGFloat(snapshot.height)))
+                    drawSnapshot(context)
                 },
                 commit: { current, base, w, h in
                     let out = current.paintingLayer(
@@ -166,6 +199,7 @@ extension AgentServer {
         }
         let size = CGFloat(min(max(rawSize, 1), 200))
         let exposurePercent = min(max(rawExposure, 0), 100)
+        let hardness = try strokeHardness(a)
         let burn = boolArg(a, "burn") ?? false
         let rangeName = stringArg(a, "range") ?? "midtones"
         let range: Int
@@ -188,9 +222,23 @@ extension AgentServer {
                 draw: { context in
                     // Pure coverage, like the interactive stroke: white at
                     // full alpha — the exposure lives in the op, not the
-                    // stroke.
-                    context.setFillColor(
-                        NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1).cgColor)
+                    // stroke. Soft strokes stamp white falloff dabs, so the
+                    // coverage itself feathers.
+                    let white = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+                    if SoftBrush.isSoft(hardness: hardness, size: size),
+                        let dab = SoftBrush.dab(
+                            color: white, diameter: size, hardness: hardness) {
+                        let spacing = SoftBrush.spacing(for: size)
+                        for center in SoftBrush.stampCenters(along: points, spacing: spacing) {
+                            context.draw(
+                                dab,
+                                in: CGRect(
+                                    x: center.x - size / 2, y: center.y - size / 2,
+                                    width: size, height: size))
+                        }
+                        return
+                    }
+                    context.setFillColor(white.cgColor)
                     context.addPath(Self.strokeCoverage(points: points, size: size))
                     context.fillPath()
                 },

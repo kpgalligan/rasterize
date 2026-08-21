@@ -55,6 +55,44 @@ struct ShapeToolPreview {
         // Up-right and down-left drags run bottom-left → top-right.
         flipped = kind == .shapeLine && dx != 0 && dy != 0 && (dx < 0) != (dy < 0)
     }
+
+    /// Direct geometry (no drag): the shape-edit session's overlay.
+    init(kind: EditorTool, box: CGRect, flipped: Bool, style: ShapeToolStyle) {
+        self.kind = kind
+        self.box = box
+        self.flipped = kind == .shapeLine ? flipped : false
+        self.style = style
+    }
+}
+
+/// A shape layer reopened for editing (the layers panel's double-click):
+/// which layer, the box being adjusted in canvas coordinates, and the drag
+/// in flight. Owned by EditorViewController (the +Shapes extension drives
+/// it); the canvas draws `shapeEditOverlay` and routes the gesture, the
+/// crop session's division of labor. Styling is deliberately NOT here — the
+/// session reads the options bar's live shape style, which editShapeLayer
+/// seeds from the layer's own payload on open.
+struct ShapeEditSession {
+    /// What a drag on the session does, decided at mouse-down.
+    enum Drag {
+        /// Dragging a handle; the raw value indexes `CropSession.handles`.
+        case handle(Int, start: CGRect)
+        /// Dragging the interior: moves the whole box.
+        case move(grab: CGPoint, start: CGRect)
+    }
+
+    let layer: Int
+    /// One of ShapeLayerPayload.kinds; a re-edit never changes it.
+    let kind: String
+    var box: CGRect
+    var flipped: Bool
+    var drag: Drag?
+    /// Where the current drag pressed down, for the click-vs-drag slop
+    /// test (jitter inside a double-click must not count as a drag).
+    var pressPoint: CGPoint?
+    /// True once the box or the style changed; an untouched session
+    /// commits nothing (no phantom undo step).
+    var dirty = false
 }
 
 // MARK: - Canvas drawing
@@ -90,6 +128,33 @@ extension ImageCanvasView {
             path.lineCapStyle = .round
             stroke.setStroke()
             path.stroke()
+        }
+    }
+
+    /// A reopened shape's editing chrome: the live preview plus a hairline
+    /// box and the eight handles (the crop box's layout and style, so
+    /// handles read the same everywhere).
+    func drawShapeEditOverlay(_ preview: ShapeToolPreview) {
+        drawShapePreview(preview)
+        let scale = magnification
+        let box = NSBezierPath(rect: preview.box)
+        box.lineWidth = 3 / scale
+        NSColor.black.withAlphaComponent(0.45).setStroke()
+        box.stroke()
+        box.lineWidth = 1 / scale
+        NSColor.white.withAlphaComponent(0.95).setStroke()
+        box.stroke()
+
+        let size = ImageCanvasView.transformHandleSize / scale
+        for point in CropSession.handles(of: preview.box) {
+            let square = NSBezierPath(
+                rect: CGRect(
+                    x: point.x - size / 2, y: point.y - size / 2, width: size, height: size))
+            NSColor.white.setFill()
+            square.fill()
+            square.lineWidth = 1 / scale
+            NSColor.black.withAlphaComponent(0.65).setStroke()
+            square.stroke()
         }
     }
 }
