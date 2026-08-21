@@ -255,9 +255,13 @@ events driving the panel UI, cancellation at tool/API boundaries, and
 automatic pruning of older canvas renders from the conversation so
 history stays small. Every assistant edit is a normal undo step.
 
-Bring your own API key: the panel asks once and stores it in the
-keychain (launching with `ANTHROPIC_API_KEY` set also works). The model
-defaults to `claude-sonnet-5`; override with
+Bring your own API key: the panel asks once and stores it user-only
+(0600) in `~/Library/Application Support/Rasterize/anthropic_api_key`;
+launching with `ANTHROPIC_API_KEY` set also works, and wins. A key an
+earlier build kept in the keychain migrates into that file on the next
+launch — one final keychain prompt, then never again (keychain ACLs are
+tied to the code signature, so every rebuild used to re-prompt). The
+model defaults to `claude-sonnet-5`; override with
 `defaults write com.kgalligan.Rasterize AssistantModel <model-id>`.
 
 ## AI agent access (MCP)

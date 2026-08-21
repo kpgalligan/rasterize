@@ -60,6 +60,6 @@ The MCP server is the reliable way to exercise the app end-to-end (open document
 # then POST MCP JSON-RPC to http://127.0.0.1:4917/mcp
 ```
 
-A freshly built binary otherwise blocks on launch behind a keychain authorization prompt when the assistant panel looks for its API key — a dummy `ANTHROPIC_API_KEY` in the environment short-circuits that read.
+The assistant's API key lives in `~/Library/Application Support/Rasterize/anthropic_api_key` (the env var wins over it; the keychain is legacy, read once only to migrate). Always launch test instances with a dummy `ANTHROPIC_API_KEY` anyway: it short-circuits every stored-key read, so a test instance can never pick up the user's real key — and on a machine where only the legacy keychain copy exists, it also avoids blocking launch behind that one migration prompt.
 
 Use a non-default port (default is 4816) and argv-style defaults so nothing leaks into the user's own instances. The user often has their own Xcode-launched Rasterize running — never signal or kill Rasterize processes you didn't launch; find your own with `pgrep -f '^\./build/.*MacOS/Rasterize'`. Prefer opening documents via the `open_document` MCP tool over launch-time argv paths.

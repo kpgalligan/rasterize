@@ -95,7 +95,8 @@ final class AssistantPanelViewController: NSViewController {
             title: "Save Key", style: .primary, target: self, action: #selector(saveKey(_:)))
         let keyHint = NSTextField(
             wrappingLabelWithString:
-                "Stored in your keychain. Launching with ANTHROPIC_API_KEY set also works.")
+                "Stored user-only in Application Support. "
+                + "Launching with ANTHROPIC_API_KEY set also works.")
         keyHint.font = DS.mono(10)
         keyHint.textColor = DS.textFaint
         keyBox = NSStackView(views: [keyTitle, keyField, keySave, keyHint])
@@ -160,9 +161,9 @@ final class AssistantPanelViewController: NSViewController {
         if APIKeyStore.save(key) {
             keyField.stringValue = ""
             refreshKeyState()
-            appendMeta("API key saved to the keychain.")
+            appendMeta("API key saved.")
         } else {
-            appendError("Could not save the key to the keychain.")
+            appendError("Could not write the key file in Application Support.")
         }
     }
 
