@@ -9,8 +9,10 @@ enum OptionControlKind {
     /// Numeric field, mono 11: displays "<value><unit>" at rest ("24 px",
     /// "0.0°", "100%") and the bare number while editing. `decimals` is the
     /// display precision; the value is clamped to [min, max] on commit.
+    /// A non-empty `quick` appends a chevron zone on the right that pops a
+    /// menu of those preset values for one-click entry.
     case field(width: CGFloat, unit: String, decimals: Int, min: Double, max: Double,
-               get: () -> Double, set: (Double) -> Void)
+               quick: [Double], get: () -> Double, set: (Double) -> Void)
     /// Read-only mono text (the eyedropper's hex readout).
     case display(width: CGFloat, get: () -> String)
     /// Popup: mono 11 value plus a 13pt chevron.up.chevron.down in
@@ -215,10 +217,10 @@ final class ToolOptionsBar: NSView, NSPopoverDelegate {
         let onEdit: () -> Void = { [weak self] in self?.controlDidEdit() }
         let enabled = descriptor.isEnabled
         switch descriptor.kind {
-        case let .field(width, unit, decimals, min, max, get, set):
+        case let .field(width, unit, decimals, min, max, quick, get, set):
             return OptionFieldControl(
                 width: width, unit: unit, decimals: decimals, min: min, max: max,
-                read: get, write: set, enabled: enabled, onEdit: onEdit)
+                quick: quick, read: get, write: set, enabled: enabled, onEdit: onEdit)
         case let .display(width, get):
             return OptionDisplayControl(width: width, read: get, enabled: enabled)
         case let .popup(width, items, get, set):

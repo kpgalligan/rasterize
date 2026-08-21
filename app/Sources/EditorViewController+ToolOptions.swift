@@ -11,6 +11,14 @@ import AppKit
 // (`isEnabled: { false }`), never omitted, so wiring one up later is a
 // binding change rather than a layout change.
 extension EditorViewController {
+    // Quick-pick lists for the numeric fields' chevron menus. Pixel fields
+    // share one 1–64 spread, percent fields step by ten, and radius-like
+    // fields double; fields with special ranges declare their own inline.
+    private static let quickPx: [Double] = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]
+    private static let quickPercent: [Double] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    private static let quickRadius: [Double] = [0, 1, 2, 4, 8, 16, 32, 64, 128]
+    private static let quickTolerance: [Double] = [0, 8, 16, 32, 64, 128, 255]
+
     /// Rebuilds the bar for the current tool or modal session.
     func presentToolOptions() {
         let bar = optionsBar
@@ -80,6 +88,7 @@ extension EditorViewController {
                     id: "select.feather", microLabel: "Feather", overflowLabel: "Feather",
                     kind: .field(
                         width: 52, unit: " px", decimals: 0, min: 0, max: 250,
+                        quick: Self.quickRadius,
                         get: { ToolOptionsStore.shared.select.feather },
                         set: { [weak self] value in
                             ToolOptionsStore.shared.select.feather = value
@@ -104,6 +113,7 @@ extension EditorViewController {
                     id: "select.tolerance", microLabel: "Tolerance", overflowLabel: "Tolerance",
                     kind: .field(
                         width: 46, unit: "", decimals: 0, min: 0, max: 255,
+                        quick: Self.quickTolerance,
                         get: { ToolOptionsStore.shared.select.tolerance },
                         set: { ToolOptionsStore.shared.select.tolerance = $0 })),
                 OptionDescriptor(
@@ -131,6 +141,7 @@ extension EditorViewController {
                     id: "select.grow", microLabel: "Grow", overflowLabel: "Grow / Shrink",
                     kind: .field(
                         width: 52, unit: " px", decimals: 0, min: -250, max: 250,
+                        quick: [-64, -32, -16, -8, -4, -2, -1, 1, 2, 4, 8, 16, 32, 64],
                         get: { ToolOptionsStore.shared.select.growAmount },
                         set: { [weak self] value in
                             ToolOptionsStore.shared.select.growAmount = value
@@ -144,6 +155,7 @@ extension EditorViewController {
                     id: "select.border", microLabel: "Border", overflowLabel: "Border width",
                     kind: .field(
                         width: 52, unit: " px", decimals: 0, min: 1, max: 250,
+                        quick: [1, 2, 4, 8, 16, 32, 64],
                         get: { ToolOptionsStore.shared.select.borderWidth },
                         set: { [weak self] value in
                             ToolOptionsStore.shared.select.borderWidth = value
@@ -153,6 +165,7 @@ extension EditorViewController {
                     id: "select.smooth", microLabel: "Smooth", overflowLabel: "Smooth",
                     kind: .field(
                         width: 52, unit: " px", decimals: 0, min: 1, max: 250,
+                        quick: [1, 2, 4, 8, 16, 32, 64],
                         get: { ToolOptionsStore.shared.select.smoothRadius },
                         set: { [weak self] value in
                             ToolOptionsStore.shared.select.smoothRadius = value
@@ -207,12 +220,14 @@ extension EditorViewController {
                     id: "crop.w", microLabel: "W", overflowLabel: "Width",
                     kind: .field(
                         width: 58, unit: "", decimals: 0, min: 1, max: 100_000,
+                        quick: [],
                         get: { [weak self] in self?.cropRectWidth ?? 0 },
                         set: { [weak self] in self?.cropRectWidth = $0 })),
                 OptionDescriptor(
                     id: "crop.h", microLabel: "H", overflowLabel: "Height",
                     kind: .field(
                         width: 58, unit: "", decimals: 0, min: 1, max: 100_000,
+                        quick: [],
                         get: { [weak self] in self?.cropRectHeight ?? 0 },
                         set: { [weak self] in self?.cropRectHeight = $0 })),
             ]),
@@ -221,6 +236,7 @@ extension EditorViewController {
                     id: "crop.straighten", microLabel: "Straighten", overflowLabel: "Straighten",
                     kind: .field(
                         width: 52, unit: "°", decimals: 1, min: -45, max: 45,
+                        quick: [-45, -30, -15, -5, -1, 0, 1, 5, 15, 30, 45],
                         get: { [weak self] in self?.cropStraightenDegrees ?? 0 },
                         set: { [weak self] in self?.cropStraightenDegrees = $0 })),
             ]),
@@ -320,6 +336,7 @@ extension EditorViewController {
                     id: "move.nudge", microLabel: "Nudge", overflowLabel: "Nudge step",
                     kind: .field(
                         width: 52, unit: " px", decimals: 0, min: 1, max: 100,
+                        quick: Self.quickPx,
                         get: { ToolOptionsStore.shared.move.nudgeStep },
                         set: { ToolOptionsStore.shared.move.nudgeStep = $0 }),
                     // Arrow nudges are 1px (Shift: 10) for now.
@@ -414,6 +431,7 @@ extension EditorViewController {
                     id: "paint.size", microLabel: "Size", overflowLabel: "Size",
                     kind: .field(
                         width: 56, unit: " px", decimals: 0, min: 1, max: 200,
+                        quick: Self.quickPx,
                         get: { read().size },
                         set: { [weak self] value in
                             var options = read()
@@ -427,6 +445,7 @@ extension EditorViewController {
                     id: "paint.hardness", microLabel: "Hardness", overflowLabel: "Hardness",
                     kind: .field(
                         width: 48, unit: "%", decimals: 0, min: 0, max: 100,
+                        quick: [0] + Self.quickPercent,
                         get: { read().hardness },
                         set: { [weak self] value in
                             var options = read()
@@ -442,6 +461,7 @@ extension EditorViewController {
                     overflowLabel: tool == .dodge ? "Exposure" : "Opacity",
                     kind: .field(
                         width: 52, unit: "%", decimals: 0, min: 1, max: 100,
+                        quick: Self.quickPercent,
                         get: { read().opacity },
                         set: { [weak self] value in
                             var options = read()
@@ -481,6 +501,7 @@ extension EditorViewController {
                     id: "paint.flow", microLabel: "Flow", overflowLabel: "Flow",
                     kind: .field(
                         width: 52, unit: "%", decimals: 0, min: 1, max: 100,
+                        quick: Self.quickPercent,
                         get: { read().flow },
                         set: { [weak self] value in
                             var options = read()
@@ -511,6 +532,7 @@ extension EditorViewController {
                     id: "paint.spacing", microLabel: "Spacing", overflowLabel: "Spacing",
                     kind: .field(
                         width: 48, unit: "%", decimals: 0, min: 1, max: 200,
+                        quick: Self.quickPercent + [150, 200],
                         get: { read().spacing },
                         set: { [weak self] value in
                             var options = read()
@@ -522,6 +544,7 @@ extension EditorViewController {
                     id: "paint.angle", microLabel: "Angle", overflowLabel: "Angle",
                     kind: .field(
                         width: 48, unit: "°", decimals: 0, min: -180, max: 180,
+                        quick: [-135, -90, -45, 0, 45, 90, 135, 180],
                         get: { read().angle },
                         set: { [weak self] value in
                             var options = read()
@@ -533,6 +556,7 @@ extension EditorViewController {
                     id: "paint.roundness", microLabel: "Round", overflowLabel: "Roundness",
                     kind: .field(
                         width: 48, unit: "%", decimals: 0, min: 1, max: 100,
+                        quick: Self.quickPercent,
                         get: { read().roundness },
                         set: { [weak self] value in
                             var options = read()
@@ -544,6 +568,7 @@ extension EditorViewController {
                     id: "paint.smoothing", microLabel: "Smooth", overflowLabel: "Smoothing",
                     kind: .field(
                         width: 48, unit: "%", decimals: 0, min: 0, max: 100,
+                        quick: [0] + Self.quickPercent,
                         get: { read().smoothing },
                         set: { [weak self] value in
                             var options = read()
@@ -596,6 +621,7 @@ extension EditorViewController {
                     id: "fill.tolerance", microLabel: "Tolerance", overflowLabel: "Tolerance",
                     kind: .field(
                         width: 46, unit: "", decimals: 0, min: 0, max: 255,
+                        quick: Self.quickTolerance,
                         get: { ToolOptionsStore.shared.fill.tolerance },
                         set: { ToolOptionsStore.shared.fill.tolerance = $0 })),
                 OptionDescriptor(
@@ -610,6 +636,7 @@ extension EditorViewController {
                     id: "fill.opacity", microLabel: "Opacity", overflowLabel: "Opacity",
                     kind: .field(
                         width: 52, unit: "%", decimals: 0, min: 1, max: 100,
+                        quick: Self.quickPercent,
                         get: { ToolOptionsStore.shared.fill.opacity },
                         set: { ToolOptionsStore.shared.fill.opacity = $0 })),
                 OptionDescriptor(
@@ -677,6 +704,7 @@ extension EditorViewController {
                     id: "gradient.opacity", microLabel: "Opacity", overflowLabel: "Opacity",
                     kind: .field(
                         width: 52, unit: "%", decimals: 0, min: 1, max: 100,
+                        quick: Self.quickPercent,
                         get: { ToolOptionsStore.shared.gradient.opacity },
                         set: { ToolOptionsStore.shared.gradient.opacity = $0 })),
                 OptionDescriptor(
@@ -703,6 +731,7 @@ extension EditorViewController {
                     id: "gradient.midpoint", microLabel: "Mid", overflowLabel: "Midpoint",
                     kind: .field(
                         width: 48, unit: "%", decimals: 0, min: 1, max: 99,
+                        quick: [10, 20, 30, 40, 50, 60, 70, 80, 90],
                         get: { ToolOptionsStore.shared.gradient.midpoint },
                         set: { ToolOptionsStore.shared.gradient.midpoint = $0 }),
                     isEnabled: { false }),
@@ -750,6 +779,7 @@ extension EditorViewController {
                     id: "shape.weight", overflowLabel: "Stroke weight",
                     kind: .field(
                         width: 50, unit: " px", decimals: 0, min: 0, max: 200,
+                        quick: Self.quickPx,
                         get: { ToolOptionsStore.shared.shape.strokeWidth },
                         set: { [weak self] value in
                             ToolOptionsStore.shared.shape.strokeWidth = value
@@ -761,6 +791,7 @@ extension EditorViewController {
                     id: "shape.radius", microLabel: "Radius", overflowLabel: "Corner radius",
                     kind: .field(
                         width: 50, unit: " px", decimals: 0, min: 0, max: 500,
+                        quick: Self.quickRadius,
                         get: { ToolOptionsStore.shared.shape.radius },
                         set: { [weak self] value in
                             ToolOptionsStore.shared.shape.radius = value
@@ -835,6 +866,7 @@ extension EditorViewController {
                     id: "text.size", microLabel: "Size", overflowLabel: "Size",
                     kind: .field(
                         width: 52, unit: " pt", decimals: 0, min: 6, max: 500,
+                        quick: [9, 10, 12, 14, 18, 24, 36, 48, 72, 96, 144],
                         get: { [weak self] in Double(self?.fontSize ?? 48) },
                         set: { [weak self] value in
                             self?.fontSize = CGFloat(value)
@@ -844,6 +876,7 @@ extension EditorViewController {
                     id: "text.tracking", microLabel: "Track", overflowLabel: "Tracking",
                     kind: .field(
                         width: 46, unit: "", decimals: 0, min: -100, max: 100,
+                        quick: [-50, -25, -10, -5, 0, 5, 10, 25, 50],
                         get: { ToolOptionsStore.shared.text.tracking },
                         set: { ToolOptionsStore.shared.text.tracking = $0 }),
                     // The payload doesn't carry tracking yet.
@@ -878,6 +911,7 @@ extension EditorViewController {
                     id: "text.leading", microLabel: "Leading", overflowLabel: "Leading",
                     kind: .field(
                         width: 52, unit: " pt", decimals: 0, min: 0, max: 1000,
+                        quick: [],
                         get: { ToolOptionsStore.shared.text.leading },
                         set: { ToolOptionsStore.shared.text.leading = $0 }),
                     isEnabled: { false }),
@@ -885,6 +919,7 @@ extension EditorViewController {
                     id: "text.baseline", microLabel: "Baseline", overflowLabel: "Baseline shift",
                     kind: .field(
                         width: 46, unit: "", decimals: 0, min: -100, max: 100,
+                        quick: [-50, -25, -10, -5, 0, 5, 10, 25, 50],
                         get: { ToolOptionsStore.shared.text.baselineShift },
                         set: { ToolOptionsStore.shared.text.baselineShift = $0 }),
                     isEnabled: { false }),
@@ -970,6 +1005,7 @@ extension EditorViewController {
                     id: "view.zoom", microLabel: "Zoom", overflowLabel: "Zoom",
                     kind: .field(
                         width: 56, unit: "%", decimals: 0, min: 2, max: 3200,
+                        quick: [25, 50, 100, 200, 400, 800, 1600, 3200],
                         get: { [weak self] in self?.zoomPercent ?? 100 },
                         set: { [weak self] in self?.zoomPercent = $0 })),
             ]),
@@ -1019,6 +1055,7 @@ extension EditorViewController {
                     id: "transform.angle", microLabel: "Angle", overflowLabel: "Angle",
                     kind: .field(
                         width: 56, unit: "°", decimals: 2, min: -360, max: 360,
+                        quick: [-90, -45, -30, -15, 0, 15, 30, 45, 90, 180],
                         get: { [weak self] in self?.transformDegrees ?? 0 },
                         set: { [weak self] in self?.transformDegrees = $0 })),
             ]),
@@ -1028,6 +1065,7 @@ extension EditorViewController {
                     kind: .field(
                         width: 60, unit: "%", decimals: 2,
                         min: -Self.maxScalePercent, max: Self.maxScalePercent,
+                        quick: [25, 50, 75, 100, 150, 200],
                         get: { [weak self] in self?.transformScaleXPercent ?? 100 },
                         set: { [weak self] in self?.transformScaleXPercent = $0 })),
                 OptionDescriptor(
@@ -1035,6 +1073,7 @@ extension EditorViewController {
                     kind: .field(
                         width: 60, unit: "%", decimals: 2,
                         min: -Self.maxScalePercent, max: Self.maxScalePercent,
+                        quick: [25, 50, 75, 100, 150, 200],
                         get: { [weak self] in self?.transformScaleYPercent ?? 100 },
                         set: { [weak self] in self?.transformScaleYPercent = $0 })),
             ]),
@@ -1043,12 +1082,14 @@ extension EditorViewController {
                     id: "transform.w", microLabel: "W", overflowLabel: "Width",
                     kind: .field(
                         width: 58, unit: "", decimals: 0, min: 1, max: 100_000_000,
+                        quick: [],
                         get: { [weak self] in self?.transformWidthPixels ?? 0 },
                         set: { [weak self] in self?.transformWidthPixels = $0 })),
                 OptionDescriptor(
                     id: "transform.h", microLabel: "H", overflowLabel: "Height",
                     kind: .field(
                         width: 58, unit: "", decimals: 0, min: 1, max: 100_000_000,
+                        quick: [],
                         get: { [weak self] in self?.transformHeightPixels ?? 0 },
                         set: { [weak self] in self?.transformHeightPixels = $0 })),
             ]),

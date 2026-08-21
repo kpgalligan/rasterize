@@ -37,13 +37,15 @@ private final class FocusReportingTextField: NSTextField {
 /// Numeric option field: a bordered container around an embedded borderless
 /// mono field. At rest it shows the formatted value plus unit; while editing
 /// it shows the bare number. Enter and end-editing commit (clamped to the
-/// descriptor's range), Escape reverts.
+/// descriptor's range), Escape reverts. A non-empty `quick` list appends a
+/// chevron zone on the right that pops a menu of those preset values.
 final class OptionFieldControl: NSView, NSTextFieldDelegate, OptionControl {
     private let fixedWidth: CGFloat
     private let unit: String
     private let decimals: Int
     private let lower: Double
     private let upper: Double
+    private let quick: [Double]
     private let read: () -> Double
     private let write: (Double) -> Void
     private let enabled: () -> Bool
@@ -54,8 +56,12 @@ final class OptionFieldControl: NSView, NSTextFieldDelegate, OptionControl {
     /// the resulting end-editing notification doesn't commit a second time.
     private var finishing = false
 
+    /// Width the quick-pick chevron zone adds beyond the text width.
+    private static let quickZoneWidth: CGFloat = 15
+
     init(
         width: CGFloat, unit: String, decimals: Int, min: Double, max: Double,
+        quick: [Double] = [],
         read: @escaping () -> Double, write: @escaping (Double) -> Void,
         enabled: @escaping () -> Bool, onEdit: @escaping () -> Void
     ) {
@@ -64,6 +70,7 @@ final class OptionFieldControl: NSView, NSTextFieldDelegate, OptionControl {
         self.decimals = decimals
         self.lower = min
         self.upper = max
+        self.quick = quick
         self.read = read
         self.write = write
         self.enabled = enabled
@@ -91,8 +98,12 @@ final class OptionFieldControl: NSView, NSTextFieldDelegate, OptionControl {
 
     override var isFlipped: Bool { true }
 
+    private var quickZone: CGFloat {
+        quick.isEmpty ? 0 : Self.quickZoneWidth
+    }
+
     override var intrinsicContentSize: NSSize {
-        NSSize(width: fixedWidth, height: DS.controlHeight)
+        NSSize(width: fixedWidth + quickZone, height: DS.controlHeight)
     }
 
     override func layout() {
@@ -100,7 +111,7 @@ final class OptionFieldControl: NSView, NSTextFieldDelegate, OptionControl {
         let height = ceil(DS.mono(11).boundingRectForFont.height)
         field.frame = NSRect(
             x: 7, y: floor((bounds.height - height) / 2),
-            width: max(0, bounds.width - 14), height: height)
+            width: max(0, bounds.width - 14 - quickZone), height: height)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -111,13 +122,72 @@ final class OptionFieldControl: NSView, NSTextFieldDelegate, OptionControl {
         path.fill()
         DS.border.setStroke()
         path.stroke()
+
+        guard !quick.isEmpty else { return }
+        if let icon = NSImage(
+            systemSymbolName: "chevron.down", accessibilityDescription: "Quick values")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold))
+        {
+            let tinted = icon.tinted(with: DS.textMuted)
+            let size = tinted.size
+            tinted.draw(
+                in: NSRect(
+                    x: bounds.width - 5 - size.width, y: (bounds.height - size.height) / 2,
+                    width: size.width, height: size.height))
+        } else {
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: DS.sans(9), .foregroundColor: DS.textMuted,
+            ]
+            let size = "▾".size(withAttributes: attributes)
+            "▾".draw(
+                at: NSPoint(
+                    x: bounds.width - 5 - size.width, y: (bounds.height - size.height) / 2),
+                withAttributes: attributes)
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
         // The 7pt margins around the embedded field still read as the
-        // control; a click anywhere on it starts editing.
+        // control; a click anywhere on it starts editing — except the
+        // quick-pick chevron zone, which pops the preset menu.
         guard isActive else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        if !quick.isEmpty, point.x >= bounds.width - Self.quickZoneWidth {
+            showQuickMenu()
+            return
+        }
         window?.makeFirstResponder(field)
+    }
+
+    /// The chevron's preset menu: each value formatted exactly as the field
+    /// shows it at rest, checkmarked on the current value.
+    private func showQuickMenu() {
+        if field.currentEditor() != nil { finishEditing(commit: true) }
+        let menu = NSMenu()
+        let current = read()
+        for (index, value) in quick.enumerated() {
+            let item = NSMenuItem(
+                title: String(format: "%.\(decimals)f", value) + unit,
+                action: #selector(quickPicked(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.state = abs(value - current) < 0.0001 ? .on : .off
+            menu.addItem(item)
+        }
+        menu.minimumWidth = bounds.width
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height + 2), in: self)
+    }
+
+    @objc private func quickPicked(_ sender: NSMenuItem) {
+        guard quick.indices.contains(sender.tag) else { return }
+        let value = Swift.min(upper, Swift.max(lower, quick[sender.tag]))
+        // Same unchanged-value guard as typed commits: setters that do real
+        // work (the selection-morphology fields) must not re-fire on a
+        // pick of the value already showing.
+        guard abs(value - read()) > 0.0001 else { return }
+        write(value)
+        onEdit()
+        field.stringValue = restText()
     }
 
     func refresh() {

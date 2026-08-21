@@ -183,7 +183,9 @@ decoding, encoding, and manipulation.
   bar under the title bar that never resizes the canvas — each tool
   declares its options in priority order and whatever doesn't fit at the
   current window width folds into a `More` popover instead of wrapping.
-  Options persist per tool across documents and launches
+  Numeric fields carry a chevron menu of quick-pick presets (a 1–64 px
+  spread for sizes, tens for percentages, doublings for radii) alongside
+  typed entry. Options persist per tool across documents and launches
 - **Re-editable text layers**: committing text adds its own layer that
   remembers the string, font, size, color and alignment it was rendered
   from — click it again with the text tool to reopen the editor pre-filled,
