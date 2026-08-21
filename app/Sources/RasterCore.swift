@@ -530,6 +530,19 @@ final class RasterDocument {
         return wrap(rz_doc_painting_layer(ptr, idx, data, UInt32(w), UInt32(h), mode, Float(alpha)))
     }
 
+    /// `paintingLayer`, through a layer blend mode — the paint tools' Blend
+    /// option. Normal is byte-identical to `paintingLayer` with
+    /// `RZ_COMPOSITE_OVER`; nil when nothing would change.
+    func paintingLayerBlend(
+        _ idx: Int, overlay data: UnsafePointer<UInt8>, w: Int, h: Int,
+        mode: RzBlendMode, alpha: Double
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), w == width, h == height else { return nil }
+        return wrap(
+            rz_doc_painting_layer_blend(
+                ptr, idx, data, UInt32(w), UInt32(h), mode, Float(alpha)))
+    }
+
     /// Dodge/burn layer `idx` where the stroke overlay covers it — the same
     /// canvas-sized premultiplied overlay `paintingLayer` takes; only its
     /// alpha (the stroke's coverage) is read. `range`: 0 shadows, 1 midtones,

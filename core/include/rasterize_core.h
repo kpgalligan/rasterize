@@ -317,6 +317,19 @@ RzDocument *rz_doc_painting_layer(const RzDocument *doc, size_t idx,
                                   const uint8_t *src, uint32_t w, uint32_t h,
                                   RzCompositeMode mode, float alpha);
 
+/* Paints the same canvas-frame premultiplied overlay onto layer idx
+ * through a layer blend mode (the paint tools' Blend option): each covered
+ * pixel runs the W3C compositing formula the layer projection uses, so the
+ * stroke lands exactly what a `mode` layer holding it would flatten to
+ * against the layer's current pixels. RZ_BLEND_NORMAL is byte-identical to
+ * rz_doc_painting_layer with RZ_COMPOSITE_OVER; alpha clamps to [0, 1].
+ * NULL on NULL args, dimension mismatch, unknown mode, NaN alpha, bad idx,
+ * a layer extent that misses the canvas, or when no pixel would change. */
+RzDocument *rz_doc_painting_layer_blend(const RzDocument *doc, size_t idx,
+                                        const uint8_t *src, uint32_t w,
+                                        uint32_t h, RzBlendMode mode,
+                                        float alpha);
+
 /* Dodges (brightens, burn false) or burns (darkens, burn true) layer idx
  * where a stroke overlay covers it. src is the SAME canvas-frame
  * premultiplied overlay rz_doc_painting_layer takes (w/h must equal the

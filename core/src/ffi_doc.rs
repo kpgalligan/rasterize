@@ -641,6 +641,44 @@ pub unsafe extern "C" fn rz_doc_painting_layer(
     }
 }
 
+/// Paints a canvas-frame PREMULTIPLIED RGBA8 overlay (`src`, `w`/`h` must
+/// equal the canvas size) onto layer `idx` through blend mode `mode`
+/// (`RzBlendMode`), scaled by `alpha` (clamped to [0, 1]) — the paint
+/// tools' Blend option. `RZ_BLEND_NORMAL` is byte-identical to
+/// `rz_doc_painting_layer` with `RZ_COMPOSITE_OVER`. NULL on NULL args,
+/// dimension mismatch, unknown mode, NaN alpha, out-of-range idx, a layer
+/// extent that misses the canvas, or when no pixel would change.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `src` must
+/// be NULL or a valid pointer to at least `w * h * 4` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_painting_layer_blend(
+    doc: *const RzDocument,
+    idx: usize,
+    src: *const u8,
+    w: u32,
+    h: u32,
+    mode: c_int,
+    alpha: f32,
+) -> *mut RzDocument {
+    if src.is_null() {
+        return ptr::null_mut();
+    }
+    let body = |d: &RzDocument| {
+        let mode = BlendMode::from_c(mode)?;
+        // Validate against the canvas dimensions before touching `src`, so
+        // the raw read below is bounded by the canvas buffer size.
+        if w != d.width || h != d.height {
+            return None;
+        }
+        let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+        let src = unsafe { std::slice::from_raw_parts(src, len) };
+        d.painting_layer_blend(idx, src, mode, alpha)
+    };
+    unsafe { doc_op(doc, body) }
+}
+
 /// Dodges (brightens, `burn` false) or burns (darkens, `burn` true) layer
 /// `idx` where a stroke overlay covers it. `src` is the same canvas-frame
 /// premultiplied RGBA8 overlay `rz_doc_painting_layer` takes (`w`/`h` must
