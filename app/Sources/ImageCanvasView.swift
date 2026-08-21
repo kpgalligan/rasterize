@@ -397,6 +397,7 @@ final class ImageCanvasView: NSView {
     private var strokeOnMask = false
     private var strokeOnQuickMask = false
     private var strokeLastPoint: CGPoint?
+    private var strokeSpline = StrokeSpline()
 
     // Quick Mask mode: the selection as an editable canvas-sized coverage
     // buffer under a rubylith tint. Pure per-editor VIEW state — it never
@@ -1564,6 +1565,7 @@ final class ImageCanvasView: NSView {
         }
         strokeActive = true
         strokeLastPoint = point
+        strokeSpline.begin(at: point)
         if tool == .clone {
             // Latched here so an agent edit landing mid-drag cannot change
             // what is being cloned; the offset is the classic aligned-clone
@@ -1587,41 +1589,63 @@ final class ImageCanvasView: NSView {
 
     private func continueStroke(to point: CGPoint) {
         guard strokeActive, let last = strokeLastPoint, let context = overlayContext else { return }
-        var point = point
         if brushSize <= 1 {
             // Same pixel-center snapping as beginStroke; no clamping, so
             // off-canvas points still exit cleanly instead of edge-pinning.
-            point = CGPoint(x: floor(point.x) + 0.5, y: floor(point.y) + 0.5)
-        }
-        if tool == .clone || strokeSoftDab != nil {
-            // Stamped strokes — clone always, the others when soft — walk
-            // dabs along the segment instead of stroking a path. The last
-            // point only advances per stamp, so spacing carries across
-            // ticks instead of resetting at every event.
-            var from = last
-            let spacing = SoftBrush.spacing(for: brushSize)
-            var distance = hypot(point.x - from.x, point.y - from.y)
-            while distance >= spacing {
-                let step = spacing / distance
-                from = CGPoint(
-                    x: from.x + (point.x - from.x) * step,
-                    y: from.y + (point.y - from.y) * step)
-                if let dab = strokeSoftDab {
-                    stampSoftDab(dab, in: context, at: from)
-                } else {
-                    stampCloneDab(in: context, at: from)
-                }
-                distance = hypot(point.x - from.x, point.y - from.y)
-            }
-            strokeLastPoint = from
+            // Pixel strokes stay exact chords between snapped centers — a
+            // spline would wander off the pixel grid.
+            let snapped = CGPoint(x: floor(point.x) + 0.5, y: floor(point.y) + 0.5)
+            context.move(to: last)
+            context.addLine(to: snapped)
+            context.strokePath()
+            strokeLastPoint = snapped
             emitStrokeUpdate()
             return
         }
-        context.move(to: last)
-        context.addLine(to: point)
-        context.strokePath()
-        strokeLastPoint = point
+        // Straight chords between drag samples read as a polygon on a fast
+        // flick (drags arrive at most once per frame), so every other
+        // stroke renders through the spline, one sample behind the cursor;
+        // endStroke flushes the tail span.
+        let vertices = strokeSpline.add(point)
+        guard !vertices.isEmpty else { return }
+        renderStroke(through: vertices, in: context)
         emitStrokeUpdate()
+    }
+
+    /// Extends the stroke through `vertices` — one flattened spline span.
+    /// Stamped strokes (clone always, the others when soft) walk dabs at
+    /// the stroke's spacing; the walk's origin advances per STAMP, so
+    /// spacing carries across spans instead of resetting at each one.
+    /// Hard strokes extend the path itself, joined and capped round by
+    /// the stroke's gstate.
+    private func renderStroke(through vertices: [CGPoint], in context: CGContext) {
+        guard var from = strokeLastPoint, !vertices.isEmpty else { return }
+        if tool == .clone || strokeSoftDab != nil {
+            let spacing = SoftBrush.spacing(for: brushSize)
+            for vertex in vertices {
+                var distance = hypot(vertex.x - from.x, vertex.y - from.y)
+                while distance >= spacing {
+                    let step = spacing / distance
+                    from = CGPoint(
+                        x: from.x + (vertex.x - from.x) * step,
+                        y: from.y + (vertex.y - from.y) * step)
+                    if let dab = strokeSoftDab {
+                        stampSoftDab(dab, in: context, at: from)
+                    } else {
+                        stampCloneDab(in: context, at: from)
+                    }
+                    distance = hypot(vertex.x - from.x, vertex.y - from.y)
+                }
+            }
+            strokeLastPoint = from
+        } else {
+            context.move(to: from)
+            for vertex in vertices {
+                context.addLine(to: vertex)
+            }
+            context.strokePath()
+            strokeLastPoint = vertices.last
+        }
     }
 
     /// Stamps the clone snapshot through a round dab at `point`: the whole
@@ -1687,6 +1711,22 @@ final class ImageCanvasView: NSView {
 
     private func endStroke() {
         guard strokeActive else { return }
+        if let context = overlayContext {
+            // The spline runs one sample behind the cursor; its tail span
+            // lands now, while the stroke's gstate (color, width, the
+            // selection clip) is still in force.
+            let tail = strokeSpline.finish()
+            if !tail.isEmpty {
+                renderStroke(through: tail, in: context)
+                if !strokeOnQuickMask, !strokeOnMask {
+                    // Those two consume the overlay directly below, tail
+                    // included; the layer live edit consumed it at the
+                    // LAST DRAG EVENT, so without this the endLiveEdit
+                    // commit would silently drop the tail.
+                    emitStrokeUpdate()
+                }
+            }
+        }
         overlayContext?.restoreGState()
         strokeActive = false
         strokeLastPoint = nil
@@ -1743,6 +1783,7 @@ final class ImageCanvasView: NSView {
     /// Escape, window close); the receiver rolls the live edit back.
     private func cancelStroke() {
         strokeLastPoint = nil
+        strokeSpline = StrokeSpline()
         cloneSnapshot = nil
         strokeSoftDab = nil
         cloneDabMask = nil

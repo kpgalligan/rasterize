@@ -158,7 +158,9 @@ decoding, encoding, and manipulation.
 - Brush and eraser (per-tool size, opacity and hardness — below 100% the
   stroke stamps soft airbrushed dabs, and hardness feathers the eraser,
   clone stamp and dodge/burn the same way; shared color; `[`/`]` resize;
-  1 px pixel-snapped mode; strokes confine to an active selection)
+  1 px pixel-snapped mode; fast drags render through a smoothing spline,
+  so a flick lands as a curve instead of a chain of straight chords;
+  strokes confine to an active selection)
   and on-canvas text (font/weight/size/color and left/center/right
   alignment, ⌘Return commits, Escape cancels) — tools switch via the left
   tool rail, Tools menu, or M/O/L/W/S/C/V/B/E/J/D/K/G/R/T/I/Z/H. Related
