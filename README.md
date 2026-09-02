@@ -11,12 +11,13 @@ decoding, encoding, and manipulation.
   and the non-separable Hue/Saturation/Color/Luminosity — grouped in the
   panel exactly like Photoshop's menu;
   layers panel with thumbnails, inline rename, drag-reorder, a right-click
-  row menu (Rename, Select Frame… on a Live Photo layer, Delete Layer), and
+  row menu (Rename, Select Frame… on a Live Photo layer, Layer Style… with
+  Copy / Paste / Clear Layer Style, Delete Layer), and
   new/delete/duplicate/merge-down/flatten; Move tool (V) with arrow-key
   nudges; Paste as New Layer; PSD files import with their real layers; the
   native `.rz` format saves the full layer stack — masks, clipping flags,
-  and text and adjustment descriptions included — losslessly, and older
-  `.rz` files still load
+  layer styles, the global light, and text and adjustment descriptions
+  included — losslessly, and older `.rz` files still load
 - **Layer masks**: a grayscale coverage mask per layer that hides pixels
   without erasing them — Layer > Mask adds one revealing all, hiding all, or
   built from the current selection, then enables/disables it (a disabled mask
@@ -50,6 +51,22 @@ decoding, encoding, and manipulation.
   groups. The layers panel indents a clipped layer behind a "↳" arrow;
   releasing (the same menu item, retitled) undoes it, pixels untouched
   either way
+- **Layer styles** (Layer > Layer Style ▸): Photoshop's effect stack per
+  layer — Drop Shadow, Inner Shadow, Outer Glow, Inner Glow, Stroke (outside
+  / inside / center, color or gradient), Color Overlay, Gradient Overlay,
+  Bevel & Emboss and Satin, each with its own blend mode and opacity, plus
+  Blending Options (fill opacity, which scales the pixels but not the
+  effects, and Blend If's split-slider ramps on this layer and the
+  underlying composite) — rendered from the layer's shape (alpha × mask) at
+  composite time, so they follow every move, mask edit and re-rendered
+  text, live-previewed in one sheet with a checklist down the left and a
+  pane per effect, copied/pasted/cleared from the same menu, badged "fx" in
+  the layers panel (double-click a plain raster layer's row to open the
+  sheet), scaled with Free Transform and Image Size, baked by Merge Down and
+  Flatten, and saved losslessly in `.rz` (format version 4; older files
+  still load). A document-level global light (angle, altitude) drives every
+  effect with Use Global Light on. The Free Transform preview shows the
+  layer without its effects until commit
 - Open PNG, JPEG, Photoshop (PSD, layered), TIFF, BMP, GIF, WebP, HEIC/HEIF,
   and Apple Live Photos — EXIF orientation is applied on open, so camera
   photos display upright
@@ -268,13 +285,16 @@ model defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 51 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 53 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG, and `sample_color` reads single pixels off the flattened
 composite — the eyedropper), layer operations, blend modes, layer masks (add
 revealing, hiding or from the selection; enable, apply, or delete), clipping
 masks (`set_layer_clipped` confines a layer to the alpha of the first
-unclipped layer below it; `get_document` reports the flag), non-destructive
+unclipped layer below it; `get_document` reports the flag), layer styles
+(`set_layer_style` replaces a layer's whole effect stack and blending
+options — the same JSON `get_document` reports — and `set_global_light` the
+shared light; `render` shows the effects), non-destructive
 adjustment layers (`add_adjustment_layer` / `edit_adjustment_layer` over all
 nine ops with the same mask-on-creation rule as the UI's; `get_document`
 reports each one's op and params), filters, geometry —

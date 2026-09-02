@@ -142,6 +142,9 @@ final class AgentServer {
         "remove_layer_mask": removeLayerMask,
         "set_layer_mask_enabled": setLayerMaskEnabled,
         "set_layer_clipped": setLayerClipped,
+        // Layer styles (AgentServer+LayerStyle.swift)
+        "set_layer_style": { $0.setLayerStyle },
+        "set_global_light": { $0.setGlobalLight },
         // Adjustment layers and filters
         "add_adjustment_layer": addAdjustmentLayer,
         "edit_adjustment_layer": editAdjustmentLayer,
@@ -381,10 +384,16 @@ final class AgentServer {
             if let payload = doc.livePhotoPayload(index) {
                 layer["live_photo"] = Self.livePhotoFields(payload)
             }
+            // A STYLED layer reports its full style object (the canonical
+            // JSON set_layer_style takes back).
+            if let style = Self.layerStyleFields(doc, index) {
+                layer["style"] = style
+            }
             return layer
         }
         var result = summary(document)
         result["layers"] = layers
+        result["global_light"] = Self.globalLightFields(doc)
         if let selection = editor(document)?.agentSelection {
             let b = selection.bounds
             let kind: String

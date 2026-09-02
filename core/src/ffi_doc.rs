@@ -12,48 +12,10 @@ use image::RgbaImage;
 use crate::adjust::Adjustment;
 use crate::doc::{BlendMode, MaskKind, RzDocument, MAX_PIXELS};
 use crate::doc_transform::Affine;
-use crate::ffi_util::{boxed, fallible_op, filter_from_c, read_cstr};
+use crate::ffi_util::{boxed, doc_get, doc_op, fallible_op, filter_from_c, read_cstr};
 use crate::ops::CompositeMode;
 use crate::rzdc::MAX_RZDC_META_LEN;
 use crate::RzImage;
-
-/// Runs a pure operation against `doc`, boxing the produced document.
-/// NULL input, `None`, or a panic all yield NULL.
-///
-/// # Safety
-/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
-unsafe fn doc_op<F>(doc: *const RzDocument, op: F) -> *mut RzDocument
-where
-    F: FnOnce(&RzDocument) -> Option<RzDocument>,
-{
-    if doc.is_null() {
-        return ptr::null_mut();
-    }
-    let document = unsafe { &*doc };
-    match catch_unwind(AssertUnwindSafe(|| op(document))) {
-        Ok(Some(result)) => Box::into_raw(Box::new(result)),
-        _ => ptr::null_mut(),
-    }
-}
-
-/// Runs a pure query against `doc`, returning `default` for NULL input,
-/// `None`, or a panic.
-///
-/// # Safety
-/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
-unsafe fn doc_get<T, F>(doc: *const RzDocument, default: T, get: F) -> T
-where
-    F: FnOnce(&RzDocument) -> Option<T>,
-{
-    if doc.is_null() {
-        return default;
-    }
-    let document = unsafe { &*doc };
-    match catch_unwind(AssertUnwindSafe(|| get(document))) {
-        Ok(Some(value)) => value,
-        _ => default,
-    }
-}
 
 /// Opens a document: "RZDC" files load the native layered format, "8BPS"
 /// files import Photoshop layers (falling back to the flattened composite on

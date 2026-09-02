@@ -61,12 +61,14 @@ final class PreviewRenderer {
 let sheetWidth: CGFloat = 420
 let sheetInset: CGFloat = 22
 
-/// Assembles a design-system sheet: 420px card, 15px/700 title, optional
+/// Assembles a design-system sheet: 420px card by default (`width:` for a
+/// wider one — the Layer Style sheet's two panes), 15px/700 title, optional
 /// 12px muted hint, content, then the button row.
 func makeSheetView(
-    title: String? = nil, hint: String? = nil, content: NSView, buttonRow: NSStackView
+    title: String? = nil, hint: String? = nil, content: NSView, buttonRow: NSStackView,
+    width: CGFloat = sheetWidth
 ) -> NSView {
-    let container = NSView(frame: NSRect(x: 0, y: 0, width: sheetWidth, height: 240))
+    let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 240))
     container.wantsLayer = true
     container.layer?.backgroundColor = DS.chromeBackground.cgColor
 
@@ -82,7 +84,7 @@ func makeSheetView(
         hintLabel.font = DS.sans(12)
         hintLabel.textColor = DS.textMuted
         hintLabel.isEditable = false
-        hintLabel.preferredMaxLayoutWidth = sheetWidth - sheetInset * 2
+        hintLabel.preferredMaxLayoutWidth = width - sheetInset * 2
         stackedViews.append(hintLabel)
     }
     stackedViews.append(content)
@@ -97,7 +99,7 @@ func makeSheetView(
     container.addSubview(stack)
     container.addSubview(buttonRow)
     NSLayoutConstraint.activate([
-        container.widthAnchor.constraint(equalToConstant: sheetWidth),
+        container.widthAnchor.constraint(equalToConstant: width),
         stack.topAnchor.constraint(equalTo: container.topAnchor, constant: sheetInset),
         stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: sheetInset),
         stack.trailingAnchor.constraint(

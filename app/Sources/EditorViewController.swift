@@ -418,6 +418,9 @@ final class EditorViewController: NSViewController {
         layersPanel.onLivePhotoEdit = { [weak self] idx in
             self?.editLivePhotoLayer(idx)
         }
+        layersPanel.onLayerStyleEdit = { [weak self] idx in
+            self?.editLayerStyle(idx)
+        }
         layersPanel.onShowAssistant = { [weak self] in
             self?.panelTab = 1
             self?.updatePanelVisibility()
@@ -2633,6 +2636,12 @@ extension EditorViewController: NSUserInterfaceValidations {
             // visible rather than mysterious.
             guard let document = document, let doc = document.doc else { return false }
             return doc.livePhotoPayload(document.activeLayerIndex) != nil
+        case #selector(layerStyle(_:)), #selector(layerStyleEffect(_:)):
+            return canEditLayerStyle
+        case #selector(pasteLayerStyle(_:)):
+            return canPasteLayerStyle
+        case #selector(copyLayerStyle(_:)), #selector(clearLayerStyle(_:)):
+            return activeLayerHasStyle
         case #selector(adjustmentOptions(_:)):
             guard let document = document, let doc = document.doc else { return false }
             let idx = document.activeLayerIndex

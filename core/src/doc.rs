@@ -2,7 +2,10 @@
 //! stack), the f32 compositing projection, document ops, and per-layer
 //! masks. See include/rasterize_core.h for the contract. The blend-mode
 //! table and blend math live in `blend`, the RZDC native format in `rzdc`,
-//! and layered PSD import in `psd`. Layer pixel and mask buffers are
+//! and layered PSD import in `psd`. Layer styles (the effect stack, fill
+//! opacity, Blend If, the global light) live in `style`, are rendered by
+//! `style_render` and composited by `style_composite`; this module only
+//! routes styled layers there. Layer pixel and mask buffers are
 //! `Arc`-shared so document copies are copy-on-write.
 
 use std::sync::Arc;
@@ -12,10 +15,12 @@ use image::{GenericImageView, GrayImage, ImageBuffer, Luma, Pixel, RgbaImage};
 
 use crate::adjust::Adjustment;
 use crate::blend::{
-    blend_kind, composite_source_into, dissolve_threshold, paint_pixel, BlendKind, LUMA_B, LUMA_G,
-    LUMA_R,
+    blend_kind, composite_buffer_into, composite_source_into, dissolve_threshold, paint_pixel,
+    BlendKind, LUMA_B, LUMA_G, LUMA_R,
 };
 use crate::ops::CompositeMode;
+use crate::style::{scaled_style, GlobalLight, LayerStyle};
+use crate::style_composite::{composite_styled_into, merge_extent, CompositeEnv};
 use crate::RzImage;
 
 pub use crate::blend::BlendMode;
@@ -66,6 +71,11 @@ pub struct Layer {
     /// at the bottom of the stack (no unclipped layer below) composites as if
     /// unclipped. Copied on duplicate like every other property.
     pub clipped: bool,
+    /// Layer style (effects + blending options); see `style`. Rides along
+    /// like meta, dropped by merge/flatten (which bake it), copied by
+    /// duplicate, scaled by the transforms. Never an identity style (the
+    /// setter clears those), so `Some` means "renders something".
+    pub style: Option<Arc<LayerStyle>>,
 }
 
 impl Layer {
@@ -83,13 +93,14 @@ impl Layer {
             mask_enabled: true,
             meta: None,
             clipped: false,
+            style: None,
         }
     }
 
     /// The mask that actually gates compositing: `None` when the layer has no
     /// mask, the mask is disabled, or (defensively — the invariant should
     /// prevent it) its dimensions disagree with the layer's pixels.
-    fn active_mask(&self) -> Option<&GrayImage> {
+    pub(crate) fn active_mask(&self) -> Option<&GrayImage> {
         let mask = self.mask.as_deref()?;
         if !self.mask_enabled || mask.dimensions() != self.pixels.dimensions() {
             return None;
@@ -108,6 +119,8 @@ pub struct RzDocument {
     pub height: u32,
     /// Layer stack, bottom first.
     pub layers: Vec<Layer>,
+    /// Shared light direction every "use global light" effect reads.
+    pub global_light: GlobalLight,
 }
 
 /// Clamps opacity to [0, 1], mapping non-finite values to 1.
@@ -131,13 +144,17 @@ pub(crate) fn sane_opacity(opacity: f32) -> f32 {
 /// A layer whose meta parses as an [`Adjustment`] is routed to
 /// [`composite_adjustment_into`] instead — every projection (flatten, render,
 /// export, merge-down) goes through this function, so adjustment layers
-/// behave identically everywhere.
-fn composite_layer_into(
+/// behave identically everywhere. A layer carrying a style is routed to
+/// `style_composite` (its effects rendered under `env`: the global light
+/// and the document canvas) — after the adjustment check, so adjustment
+/// layers ignore styles by construction.
+pub(crate) fn composite_layer_into(
     acc: &mut [[f32; 4]],
     acc_w: u32,
     acc_h: u32,
     origin: (i32, i32),
     layer: &Layer,
+    env: CompositeEnv,
 ) {
     let opacity = sane_opacity(layer.opacity);
     if opacity <= 0.0 {
@@ -145,6 +162,10 @@ fn composite_layer_into(
     }
     if let Some(adjustment) = layer.meta.as_deref().and_then(Adjustment::from_meta) {
         composite_adjustment_into(acc, acc_w, acc_h, origin, layer, &adjustment, opacity);
+        return;
+    }
+    if let Some(style) = layer.renders_style() {
+        composite_styled_into(acc, acc_w, acc_h, origin, layer, &[], style, opacity, env);
         return;
     }
     let mask = layer.active_mask().map(|m| m.as_raw().as_slice());
@@ -281,55 +302,59 @@ fn composite_adjustment_into(
 /// One consequence of the base rendering into a TRANSPARENT buffer: an
 /// adjustment-meta base has no pixel footprint there (adjustments never touch
 /// alpha, and a transparent backdrop is left untouched), so a non-empty group
-/// over an adjustment base contributes nothing.
-fn composite_clip_group_into(
+/// over an adjustment base contributes nothing. A STYLED base with a
+/// non-empty group is routed to `style_composite`, which renders its below
+/// effects once, the group as the interior unit, then its interior effects.
+pub(crate) fn composite_clip_group_into(
     acc: &mut [[f32; 4]],
     acc_w: u32,
     acc_h: u32,
     origin: (i32, i32),
     base: &Layer,
     group: &[Layer],
+    env: CompositeEnv,
 ) {
     if group.is_empty() {
-        composite_layer_into(acc, acc_w, acc_h, origin, base);
+        composite_layer_into(acc, acc_w, acc_h, origin, base, env);
         return;
     }
     let opacity = sane_opacity(base.opacity);
     if opacity <= 0.0 {
         return;
     }
+    if let Some(style) = base.renders_style() {
+        composite_styled_into(acc, acc_w, acc_h, origin, base, group, style, opacity, env);
+        return;
+    }
     let mut buf = vec![[0.0f32; 4]; acc.len()];
     let full = Layer {
         opacity: 1.0,
         blend: BlendMode::Normal,
+        style: None,
         ..base.clone()
     };
-    composite_layer_into(&mut buf, acc_w, acc_h, origin, &full);
+    composite_layer_into(&mut buf, acc_w, acc_h, origin, &full, env);
     let base_alpha: Vec<f32> = buf.iter().map(|px| px[3]).collect();
     for layer in group.iter().filter(|l| l.visible) {
-        composite_layer_into(&mut buf, acc_w, acc_h, origin, layer);
+        composite_layer_into(&mut buf, acc_w, acc_h, origin, layer, env);
         for (px, &a) in buf.iter_mut().zip(&base_alpha) {
             px[3] = a;
         }
     }
     // The group buffer is accumulator-aligned (same size, same origin), so
     // this is composite_layer_into's kernel with an f32 source and the
-    // base's mode and opacity. Pixels a clipped layer touched outside the
-    // footprint carry color at forced alpha 0 and are skipped here.
-    let kind = blend_kind(base.blend);
-    for ay in 0..i64::from(acc_h) {
-        for ax in 0..i64::from(acc_w) {
-            let ai = (ay as u64 * u64::from(acc_w) + ax as u64) as usize;
-            let src = buf[ai];
-            let sa = src[3] * opacity;
-            if sa <= 0.0 {
-                continue;
-            }
-            let cs = [src[0], src[1], src[2]];
-            let canvas_xy = (ax + i64::from(origin.0), ay + i64::from(origin.1));
-            composite_source_into(acc, ai, cs, sa, kind, canvas_xy);
-        }
-    }
+    // base's mode and opacity (blend::composite_buffer_into). Pixels a
+    // clipped layer touched outside the footprint carry color at forced
+    // alpha 0 and are skipped there.
+    composite_buffer_into(
+        acc,
+        &buf,
+        acc_w,
+        acc_h,
+        origin,
+        blend_kind(base.blend),
+        opacity,
+    );
 }
 
 /// The five exact (lossless, axis-aligned) whole-document transforms. Naming
@@ -385,6 +410,7 @@ impl RzDocument {
             width,
             height,
             layers: vec![Layer::new(pixels, "Background")],
+            global_light: GlobalLight::default(),
         }
     }
 
@@ -406,6 +432,7 @@ impl RzDocument {
     pub fn flattened(&self) -> RgbaImage {
         let px = self.width as usize * self.height as usize;
         let mut acc = vec![[0.0f32; 4]; px];
+        let env = self.composite_env();
         let mut i = 0;
         while i < self.layers.len() {
             let layer = &self.layers[i];
@@ -414,7 +441,7 @@ impl RzDocument {
                 // above a base is consumed by that base's group below):
                 // baseless, so it composites as if unclipped.
                 if layer.visible {
-                    composite_layer_into(&mut acc, self.width, self.height, (0, 0), layer);
+                    composite_layer_into(&mut acc, self.width, self.height, (0, 0), layer, env);
                 }
                 i += 1;
                 continue;
@@ -431,6 +458,7 @@ impl RzDocument {
                     (0, 0),
                     layer,
                     &self.layers[i + 1..end],
+                    env,
                 );
             }
             i = end;
@@ -580,11 +608,15 @@ impl RzDocument {
     /// layer's content cannot silently vanish.
     ///
     /// The merge is destructive, so the merged layer carries neither layer's
-    /// mask or meta: an ENABLED mask is baked into the pixels by the kernel
-    /// (like opacity and blend), a disabled one is simply dropped, and meta no
-    /// longer describes the pixels it is attached to. Because the kernel is
-    /// shared, merging an ADJUSTMENT layer down bakes the adjustment into the
-    /// layer below, gated by its blend mode, opacity and mask.
+    /// mask, meta or layer style: an ENABLED mask is baked into the pixels by
+    /// the kernel (like opacity and blend), a disabled one is simply dropped,
+    /// meta no longer describes the pixels it is attached to, and both
+    /// layers' style effects are baked by the same kernel (the union extent
+    /// grows by each layer's `style_composite::merge_extent`: the style's
+    /// pad, plus the drop shadow's shifted rect clipped to the canvas).
+    /// Because the kernel
+    /// is shared, merging an ADJUSTMENT layer down bakes the adjustment into
+    /// the layer below, gated by its blend mode, opacity and mask.
     ///
     /// A CLIPPED upper layer is baked through its clipping: the pair runs the
     /// same group kernel as the projection ([`composite_clip_group_into`]
@@ -606,16 +638,16 @@ impl RzDocument {
         if !upper.visible {
             return Some(doc);
         }
-        let (lo_w, lo_h) = lower.pixels.dimensions();
-        let (up_w, up_h) = upper.pixels.dimensions();
-        let x0 = i64::from(lower.offset.0).min(i64::from(upper.offset.0));
-        let y0 = i64::from(lower.offset.1).min(i64::from(upper.offset.1));
-        let x1 = (i64::from(lower.offset.0) + i64::from(lo_w))
-            .max(i64::from(upper.offset.0) + i64::from(up_w));
-        let y1 = (i64::from(lower.offset.1) + i64::from(lo_h))
-            .max(i64::from(upper.offset.1) + i64::from(up_h));
+        let env = self.composite_env();
+        let (lx0, ly0, lx1, ly1) = merge_extent(&lower, env);
+        let (ux0, uy0, ux1, uy1) = merge_extent(&upper, env);
+        let (x0, y0) = (lx0.min(ux0), ly0.min(uy0));
+        let (x1, y1) = (lx1.max(ux1), ly1.max(uy1));
         let (uw, uh) = ((x1 - x0) as u64, (y1 - y0) as u64);
         if uw == 0 || uh == 0 || uw * uh > MAX_PIXELS {
+            return None;
+        }
+        if x0 < i64::from(i32::MIN) || y0 < i64::from(i32::MIN) {
             return None;
         }
         let origin = (x0 as i32, y0 as i32);
@@ -628,10 +660,11 @@ impl RzDocument {
                 origin,
                 &lower,
                 std::slice::from_ref(&upper),
+                env,
             );
         } else {
-            composite_layer_into(&mut acc, uw as u32, uh as u32, origin, &lower);
-            composite_layer_into(&mut acc, uw as u32, uh as u32, origin, &upper);
+            composite_layer_into(&mut acc, uw as u32, uh as u32, origin, &lower, env);
+            composite_layer_into(&mut acc, uw as u32, uh as u32, origin, &upper, env);
         }
         let merged = doc.layers.get_mut(idx - 1).expect("lower layer exists");
         merged.pixels = Arc::new(quantize(&acc, uw as u32, uh as u32));
@@ -641,17 +674,23 @@ impl RzDocument {
         merged.mask = None;
         merged.mask_enabled = true;
         merged.meta = None;
+        merged.style = None;
         Some(doc)
     }
 
     /// Single-layer document containing the projection, named "Background".
     ///
     /// Like [`RzDocument::merging_down`], this is destructive: the projection
-    /// bakes every ENABLED mask into the composited pixels (a disabled one is
-    /// simply dropped with its layer), so the resulting layer carries neither
-    /// a mask nor meta — nothing is left that could describe those pixels.
+    /// bakes every ENABLED mask and every layer style into the composited
+    /// pixels (a disabled mask is simply dropped with its layer), so the
+    /// resulting layer carries neither a mask, meta nor style — nothing is
+    /// left that could describe those pixels. The document's global light
+    /// is a preference, not layer state, and is kept.
     pub fn flattening(&self) -> Self {
-        RzDocument::from_pixels(self.flattened())
+        RzDocument {
+            global_light: self.global_light,
+            ..RzDocument::from_pixels(self.flattened())
+        }
     }
 
     /// Paints a canvas-frame PREMULTIPLIED RGBA8 overlay (`src`, exactly
@@ -781,6 +820,7 @@ impl RzDocument {
             width: new_w,
             height: new_h,
             layers,
+            global_light: self.global_light,
         }
     }
 
@@ -823,6 +863,7 @@ impl RzDocument {
             width: w,
             height: h,
             layers,
+            global_light: self.global_light,
         })
     }
 
@@ -852,11 +893,14 @@ impl RzDocument {
             width: w,
             height: h,
             layers,
+            global_light: self.global_light,
         })
     }
 
     /// Scales the canvas and every layer (sizes and offsets) proportionally.
     /// The total-pixel guard applies to the canvas, as in `rz_image_resize`.
+    /// Layer styles are scaled with the layer ("Scale Effects", by the mean
+    /// factor `sqrt(fx * fy)`).
     pub fn resize(&self, w: u32, h: u32, filter: FilterType) -> Option<Self> {
         if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
             return None;
@@ -881,6 +925,7 @@ impl RzDocument {
                         saturating_i32((f64::from(l.offset.0) * fx).round() as i64),
                         saturating_i32((f64::from(l.offset.1) * fy).round() as i64),
                     ),
+                    style: scaled_style(&l.style, (fx * fy).sqrt()),
                     ..l.clone()
                 }
             })
@@ -889,6 +934,7 @@ impl RzDocument {
             width: w,
             height: h,
             layers,
+            global_light: self.global_light,
         })
     }
 }

@@ -87,7 +87,10 @@ extension AgentServer {
                 "get_document",
                 "Full state of one document: canvas size and every layer's name, size, offset, "
                     + "opacity, blend mode, visibility, layer mask (has_mask, mask_enabled), "
-                    + "and clipped flag (see set_layer_clipped). "
+                    + "and clipped flag (see set_layer_clipped). A STYLED layer reports a "
+                    + "style object — its whole effect stack and blending options as the "
+                    + "canonical JSON set_layer_style takes back — and the document reports "
+                    + "global_light (angle, altitude). "
                     + "A re-editable TEXT layer also reports a text object (string, font, size, "
                     + "color, alignment) — those are the layers edit_text_layer can change — and "
                     + "a SHAPE layer a shape object (kind, size, fill, stroke); a "
@@ -350,6 +353,85 @@ extension AgentServer {
                     ],
                     "document_id": docID,
                 ], required: ["clipped"]),
+            tool(
+                "set_layer_style",
+                "Replaces a layer's WHOLE layer style — Photoshop's effect stack plus "
+                    + "blending options — in one undoable step; the same object get_document "
+                    + "reports as style. Shape: {\"fill_opacity\": 0..1 (default 1; scales "
+                    + "the pixels, never the effects), \"blend_if\": null or {channel: "
+                    + "gray|red|green|blue, this_layer: [lo0, lo1, hi0, hi1], underlying: "
+                    + "[lo0, lo1, hi0, hi1]} with 0..255 ramps in order (weight fades in "
+                    + "over lo0..lo1 and out over hi0..hi1; [0, 0, 255, 255] is full weight), "
+                    + "\"effects\": [ ... ]}. Effects, at most one per type, each with "
+                    + "\"type\", \"enabled\" (default true), its own \"blend\" and "
+                    + "\"opacity\" 0..1 — defaults in parentheses: drop_shadow (multiply, "
+                    + "color #000000, opacity 0.75, angle 120, use_global_light true, distance "
+                    + "5 px, spread 0..1 (0), size 0..250 px (5), layer_knocks_out true); "
+                    + "inner_shadow (multiply, #000000, 0.75, angle 120, use_global_light "
+                    + "true, distance 5, choke 0, size 5); outer_glow (screen, #ffffbe, 0.75, "
+                    + "spread 0, size 5); inner_glow (screen, #ffffbe, 0.75, choke 0, size 5, "
+                    + "source edge|center); stroke (normal, opacity 1, size 3, position "
+                    + "outside|inside|center, fill_type color|gradient, color #000000, "
+                    + "gradient); color_overlay (normal, #ff0000, 1); gradient_overlay "
+                    + "(normal, 1, gradient); bevel_emboss (style outer_bevel|inner_bevel|"
+                    + "emboss|pillow_emboss, depth 1 = 100 %, direction up|down, size 5, "
+                    + "soften 0..16 (0), angle 120, use_global_light true, altitude 0..90 "
+                    + "(30), highlight_blend screen, highlight_color #ffffff, "
+                    + "highlight_opacity 0.75, shadow_blend multiply, shadow_color #000000, "
+                    + "shadow_opacity 0.75); satin (multiply, #000000, 0.5, angle 19, "
+                    + "distance 11, size 14, invert true). A gradient is {stops: [{position "
+                    + "0..1, color, opacity}, ...] (2..32), style linear|radial|angle|"
+                    + "reflected|diamond, angle 90, scale 0.1..1.5, reverse false, "
+                    + "align_with_layer true}. Blend names are the snake_case forms of the "
+                    + "layer blend modes (normal, multiply, screen, linear_dodge, ...); "
+                    + "colors are \"#rrggbb\"; angles are degrees, 0 = light from the right, "
+                    + "90 = from the top (120 casts down-right); sizes are canvas px; "
+                    + "spread/choke are fractions of size. Effects with use_global_light "
+                    + "read the document's global light (set_global_light). Numbers are "
+                    + "stored to 4 decimals; unknown keys are ignored, ranges clamped, and "
+                    + "an unknown type or enum value is an error whose message names the "
+                    + "key. null (or an omitted style) clears; so does a style with no "
+                    + "enabled effect, fill_opacity 1 and no blend_if. Idempotent: an "
+                    + "unchanged style reports unchanged: true. The whole style replaces "
+                    + "the previous one, so read it back from get_document first to change "
+                    + "one knob. Effects render from the layer's shape (alpha × mask) at "
+                    + "composite time — render shows them, layer renders and thumbnails do "
+                    + "not — and follow moves, mask edits and text re-renders; "
+                    + "transform_layer, distort_layer and image_size scale the px sizes "
+                    + "(Scale Effects); merge_down and flatten_image bake them in. "
+                    + "Interior effects use their own blend mode; the layer's blend mode "
+                    + "applies to its pixels. Refused on an adjustment layer.",
+                [
+                    "layer": index,
+                    "style": [
+                        "type": ["object", "null"],
+                        "description": "The whole style object described above, or null "
+                            + "to clear.",
+                    ],
+                    "document_id": docID,
+                ]),
+            tool(
+                "set_global_light",
+                "Sets the document's global light — the direction every effect with "
+                    + "use_global_light on (drop shadow, inner shadow, bevel & emboss by "
+                    + "default) reads instead of its own angle, so one edit re-lights every "
+                    + "styled layer. Either argument may be omitted; the light defaults to "
+                    + "angle 120 (down-right shadows), altitude 30. Altitude is clamped to "
+                    + "0..90, the angle normalized to -180..180, both stored to 4 decimals "
+                    + "(so the value get_document reports echoes back as unchanged); an "
+                    + "unchanged light reports unchanged: true. get_document reports "
+                    + "global_light.",
+                [
+                    "angle": [
+                        "type": "number",
+                        "description": "Degrees: 0 = light from the right, 90 = from the top.",
+                    ],
+                    "altitude": [
+                        "type": "number", "minimum": 0, "maximum": 90,
+                        "description": "Degrees above the canvas plane (bevel shading only).",
+                    ],
+                    "document_id": docID,
+                ]),
             tool(
                 "add_adjustment_layer",
                 "Adds a NON-DESTRUCTIVE adjustment layer above the active layer and selects "

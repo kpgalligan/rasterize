@@ -287,6 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // adjustment layer whose op has one (validation in the editor).
         menu.addItem(
             item("Adjustment Options…", #selector(EditorViewController.adjustmentOptions(_:))))
+        menu.addItem(submenuItem(layerStyleMenu()))
         // Enabled only on a layer that still carries its Live Photo
         // description (validation in the editor).
         menu.addItem(
@@ -349,6 +350,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(
             item("Enable Layer Mask", #selector(EditorViewController.toggleLayerMaskEnabled(_:))))
+        return menu
+    }
+
+    /// Layer > Layer Style: Blending Options…, one item per effect (each
+    /// opens the sheet on that effect, turned on — the item's tag indexes
+    /// LayerStyleEffectKind.allCases, Photoshop's dialog order), then
+    /// Copy / Paste / Clear. Enablement comes from
+    /// EditorViewController.validateUserInterfaceItem.
+    private func layerStyleMenu() -> NSMenu {
+        let menu = NSMenu(title: "Layer Style")
+        menu.addItem(
+            item("Blending Options…", #selector(EditorViewController.layerStyle(_:))))
+        menu.addItem(.separator())
+        for (tag, kind) in LayerStyleEffectKind.allCases.enumerated() {
+            let entry = item(
+                kind.title + "…", #selector(EditorViewController.layerStyleEffect(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        menu.addItem(.separator())
+        menu.addItem(
+            item("Copy Layer Style", #selector(EditorViewController.copyLayerStyle(_:))))
+        menu.addItem(
+            item("Paste Layer Style", #selector(EditorViewController.pasteLayerStyle(_:))))
+        menu.addItem(
+            item("Clear Layer Style", #selector(EditorViewController.clearLayerStyle(_:))))
         return menu
     }
 

@@ -14,6 +14,7 @@ use image::{Rgba, RgbaImage};
 use rasterize_core::doc::RzDocument;
 use rasterize_core::ffi::*;
 use rasterize_core::ffi_doc::*;
+use rasterize_core::ffi_style::*;
 use rasterize_core::RzImage;
 use tempfile::TempDir;
 
@@ -1808,6 +1809,21 @@ fn null_safety_sweep() {
             rz_doc_perspective_layer(null_doc, 0, unit_quad.as_ptr(), FILTER_NEAREST).is_null()
         );
         assert!(rz_doc_perspective_layer(null_doc, 0, ptr::null(), FILTER_NEAREST).is_null());
+
+        // Layer styles and the global light (ffi_style).
+        let style = CString::new("{\"effects\":[{\"type\":\"drop_shadow\"}]}").unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        assert!(rz_doc_set_layer_style(null_doc, 0, style.as_ptr(), &mut err).is_null());
+        assert!(!take_err_string(err).is_empty());
+        assert!(rz_doc_set_layer_style(null_doc, 0, style.as_ptr(), ptr::null_mut()).is_null());
+        let mut err: *mut c_char = ptr::null_mut();
+        assert!(rz_doc_set_layer_style(null_doc, 0, ptr::null(), &mut err).is_null());
+        assert!(!take_err_string(err).is_empty());
+        assert!(rz_doc_layer_style(null_doc, 0).is_null());
+        assert!(!rz_doc_layer_has_style(null_doc, 0));
+        assert!(rz_doc_set_global_light(null_doc, 0.0, 30.0).is_null());
+        assert_eq!(rz_doc_global_light_angle(null_doc), 0.0);
+        assert_eq!(rz_doc_global_light_altitude(null_doc), 0.0);
     }
 
     // NULL name / NULL image arguments on a valid doc.

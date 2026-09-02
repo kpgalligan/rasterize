@@ -9,6 +9,7 @@ use image::RgbaImage;
 
 use crate::blend::BlendMode;
 use crate::doc::{Layer, RzDocument};
+use crate::style::GlobalLight;
 
 /// The psd crate silently mis-decodes anything but 8-bit RGB or grayscale
 /// (CMYK channels land in RGB slots, 16-bit data is read byte-interleaved),
@@ -146,16 +147,19 @@ pub(crate) fn open_psd(bytes: &[u8], path: &str) -> Result<RzDocument, String> {
             // PSD layer masks are not imported (the crate exposes them only
             // as raw channel data); imported layers arrive unmasked. The PSD
             // clipping bit is not exposed by the crate either, so imported
-            // layers arrive unclipped.
+            // layers arrive unclipped. PSD `lfx2` layer effects are not
+            // imported (the crate discards the block), so no layer style.
             mask: None,
             mask_enabled: true,
             meta: None,
             clipped: false,
+            style: None,
         });
     }
     Ok(RzDocument {
         width: cw,
         height: ch,
         layers,
+        global_light: GlobalLight::default(),
     })
 }

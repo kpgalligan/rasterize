@@ -6,7 +6,7 @@ Applies to everything under `core/`. Build commands, the FFI three-file lockstep
 
 - `lib.rs` — module declarations and re-exports only. No implementation code.
 - `rz_image.rs` — flat `RzImage`, format sniffing, file open/save/encode, and `from_rgba` (the in-memory twin of `open`, for pixels only the host can decode). (Named `rz_image`, not `image`, to avoid ambiguity with the `image` crate.)
-- `doc.rs` — layer model, compositing/projection, document ops, layer masks. **Full — no new concerns.** A new feature area gets a new module.
+- `doc.rs` — layer model, compositing/projection, document ops, layer masks. **Full — no new concerns.** A new feature area gets a new module. A styled layer's compositing is routed out to `style_composite.rs`; `doc.rs` only wires it (`CompositeEnv`, `merge_extent`).
 - `blend.rs` — `BlendMode` + all blend math, the shared source-over/erase pixel primitives, `LUMA_*` constants.
 - `rzdc.rs` — the native `.rz` file format. The doc comment on `encode_native` **is** the format spec.
 - `psd.rs` — PSD import.
@@ -15,7 +15,13 @@ Applies to everything under `core/`. Build commands, the FFI three-file lockstep
 - `adjust.rs` — the adjustment-layer interpreter; its module doc holds the JSON schema table for every recognized `meta` op. Layer `meta` is otherwise an opaque blob the core never interprets.
 - `agent.rs` — embedded MCP server (streamable HTTP, tools-only, stateless). **Generic** — knows nothing about images; the host registers the catalog and a callback.
 - `assistant.rs` — Anthropic Messages API tool loop (`ureq`, non-streaming; `api_base` is the provider seam), cancellation at tool/API boundaries, image pruning of old canvas renders.
-- `ffi.rs` / `ffi_doc.rs` / `ffi_filters.rs` / `ffi_agent.rs` / `ffi_assistant.rs` — thin shims only; shared plumbing lives in `ffi_util.rs`, never copy-pasted.
+- `style.rs` — layer styles: `LayerStyle` (the identity rule, `pad`, Scale Effects), `scaled_style`/`quad_mean_scale`, and the `impl RzDocument` block (`set_layer_style`, `set_global_light`); its module doc IS the style JSON schema table (the `adjust.rs` pattern — the header's "Layer styles" section points there). Re-exports every model type, so `style::` stays the one public path.
+- `style_model.rs` / `style_effects.rs` — the model's value types (global light, Blend If, gradient fill, the enums, `Strictness`) and the nine effect structs with `EffectKind`/`Effect` and each effect's plane reach.
+- `style_json.rs` / `style_json_write.rs` / `style_names.rs` — the ONE strict/lenient parser (with the clamp table and the four-decimal quantization), the canonical writer, and the name tables both read.
+- `style_render.rs` — the padded shape plane (with sub-planes), the ONE blur (multi-level downsampled above sigma 3) / dilate / erode / shift primitives, `blur_reach`, and the per-effect dispatch; `style_gradient.rs` the ONE gradient box / sampler / colour. `style_cache.rs` — the per-style rendered-plane cache inside each `Arc<LayerStyle>`: pointer keys, the shape-equality refresh, the incremental sub-plane re-render for a brush tick, and the hand-over from a replaced style (`inherit_planes`); `style_reuse.rs` — which effect planes a new style can keep (`same_planes`) and how they take its colours (`restamp`), a mirror pair.
+- `style_composite.rs` — the styled-layer compositing path `doc.rs` routes to: the Below / pixels / Interior order, Blend If, the layer-opacity package model, and Merge Down's extent.
+- `style_fx_*.rs` / `style_blend_if.rs` — one effect each (drop shadow, inner shadow, outer glow, inner glow, stroke, color overlay, gradient overlay, bevel/emboss, satin) and the Blend If weight; each is a pure function of the shape and must stay local to its reach (the sub-plane re-render relies on it).
+- `ffi.rs` / `ffi_doc.rs` / `ffi_filters.rs` / `ffi_agent.rs` / `ffi_assistant.rs` / `ffi_style.rs` — thin shims only; shared plumbing lives in `ffi_util.rs`, never copy-pasted.
 
 ## Rules
 

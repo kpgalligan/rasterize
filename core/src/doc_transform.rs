@@ -26,6 +26,7 @@ use image::imageops::FilterType;
 use image::{GrayImage, RgbaImage};
 
 use crate::doc::{Geometry, Layer, RzDocument, MAX_PIXELS};
+use crate::style::scaled_style;
 
 /// Smallest determinant magnitude that still counts as invertible. Anything
 /// smaller collapses the layer onto a line or a point, which cannot be
@@ -676,6 +677,9 @@ impl RzDocument {
         target.pixels = pixels;
         target.mask = mask;
         target.offset = (dx, dy);
+        // "Scale Effects": the style's pixel sizes follow the mean scale
+        // sqrt(|det|) (1 for the exact paths, so their Arc is kept).
+        target.style = scaled_style(&target.style, m.determinant().abs().sqrt());
         Some(doc)
     }
 }

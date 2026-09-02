@@ -407,6 +407,36 @@ pub(crate) fn composite_source_into(
     acc[ai] = out;
 }
 
+/// Composites an accumulator-ALIGNED straight f32 buffer (same size, same
+/// origin as `acc`) onto `acc` with one blend mode and opacity — the clip
+/// group's final step, and the styled clip base's. Per pixel
+/// `sa = buf alpha * opacity`; pixels at alpha 0 are skipped, so colour a
+/// clipped layer left outside the footprint at forced alpha 0 never shows.
+/// `origin` keeps Dissolve's dither canvas-absolute.
+pub(crate) fn composite_buffer_into(
+    acc: &mut [[f32; 4]],
+    buf: &[[f32; 4]],
+    acc_w: u32,
+    acc_h: u32,
+    origin: (i32, i32),
+    kind: BlendKind,
+    opacity: f32,
+) {
+    for ay in 0..i64::from(acc_h) {
+        for ax in 0..i64::from(acc_w) {
+            let ai = (ay as u64 * u64::from(acc_w) + ax as u64) as usize;
+            let src = buf[ai];
+            let sa = src[3] * opacity;
+            if sa <= 0.0 {
+                continue;
+            }
+            let cs = [src[0], src[1], src[2]];
+            let canvas_xy = (ax + i64::from(origin.0), ay + i64::from(origin.1));
+            composite_source_into(acc, ai, cs, sa, kind, canvas_xy);
+        }
+    }
+}
+
 /// The shared straight-alpha source-over write: composites a source with
 /// effective alpha `sa` and PREMULTIPLIED f32 color `scp` (straight color
 /// times `sa`, all in [0, 1]) onto the straight RGBA8 pixel `dp`. Callers

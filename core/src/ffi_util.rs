@@ -1,6 +1,7 @@
 //! Shared plumbing for the FFI shims (`ffi`, `ffi_doc`, `ffi_filters`,
-//! `ffi_agent`, `ffi_assistant`): error reporting through `err_out`,
-//! panic-safe wrappers, and the argument mappings every shim needs. Nothing
+//! `ffi_style`, `ffi_agent`, `ffi_assistant`): error reporting through
+//! `err_out`, panic-safe wrappers, and the argument mappings every shim
+//! needs. Nothing
 //! here is exported through the C header — these are the helpers the
 //! exported functions are built from, so the conventions (catch_unwind
 //! everywhere, NULL tolerance, heap CString errors freed with
@@ -12,6 +13,7 @@ use std::ptr;
 
 use image::imageops::FilterType;
 
+use crate::doc::RzDocument;
 use crate::RzImage;
 
 /// Stores a heap-allocated copy of `msg` through `err_out` (if non-NULL).
@@ -103,6 +105,44 @@ where
     }
     let image = unsafe { &*img };
     produce_op(|| op(image))
+}
+
+/// Runs a pure operation against `doc`, boxing the produced document.
+/// NULL input, `None`, or a panic all yield NULL.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+pub(crate) unsafe fn doc_op<F>(doc: *const RzDocument, op: F) -> *mut RzDocument
+where
+    F: FnOnce(&RzDocument) -> Option<RzDocument>,
+{
+    if doc.is_null() {
+        return ptr::null_mut();
+    }
+    let document = unsafe { &*doc };
+    match catch_unwind(AssertUnwindSafe(|| op(document))) {
+        Ok(Some(result)) => Box::into_raw(Box::new(result)),
+        _ => ptr::null_mut(),
+    }
+}
+
+/// Runs a pure query against `doc`, returning `default` for NULL input,
+/// `None`, or a panic.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+pub(crate) unsafe fn doc_get<T, F>(doc: *const RzDocument, default: T, get: F) -> T
+where
+    F: FnOnce(&RzDocument) -> Option<T>,
+{
+    if doc.is_null() {
+        return default;
+    }
+    let document = unsafe { &*doc };
+    match catch_unwind(AssertUnwindSafe(|| get(document))) {
+        Ok(Some(value)) => value,
+        _ => default,
+    }
 }
 
 /// Maps a raw `RzResizeFilter` value — the ONE mapping shared by

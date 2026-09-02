@@ -39,6 +39,11 @@ final class LayersPanelViewController: NSViewController {
     /// reopens the layer's box on the canvas.
     var onShapeEdit: ((Int) -> Void)?
 
+    /// Called when the user picks Layer Style… from a row's menu, or
+    /// double-clicks a layer that has no source to reopen (Photoshop's row
+    /// double-click): the editor opens that layer's style sheet.
+    var onLayerStyleEdit: ((Int) -> Void)?
+
     /// What brush/eraser currently edit on the active layer, pushed in by the
     /// editor and drawn as a focus ring around the matching thumbnail.
     private(set) var paintTarget: PaintTarget = .layer
@@ -529,6 +534,9 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
             isLivePhoto: doc.livePhotoPayload(idx) != nil,
             isShape: doc.shapePayload(idx) != nil,
             clipped: doc.layerClipped(idx),
+            // One bool FFI call per row — no style JSON copy or decode on
+            // the reload path.
+            hasStyle: doc.layerHasStyle(idx),
             selected: idx == document.activeLayerIndex, paintTarget: paintTarget)
         cell.onSelectTarget = { [weak self] target in
             self?.selectPaintTarget(target, layer: idx)
@@ -630,9 +638,11 @@ extension LayersPanelViewController: NSMenuDelegate {
     }
 
     /// Routes "edit this layer's source" to the editor by layer kind — the
-    /// kinds are mutually exclusive (one meta slot), and a plain raster layer
-    /// has no source to reopen, so the gesture is simply inert there. Both
-    /// the row's double-click and the thumbnail's own land here.
+    /// kinds are mutually exclusive (one meta slot). A plain raster layer has
+    /// no source to reopen, so its double-click opens Layer Style instead
+    /// (Photoshop's gesture); described layers keep their own editors and
+    /// reach Layer Style through the row menu. Both the row's double-click
+    /// and the thumbnail's own land here.
     private func editLayerSource(_ idx: Int) {
         guard let doc = document?.doc else { return }
         if doc.layerIsAdjustment(idx) {
@@ -643,6 +653,8 @@ extension LayersPanelViewController: NSMenuDelegate {
             onLivePhotoEdit?(idx)
         } else if doc.shapePayload(idx) != nil {
             onShapeEdit?(idx)
+        } else {
+            onLayerStyleEdit?(idx)
         }
     }
 
@@ -670,6 +682,27 @@ extension LayersPanelViewController: NSMenuDelegate {
             frame.target = self
             menu.addItem(frame)
         }
+        // Layer Style — the same nil-target actions the Layer > Layer Style
+        // submenu sends, valid because the row was just selected, so they
+        // inherit the editor's validation (no adjustment layers; Copy/Clear
+        // only on a styled layer; Paste only with a copied style).
+        menu.addItem(
+            NSMenuItem(
+                title: "Layer Style…",
+                action: #selector(EditorViewController.layerStyle(_:)), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(
+            NSMenuItem(
+                title: "Copy Layer Style",
+                action: #selector(EditorViewController.copyLayerStyle(_:)), keyEquivalent: ""))
+        menu.addItem(
+            NSMenuItem(
+                title: "Paste Layer Style",
+                action: #selector(EditorViewController.pasteLayerStyle(_:)), keyEquivalent: ""))
+        menu.addItem(
+            NSMenuItem(
+                title: "Clear Layer Style",
+                action: #selector(EditorViewController.clearLayerStyle(_:)), keyEquivalent: ""))
         menu.addItem(.separator())
         // The SAME nil-target action the footer button and the Layer menu
         // send, so it inherits the editor's validation: disabled on the last

@@ -10,19 +10,22 @@ use image::{ExtendedColorType, GrayImage, ImageEncoder};
 use crate::blend::BlendMode;
 use crate::doc::{sane_opacity, Layer, RzDocument, MAX_PIXELS};
 use crate::rz_image::save_atomically;
+use crate::style::{GlobalLight, LayerStyle};
 
 /// Hard caps applied while reading RZDC files so corrupt headers cannot ask
-/// for absurd allocations. The meta cap is also what the FFI meta setter
-/// enforces, so a document can never carry meta the writer would refuse.
+/// for absurd allocations. The meta cap is shared by BOTH per-layer string
+/// slots (meta and the layer style) and is also what the FFI meta and style
+/// setters enforce, so a document can never carry a string the writer would
+/// refuse.
 const MAX_RZDC_LAYERS: u32 = 1024;
 const MAX_RZDC_NAME_LEN: u32 = 64 * 1024;
 const MAX_RZDC_PNG_LEN: u32 = 512 * 1024 * 1024;
 pub(crate) const MAX_RZDC_META_LEN: u32 = 16 * 1024 * 1024;
 
 /// The RZDC revision this build writes. Version 1 files (no mask, no layer
-/// meta) and version 2 files (no clipped flag) still load; anything newer is
-/// refused.
-const RZDC_VERSION: u32 = 3;
+/// meta), version 2 files (no clipped flag) and version 3 files (no layer
+/// style, no global light) still load; anything newer is refused.
+const RZDC_VERSION: u32 = 4;
 
 /// Ceiling on the SUM of decoded layer pixels across one RZDC file: even when
 /// every individual layer looks reasonable, a crafted file must not be able
@@ -46,6 +49,13 @@ impl RzDocument {
     /// Version 3 appends one more field after all the version-2 fields (so a
     /// version-2 record is in turn a strict prefix of a version-3 one):
     /// u8 clipped.
+    ///
+    /// Version 4 adds two document fields right after the layer count — f32
+    /// global-light angle, f32 global-light altitude (degrees) — and one more
+    /// per-layer field after the version-3 clipped byte (a version-3 record
+    /// is a strict prefix of a version-4 one): u8 style present and, when
+    /// present, u32 style len + UTF-8 canonical style JSON (see `style`),
+    /// encoded and capped exactly like meta.
     fn encode_native(&self) -> Result<Vec<u8>, String> {
         // The writer enforces the reader's caps, so every file it produces
         // can be read back: layer count and per-layer PNG size are hard
@@ -60,6 +70,10 @@ impl RzDocument {
         buf.extend_from_slice(&self.width.to_le_bytes());
         buf.extend_from_slice(&self.height.to_le_bytes());
         buf.extend_from_slice(&count.to_le_bytes());
+        // Version 4 document fields.
+        let light = self.global_light.sane();
+        buf.extend_from_slice(&light.angle.to_le_bytes());
+        buf.extend_from_slice(&light.altitude.to_le_bytes());
         for layer in &self.layers {
             let mut name = layer.name.as_str();
             if name.len() > MAX_RZDC_NAME_LEN as usize {
@@ -102,17 +116,12 @@ impl RzDocument {
                 buf.extend_from_slice(&mask_len.to_le_bytes());
                 buf.extend_from_slice(bytes);
             }
-            buf.push(u8::from(layer.meta.is_some()));
-            if let Some(meta) = layer.meta.as_deref() {
-                let meta_len = u32::try_from(meta.len())
-                    .ok()
-                    .filter(|&len| len <= MAX_RZDC_META_LEN)
-                    .ok_or_else(|| format!("layer meta too large (max {MAX_RZDC_META_LEN})"))?;
-                buf.extend_from_slice(&meta_len.to_le_bytes());
-                buf.extend_from_slice(meta.as_bytes());
-            }
+            put_opt_string(&mut buf, layer.meta.as_deref(), "meta")?;
             // Version 3 field.
             buf.push(u8::from(layer.clipped));
+            // Version 4 field: the canonical style JSON.
+            let style = layer.style.as_ref().map(|s| s.to_json());
+            put_opt_string(&mut buf, style.as_deref(), "style")?;
         }
         Ok(buf)
     }
@@ -128,6 +137,36 @@ impl RzDocument {
             std::fs::write(tmp_path, &bytes).map_err(|e| format!("failed to create {path}: {e}"))
         })
     }
+}
+
+/// Writes an optional string slot (meta, style): u8 present, then u32 len +
+/// UTF-8 bytes when present. The cap error names the slot.
+fn put_opt_string(buf: &mut Vec<u8>, value: Option<&str>, what: &str) -> Result<(), String> {
+    buf.push(u8::from(value.is_some()));
+    if let Some(s) = value {
+        let len = u32::try_from(s.len())
+            .ok()
+            .filter(|&len| len <= MAX_RZDC_META_LEN)
+            .ok_or_else(|| format!("layer {what} too large (max {MAX_RZDC_META_LEN})"))?;
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+    Ok(())
+}
+
+/// Reads an optional string slot written by [`put_opt_string`]; the cap
+/// error names the slot. Lenient on UTF-8 (lossy), like names and meta.
+fn take_opt_string(r: &mut Reader<'_>, what: &str) -> Result<Option<String>, String> {
+    if r.u8()? == 0 {
+        return Ok(None);
+    }
+    let len = r.u32()?;
+    if len > MAX_RZDC_META_LEN {
+        return Err(format!("layer {what} length {len} out of range"));
+    }
+    Ok(Some(
+        String::from_utf8_lossy(r.take(len as usize)?).into_owned(),
+    ))
 }
 
 /// Bounds-checked little-endian reader over an RZDC byte buffer.
@@ -171,11 +210,15 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Parses an RZDC buffer of version 1, 2 or 3 (version 1 predates layer
-/// masks and layer meta, which default to absent; versions 1 and 2 predate
-/// the clipped flag, which defaults to false). Corrupt or truncated input
-/// produces `Err`, never a panic; unknown blend-mode values fall back to
-/// Normal and opacity is clamped.
+/// Parses an RZDC buffer of version 1 to 4 (version 1 predates layer masks
+/// and layer meta, which default to absent; versions 1 and 2 predate the
+/// clipped flag, which defaults to false; versions 1 to 3 predate the layer
+/// style and the global light, which default to absent / (120°, 30°)).
+/// Corrupt or truncated input produces `Err`, never a panic; unknown
+/// blend-mode values fall back to Normal, opacity is clamped, the light is
+/// sanitized, and a style is read LENIENTLY (`LayerStyle::from_json_lenient`:
+/// a style from a newer build keeps the effects this build knows; only a
+/// structurally malformed style — or an identity — loads as no style).
 pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
     let mut r = Reader { bytes, pos: 0 };
     if r.take(4)? != b"RZDC" {
@@ -186,9 +229,11 @@ pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
         return Err(format!("unsupported RZDC version {version}"));
     }
     // Version 1 layer records stop after the pixel PNG; version 2 records
-    // after the mask and meta fields.
+    // after the mask and meta fields; version 3 records after the clipped
+    // byte.
     let has_mask_and_meta = version >= 2;
     let has_clipped = version >= 3;
+    let has_style = version >= 4;
     let width = r.u32()?;
     let height = r.u32()?;
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
@@ -198,6 +243,16 @@ pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
     if count == 0 || count > MAX_RZDC_LAYERS {
         return Err(format!("invalid layer count {count}"));
     }
+    // Version 4 document fields; lenient on values, like opacity.
+    let global_light = if version >= 4 {
+        GlobalLight {
+            angle: r.f32()?,
+            altitude: r.f32()?,
+        }
+        .sane()
+    } else {
+        GlobalLight::default()
+    };
     let mut layers = Vec::with_capacity(count as usize);
     let mut total_pixels: u64 = 0;
     for _ in 0..count {
@@ -250,15 +305,17 @@ pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
                         .ok_or_else(|| "invalid layer mask".to_string())?,
                 ));
             }
-            if r.u8()? != 0 {
-                let meta_len = r.u32()?;
-                if meta_len > MAX_RZDC_META_LEN {
-                    return Err(format!("layer meta length {meta_len} out of range"));
-                }
-                meta = Some(String::from_utf8_lossy(r.take(meta_len as usize)?).into_owned());
-            }
+            meta = take_opt_string(&mut r, "meta")?;
         }
         let clipped = has_clipped && r.u8()? != 0;
+        let style = if has_style {
+            take_opt_string(&mut r, "style")?
+                .and_then(|s| LayerStyle::from_json_lenient(&s).ok())
+                .filter(|s| !s.is_identity())
+                .map(Arc::new)
+        } else {
+            None
+        };
         layers.push(Layer {
             pixels: Arc::new(pixels),
             offset: (off_x, off_y),
@@ -270,11 +327,13 @@ pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
             mask_enabled,
             meta,
             clipped,
+            style,
         });
     }
     Ok(RzDocument {
         width,
         height,
         layers,
+        global_light,
     })
 }

@@ -23,6 +23,7 @@ use crate::doc_transform::{
     bounds_of_corners, resample_mask, resample_rgba, Affine, Sampler, SourceMap, EXACT_EPSILON,
     MIN_DETERMINANT,
 };
+use crate::style::{quad_mean_scale, scaled_style};
 
 /// Smallest homogeneous w the forward map may give a source corner, with the
 /// solve normalized so w = 1 at the rect's top-left. The four corner w's are
@@ -256,6 +257,9 @@ impl RzDocument {
         target.pixels = pixels;
         target.mask = mask;
         target.offset = (dx, dy);
+        // "Scale Effects" by the area-based mean scale (the parallelogram
+        // early return above scales through transform_layer itself).
+        target.style = scaled_style(&target.style, quad_mean_scale(quad, lw, lh));
         Some(doc)
     }
 }

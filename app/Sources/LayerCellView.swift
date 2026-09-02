@@ -43,7 +43,9 @@ final class ThumbnailWellView: NSView {
 /// Draws a thumbnail aspect-fit (never upscaled) inside a well, plus — for a
 /// DISABLED layer mask — a diagonal slash across it, and — for a layer that
 /// carries a description — a corner badge naming its kind ("T" for text,
-/// "◐" for an adjustment layer; a layer is one OR the other, never both).
+/// "◐" for an adjustment layer; a layer is one OR the other, never both),
+/// and — for a styled layer — an "fx" chip in the opposite corner (a text
+/// layer can carry a style, so the two chips coexist).
 final class ThumbnailImageView: NSView {
     var image: NSImage? {
         didSet { needsDisplay = true }
@@ -58,6 +60,13 @@ final class ThumbnailImageView: NSView {
     var badge: String? {
         didSet {
             if badge != oldValue { needsDisplay = true }
+        }
+    }
+
+    /// The layer-style chip ("fx"), top-right; nil for an unstyled layer.
+    var styleBadge: String? {
+        didSet {
+            if styleBadge != oldValue { needsDisplay = true }
         }
     }
 
@@ -84,20 +93,26 @@ final class ThumbnailImageView: NSView {
             DS.textStrong.setStroke()
             slash.stroke()
         }
-        drawBadge()
+        if let badge = badge {
+            drawChip(badge, atTop: false)
+        }
+        if let styleBadge = styleBadge {
+            drawChip(styleBadge, atTop: true)
+        }
     }
 
-    /// The badge chip, bottom-right: a filled, bordered plate — the slash's
-    /// halo idea as a solid — so the letter reads over any thumbnail.
-    private func drawBadge() {
-        guard let badge = badge, !badge.isEmpty else { return }
+    /// A badge chip in the right corner — bottom for the kind badge, top for
+    /// the style chip: a filled, bordered plate — the slash's halo idea as a
+    /// solid — so the letters read over any thumbnail.
+    private func drawChip(_ text: String, atTop: Bool) {
+        guard !text.isEmpty else { return }
         let label = NSAttributedString(
-            string: badge,
+            string: text,
             attributes: [.font: DS.sans(10, weight: .semibold), .foregroundColor: DS.textStrong])
         let labelSize = label.size()
         let chip = NSRect(
             x: bounds.maxX - max(labelSize.width + 7, 14) - 2,
-            y: bounds.minY + 2,
+            y: atTop ? bounds.maxY - 16 : bounds.minY + 2,
             width: max(labelSize.width + 7, 14),
             height: 14)
         let plate = NSBezierPath(roundedRect: chip, xRadius: 4, yRadius: 4)
@@ -272,7 +287,8 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
     func configure(
         info: RasterDocument.LayerInfo, thumbnail: NSImage?, hasMask: Bool,
         maskThumbnail: NSImage?, maskEnabled: Bool, isText: Bool, isAdjustment: Bool,
-        isLivePhoto: Bool, isShape: Bool, clipped: Bool, selected: Bool, paintTarget: PaintTarget
+        isLivePhoto: Bool, isShape: Bool, clipped: Bool, hasStyle: Bool, selected: Bool,
+        paintTarget: PaintTarget
     ) {
         committedName = info.name
         nameField.stringValue = info.name
@@ -295,6 +311,10 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
             metaLabel.stringValue = "shape"
         } else {
             metaLabel.stringValue = "\(info.width) × \(info.height)"
+        }
+        // A styled layer says so on the meta line too — the chip is small.
+        if hasStyle {
+            metaLabel.stringValue += " · fx"
         }
         metaLabel.textColor = selected ? DS.accent : DS.textFaint
 
@@ -327,6 +347,10 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
         // none.
         let described = isText || isAdjustment || isLivePhoto
         thumbView.badge = isText ? "T" : (isAdjustment ? "◐" : (isLivePhoto ? "▶" : nil))
+        // The style chip is independent of the kind: a styled text layer
+        // shows both. The badge is driven by the cheap has-style query only
+        // (listing the effects would need the style decoded per row).
+        thumbView.styleBadge = hasStyle ? "fx" : nil
         thumbFrame.onDoubleClick = described ? { [weak self] in self?.onEditSource?() } : nil
         if isText {
             thumbFrame.toolTip =
@@ -338,6 +362,9 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
                 "Live Photo layer — double-click to select a frame (painting rasterizes it)"
         } else {
             thumbFrame.toolTip = "Paint on the layer"
+        }
+        if hasStyle {
+            thumbFrame.toolTip = (thumbFrame.toolTip ?? "") + " — has layer effects"
         }
         let symbol = info.visible ? "eye" : "eye.slash"
         let label = info.visible ? "Visible" : "Hidden"

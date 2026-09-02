@@ -1,6 +1,7 @@
 //! Helpers shared by the FFI test files: C-string plumbing, synthesized
 //! fixtures, layer/document accessors, the mirrored `Rz*` constants, the W3C
-//! reference blend math, and the mask/meta fixtures several files drive.
+//! reference blend math, the mask/meta fixtures several files drive, and the
+//! layer-style bridges and blur oracle the `style*` files share.
 //! Every test binary pulls this in with `mod common;`, so helpers only some
 //! binaries use are expected — hence the file-wide `allow(dead_code)`.
 #![allow(dead_code)]
@@ -13,6 +14,8 @@ use image::{Rgba, RgbaImage};
 use rasterize_core::doc::{MaskKind, RzDocument};
 use rasterize_core::ffi::*;
 use rasterize_core::ffi_doc::*;
+use rasterize_core::ffi_style::*;
+use rasterize_core::style::LayerStyle;
 use rasterize_core::RzImage;
 use tempfile::TempDir;
 
@@ -503,4 +506,217 @@ pub const MAGENTA: [u8; 4] = [255, 0, 255, 255];
 /// Meta blob for adjustment op `op` with a `params` JSON object literal.
 pub fn adjust_meta(op: &str, params: &str) -> String {
     format!("{{\"type\":\"adjust\",\"op\":\"{op}\",\"params\":{params}}}")
+}
+
+// ------------------------------------------------------- layer styles --
+
+/// A drop shadow + stroke style with non-ASCII content in an ignored
+/// `"note"` key, so "unchanged" proves the core re-serializes rather than
+/// echoes, and "survived" means the effects did.
+pub const STYLE_JSON: &str = concat!(
+    "{\"fill_opacity\":0.5,\"note\":\"ünïcode 层 — ✎\",",
+    "\"effects\":[{\"type\":\"drop_shadow\",\"distance\":3,\"size\":2},",
+    "{\"type\":\"stroke\",\"size\":2,\"color\":\"#FF0000\"}]}"
+);
+
+/// Layer `idx`'s canonical style JSON through `rz_doc_layer_style`; None
+/// when the call returns NULL (no style, or an out-of-range index).
+pub fn ffi_style(doc: *const RzDocument, idx: usize) -> Option<String> {
+    let p = unsafe { rz_doc_layer_style(doc, idx) };
+    if p.is_null() {
+        return None;
+    }
+    let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+    unsafe { rz_string_free(p) };
+    Some(s)
+}
+
+/// Sets layer `idx`'s style, asserting success (no error message) and
+/// freeing the old handle.
+pub fn set_style(doc: *mut RzDocument, idx: usize, json: &str) -> *mut RzDocument {
+    let c = CString::new(json).expect("no interior NUL");
+    let mut err: *mut c_char = ptr::null_mut();
+    let out = unsafe { rz_doc_set_layer_style(doc, idx, c.as_ptr(), &mut err) };
+    assert!(
+        !out.is_null(),
+        "set_layer_style({idx}) failed: {}",
+        take_err_string(err)
+    );
+    assert!(err.is_null(), "err_out set on success");
+    unsafe { rz_doc_free(doc) };
+    out
+}
+
+/// Calls `rz_doc_set_layer_style` expecting a NULL result: `Some(message)`
+/// when the core reported an error, `None` for a silent refusal. A
+/// non-NULL result is freed and reported as a failure.
+pub fn style_error(doc: *const RzDocument, idx: usize, json: &str) -> Option<String> {
+    let c = CString::new(json).expect("no interior NUL");
+    let mut err: *mut c_char = ptr::null_mut();
+    let out = unsafe { rz_doc_set_layer_style(doc, idx, c.as_ptr(), &mut err) };
+    if !out.is_null() {
+        unsafe { rz_doc_free(out) };
+        panic!("style_error: the call succeeded for {json}");
+    }
+    if err.is_null() {
+        None
+    } else {
+        Some(take_err_string(err))
+    }
+}
+
+/// Drives `rz_doc_set_layer_style` on a copy of the safe-API `doc`:
+/// `Ok(Some(new))` on success, `Ok(None)` on a silent refusal (out of range
+/// or unchanged), `Err(message)` when the core reports one. `None` for
+/// `json` clears.
+pub fn try_styled(
+    doc: &RzDocument,
+    idx: usize,
+    json: Option<&str>,
+) -> Result<Option<RzDocument>, String> {
+    let handle = Box::into_raw(Box::new(doc.clone()));
+    let c = json.map(|j| CString::new(j).expect("no interior NUL"));
+    let mut err: *mut c_char = ptr::null_mut();
+    let out = unsafe {
+        rz_doc_set_layer_style(
+            handle,
+            idx,
+            c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+            &mut err,
+        )
+    };
+    unsafe { rz_doc_free(handle) };
+    if out.is_null() {
+        if err.is_null() {
+            Ok(None)
+        } else {
+            Err(take_err_string(err))
+        }
+    } else {
+        assert!(err.is_null(), "err_out set on success");
+        Ok(Some(*unsafe { Box::from_raw(out) }))
+    }
+}
+
+/// [`try_styled`], panicking with the core's message on failure — the
+/// helper every effect test starts from.
+pub fn styled(doc: &RzDocument, idx: usize, json: &str) -> RzDocument {
+    match try_styled(doc, idx, Some(json)) {
+        Ok(Some(d)) => d,
+        Ok(None) => panic!("set_layer_style refused {json}"),
+        Err(e) => panic!("set_layer_style failed: {e}"),
+    }
+}
+
+/// A strict [`LayerStyle::from_json`] that panics with the core's message:
+/// the model tests' parser, and — wrapped in a fresh `Arc` — the empty-cache
+/// oracle every cached projection is held to.
+pub fn parse(json: &str) -> LayerStyle {
+    LayerStyle::from_json(json).unwrap_or_else(|e| panic!("{json}: {e}"))
+}
+
+/// `rz_doc_set_global_light` on a copy of `doc`, asserting success.
+pub fn with_light(doc: &RzDocument, angle: f32, altitude: f32) -> RzDocument {
+    let handle = Box::into_raw(Box::new(doc.clone()));
+    let out = unsafe { rz_doc_set_global_light(handle, angle, altitude) };
+    unsafe { rz_doc_free(handle) };
+    assert!(
+        !out.is_null(),
+        "set_global_light({angle}, {altitude}) refused"
+    );
+    *unsafe { Box::from_raw(out) }
+}
+
+/// ±1 per colour channel, alpha exact (the tolerance for two paths that
+/// quantize at different points).
+pub fn assert_close(actual: &[u8], expected: &[u8], what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what}: buffer sizes differ");
+    for (i, (&a, &e)) in actual.iter().zip(expected).enumerate() {
+        let tol = if i % 4 == 3 { 0 } else { 1 };
+        assert!(
+            (i32::from(a) - i32::from(e)).abs() <= tol,
+            "{what}: byte {i} (pixel {}, channel {}) is {a}, expected {e} (±{tol})",
+            i / 4,
+            i % 4
+        );
+    }
+}
+
+/// The fixture every effect oracle starts from: an opaque WHITE canvas of
+/// size `canvas` under one opaque `color` layer of `rect` = (x, y, w, h) at
+/// index 1.
+pub fn rect_layer_doc(
+    canvas: (u32, u32),
+    rect: (i32, i32, u32, u32),
+    color: [u8; 4],
+) -> RzDocument {
+    let doc = RzDocument::from_pixels(solid(canvas.0, canvas.1, WHITE));
+    let doc = doc
+        .adding_image_layer(0, solid(rect.2, rect.3, color), "Rect")
+        .expect("add rect layer");
+    doc.with_layer_offset(1, rect.0, rect.1).expect("offset")
+}
+
+/// The documented feather kernel (rasterize_core.h, rz_selection_feather):
+/// `taps = nearest_odd(2r + 1)` floored at 3 (ties to the lower odd),
+/// `sigma = 0.3 (r - 1) + 0.8`, normalized — rebuilt here from the contract
+/// so the oracle shares no code with the core.
+pub fn feather_kernel(radius: f32) -> (Vec<f32>, i64) {
+    let nearest_odd = |x: f32| -> u32 {
+        let n = x.round().max(1.0) as u32;
+        if n % 2 == 1 {
+            n
+        } else if x - (n - 1) as f32 <= (n + 1) as f32 - x {
+            n - 1
+        } else {
+            n + 1
+        }
+    };
+    let taps = nearest_odd(radius * 2.0 + 1.0).max(3);
+    let half = (taps / 2) as i64;
+    let sigma = 0.3 * (radius - 1.0) + 0.8;
+    let mut k: Vec<f32> = (0..taps)
+        .map(|i| (-0.5 * ((i as i64 - half) as f32 / sigma).powi(2)).exp())
+        .collect();
+    let sum: f32 = k.iter().sum();
+    for v in &mut k {
+        *v /= sum;
+    }
+    (k, half)
+}
+
+/// The independent separable-Gaussian oracle: `plane` (row-major `w * h`
+/// coverage bytes) feathered by `radius` per the header contract —
+/// horizontal pass into f32, vertical pass, clamp-to-edge sampling, one
+/// rounding at the end. Compare with ±1.
+pub fn feathered_plane(plane: &[u8], w: u32, h: u32, radius: f32) -> Vec<u8> {
+    let (w, h) = (w as usize, h as usize);
+    assert_eq!(plane.len(), w * h);
+    if radius <= 0.0 {
+        return plane.to_vec();
+    }
+    let (k, half) = feather_kernel(radius);
+    let mut tmp = vec![0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0;
+            for (i, kv) in k.iter().enumerate() {
+                let sx = (x as i64 + i as i64 - half).clamp(0, w as i64 - 1) as usize;
+                acc += kv * f32::from(plane[y * w + sx]);
+            }
+            tmp[y * w + x] = acc;
+        }
+    }
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0;
+            for (i, kv) in k.iter().enumerate() {
+                let sy = (y as i64 + i as i64 - half).clamp(0, h as i64 - 1) as usize;
+                acc += kv * tmp[sy * w + x];
+            }
+            out[y * w + x] = acc.clamp(0.0, 255.0).round() as u8;
+        }
+    }
+    out
 }

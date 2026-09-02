@@ -141,7 +141,9 @@ bool rz_image_save(const RzImage *img, const char *path, RzFormat format,
 /* Opaque layered document: a canvas size plus an ordered stack of layers
  * (index 0 = BOTTOM). Every layer has straight-alpha RGBA8 pixels of its own
  * size, an integer canvas offset, a name, opacity, a blend mode, a
- * visibility flag, and an optional layer mask (see "Layer masks" below).
+ * visibility flag, an optional layer mask (see "Layer masks" below) and an
+ * optional layer style (see "Layer styles" below); the document carries a
+ * global light (angle, altitude) the styles share.
  * Layer pixel buffers are immutable and shared between
  * document handles (copy-on-write), so rz_doc_clone and the pure "with_"/
  * stack operations are cheap: they copy only what they change. Documents
@@ -207,8 +209,9 @@ void rz_doc_free(RzDocument *doc);
  * rz_image_save. The writer enforces the reader's limits so every file it
  * produces can be read back: more than 1024 layers or a layer PNG over
  * 512 MiB is an error; layer names longer than 64 KiB are truncated on a
- * UTF-8 character boundary. Layout (little-endian): "RZDC", u32 version=3,
- * u32 canvas width, u32 canvas height, u32 layer count; then per layer
+ * UTF-8 character boundary. Layout (little-endian): "RZDC", u32 version=4,
+ * u32 canvas width, u32 canvas height, u32 layer count, then (version 4)
+ * f32 global-light angle and f32 altitude in degrees; then per layer
  * bottom-to-top: u32 name byte length + UTF-8 name, i32 offset x, i32
  * offset y, f32 opacity, u32 blend mode, u8 visible, u32 PNG byte length +
  * PNG-encoded RGBA8 layer pixels; then the version-2 fields, which a
@@ -218,9 +221,13 @@ void rz_doc_free(RzDocument *doc);
  * layer-metadata present and, when present, u32 byte length + UTF-8 bytes (see
  * "Layer metadata" below); then the version-3 field, appended after all the
  * version-2 fields (each older record is a strict prefix of the next): u8
- * clipped (see "Clipping masks" below). Version-1 and version-2 files still
+ * clipped (see "Clipping masks" below); then the version-4 field: u8
+ * layer-style present and, when present, u32 byte length + UTF-8 canonical
+ * style JSON (see "Layer styles" below). Version-1, -2 and -3 files still
  * load, missing fields taking their defaults: no mask and no metadata on any
- * layer (v1), clipped false (v1 and v2). */
+ * layer (v1), clipped false (v1 and v2), no style on any layer and a
+ * (120°, 30°) global light (v1–v3). A style is read leniently: a style from
+ * a newer build keeps the effects this build knows. */
 bool rz_doc_save_native(const RzDocument *doc, const char *path,
                         char **err_out);
 
@@ -259,7 +266,8 @@ RzImage *rz_doc_layer_thumbnail(const RzDocument *doc, size_t idx,
  *   Co = ( as'*(1-ab)*Cs + as'*ab*B(Cb,Cs) + (1-as')*ab*Cb ) / ao   (ao > 0)
  * Invisible layers are skipped; areas a layer does not cover use Cb. Layers
  * flagged clipped composite in groups with the unclipped layer beneath them
- * (see "Clipping masks" below). */
+ * (see "Clipping masks" below). Layers carrying a style composite with their
+ * effects (see "Layer styles" below). */
 RzImage *rz_doc_flattened(const RzDocument *doc);
 
 /* Pure per-layer setters: return a NEW document (input untouched), NULL on
@@ -362,7 +370,8 @@ RzDocument *rz_doc_crop(const RzDocument *doc, uint32_t x, uint32_t y,
                         uint32_t w, uint32_t h);
 
 /* Scales the canvas and every layer (sizes and offsets) proportionally.
- * Limits as rz_image_resize. */
+ * Limits as rz_image_resize. Layer styles scale with their layers ("Scale
+ * Effects", by the mean factor sqrt(fx * fy); see "Layer styles" below). */
 RzDocument *rz_doc_resize(const RzDocument *doc, uint32_t w, uint32_t h,
                           RzResizeFilter filter);
 
@@ -421,6 +430,10 @@ RzDocument *rz_doc_canvas_resize(const RzDocument *doc, uint32_t w,
  * transform that misses by more than that — 89.999 degrees is 1.7e-5 off —
  * resamples normally. The dedicated whole-document ops above remain the right
  * call for menu items.
+ *
+ * A layer style is scaled with the layer ("Scale Effects": its pixel-valued
+ * fields — distance, size, soften — follow the mean scale sqrt(|a*d - b*c|);
+ * see "Layer styles" below).
  *
  * NULL if doc or affine is NULL, idx is out of range, any matrix element is
  * not finite, the matrix is singular (|a*d - b*c| < 1e-9), the sampler value
@@ -745,9 +758,10 @@ bool rz_doc_layer_clipped(const RzDocument *doc, size_t idx);
  *     operations, duplicating (the copy gets it too), reordering, adding and
  *     removing layers, whole-document rotate/flip/crop/canvas-resize/resize.
  *   - It is DROPPED exactly where a layer stops being itself, alongside the
- *     mask: rz_doc_merging_down clears it on the merged layer (the pixels are
- *     now two layers' worth, so nothing describes them) and rz_doc_flattening
- *     produces one plain "Background" layer with none.
+ *     mask: rz_doc_merging_down clears it — and the layer style — on the
+ *     merged layer (the pixels are now two layers' worth, so nothing
+ *     describes them) and rz_doc_flattening produces one plain "Background"
+ *     layer with none.
  *   - It round-trips through rz_doc_save_native / rz_doc_open in the
  *     version-2 RZDC format, per layer. Older readers see a plain raster
  *     layer, which is the intended graceful degradation.
@@ -799,6 +813,98 @@ bool rz_doc_layer_is_adjustment(const RzDocument *doc, size_t idx);
 RzDocument *rz_doc_with_layer_pixels_rgba(const RzDocument *doc, size_t idx,
                                           const uint8_t *src, uint32_t w,
                                           uint32_t h);
+
+/* ---- Layer styles -------------------------------------------------------
+ *
+ * Every layer carries an optional LAYER STYLE: Photoshop's effect stack plus
+ * the blending options beyond opacity and mode — fill opacity (the opacity
+ * of the pixels only, never of the effects) and Blend If (two split-slider
+ * ramps, on this layer and on the composite beneath, weighting the layer's
+ * alpha). The effects are functions of the layer's SHAPE (its alpha times
+ * its enabled mask) and are rendered by the projection only:
+ * rz_doc_layer_image, rz_doc_layer_canvas_image and the thumbnails stay
+ * effect-free, exactly as they stay mask-free.
+ *
+ * The style crosses this boundary as ONE JSON object — the contract:
+ *   {"version": 1, "fill_opacity": 1.0, "blend_if": null,
+ *    "effects": [{"type": "drop_shadow", ...}, ...]}
+ * The nine effect types are drop_shadow, inner_shadow, outer_glow,
+ * inner_glow, stroke, color_overlay, gradient_overlay, bevel_emboss and
+ * satin — at most one of each; every effect has "enabled" (default true; a
+ * disabled effect is kept but not rendered), its own blend mode ("blend",
+ * the 27 layer blend modes as snake_case names: normal, multiply, screen,
+ * linear_dodge, ...) and opacity. Colours are "#rrggbb"; angles are degrees
+ * in the Photoshop convention (0 = light from the right, 90 = from the top;
+ * the default 120° casts down-right); sizes are canvas pixels; "spread" /
+ * "choke" are fractions of "size". The full key table with every default
+ * lives in core/src/style.rs. On input unknown keys are ignored, missing
+ * keys take their defaults, numeric ranges are clamped, and a wrong JSON
+ * type, unknown enum value, unknown effect type, duplicate type or
+ * out-of-order Blend If ramp is an error naming the key. Numbers are
+ * canonicalized to 4 decimals; rz_doc_layer_style returns the canonical
+ * form (every key of every present effect, effects in render order, sorted
+ * keys), which is also what the RZDC file stores.
+ *
+ * Identity rule: a style that renders nothing (fill opacity 1, no Blend If,
+ * no enabled effect) CLEARS — it is never stored — so rz_doc_layer_has_style
+ * true means the layer renders something.
+ *
+ * Lifetime: the style rides along wherever the layer survives as itself
+ * (exactly like metadata above); rz_doc_duplicating_layer copies it;
+ * rz_doc_merging_down and rz_doc_flattening BAKE the effects into the pixels
+ * and drop it; rz_doc_transform_layer, rz_doc_perspective_layer and
+ * rz_doc_resize apply "Scale Effects" (the pixel-valued fields follow the
+ * mean scale factor). Adjustment layers ignore styles (they have no shape).
+ *
+ * Render order, Photoshop's: the drop shadow, outer glow and an outside
+ * stroke composite BELOW the pixels, each with its own blend mode and
+ * opacity; the pixels composite at fill opacity (times the Blend If weight)
+ * with the LAYER's blend mode; then gradient overlay, colour overlay, satin,
+ * inner glow, inner shadow, an inside/centre stroke and the bevel composite
+ * above them, each with its own blend mode ("Blend Interior Effects as
+ * Group" is off, so a Multiply layer with a white colour overlay shows
+ * white). Blend If reads the composite BENEATH the layer, not the layer's
+ * own shadow. A styled clip base renders its shadow once under the whole
+ * group, and clipped members are confined to the base's shape.
+ *
+ * Effects with "use_global_light" read the document's GLOBAL LIGHT (angle,
+ * altitude in degrees; defaults 120°, 30°) instead of their own angle. The
+ * style and the light round-trip through rz_doc_save_native / rz_doc_open:
+ * they are what bumped the RZDC format to version 4. */
+
+/* Replaces layer idx's style with a copy of `style_json` (parsed and
+ * canonicalized as described above), or CLEARS it when `style_json` is
+ * NULL — and also clears it when the parsed style is an identity. Two
+ * failure tiers: NULL with a message through err_out (free with
+ * rz_string_free) when doc is NULL ("document is NULL"), the string is not
+ * valid UTF-8, not valid JSON, not a valid style (the message names the
+ * offending key), or over 16 MiB (the RZDC writer's cap, shared with
+ * metadata); NULL with NO message — a refusal, not an error — on an
+ * out-of-range idx or a value equal to the current one ("no style"
+ * included), so the host never registers a phantom undo step. */
+RzDocument *rz_doc_set_layer_style(const RzDocument *doc, size_t idx,
+                                   const char *style_json, char **err_out);
+
+/* Layer idx's style as its canonical JSON, a heap string freed with
+ * rz_string_free; NULL on NULL doc, out-of-range idx, or a layer with no
+ * style (so NULL means "none", not an error). */
+char *rz_doc_layer_style(const RzDocument *doc, size_t idx);
+
+/* Whether layer idx carries a style — the cheap badge query; false on NULL
+ * doc or out-of-range idx. Because identity styles are never stored, true
+ * means the layer renders something. */
+bool rz_doc_layer_has_style(const RzDocument *doc, size_t idx);
+
+/* Pure setter for the document's global light, in degrees. NULL on NULL doc,
+ * a non-finite component, or no change after sanitizing (altitude clamped to
+ * [0, 90], angle normalized to [-180, 180), both quantized to four decimals
+ * like every style number, so a reported value echoed back is "no change"). */
+RzDocument *rz_doc_set_global_light(const RzDocument *doc, float angle,
+                                    float altitude);
+
+/* The global light's components in degrees; 0.0 on NULL doc. */
+float rz_doc_global_light_angle(const RzDocument *doc);
+float rz_doc_global_light_altitude(const RzDocument *doc);
 
 /* ---- Embedded agent (MCP) server ----------------------------------------
  *

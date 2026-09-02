@@ -711,6 +711,62 @@ final class RasterDocument {
         return rz_doc_layer_clipped(ptr, idx)
     }
 
+    // MARK: - Layer styles
+
+    /// Layer `idx`'s style as the core's canonical JSON, or nil when it has
+    /// none. The core is the authority on the schema (core/src/style.rs);
+    /// LayerStyle.swift reads it back into a typed value for the dialog.
+    func layerStyle(_ idx: Int) -> String? {
+        guard isValidIndex(idx), let cStyle = rz_doc_layer_style(ptr, idx) else { return nil }
+        defer { rz_string_free(cStyle) }
+        return String(cString: cStyle)
+    }
+
+    /// Whether layer `idx` carries a style — the cheap badge query. Because
+    /// the core never stores an identity style, true means the layer renders
+    /// something.
+    func layerHasStyle(_ idx: Int) -> Bool {
+        guard isValidIndex(idx) else { return false }
+        return rz_doc_layer_has_style(ptr, idx)
+    }
+
+    /// Attaches a style (canonical or not — the core canonicalizes) to layer
+    /// `idx`, or CLEARS it when `json` is nil (an identity style also
+    /// clears). nil for an out-of-range index or a value equal to the
+    /// current one (the core refuses identical copies, so no phantom undo
+    /// step); throws with the core's message when the JSON is not a valid
+    /// style. `ptr` is never NULL here, so the core's "document is NULL"
+    /// message cannot occur on this path.
+    func withLayerStyle(_ idx: Int, _ json: String?) throws -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        var err: UnsafeMutablePointer<CChar>? = nil
+        let handle: OpaquePointer?
+        if let json = json {
+            handle = rz_doc_set_layer_style(ptr, idx, json, &err)
+        } else {
+            handle = rz_doc_set_layer_style(ptr, idx, nil, &err)
+        }
+        guard let handle = handle else {
+            // NULL with no message is the refusal tier (unchanged value).
+            guard err != nil else { return nil }
+            throw RasterCoreError(
+                message: takeErrorMessage(err, fallback: "Invalid layer style."))
+        }
+        return RasterDocument(owning: handle)
+    }
+
+    /// The document's global light, degrees: the direction every effect with
+    /// use_global_light on reads (0 = from the right, 90 = from the top;
+    /// altitude 0…90).
+    var globalLightAngle: Double { Double(rz_doc_global_light_angle(ptr)) }
+    var globalLightAltitude: Double { Double(rz_doc_global_light_altitude(ptr)) }
+
+    /// nil on a non-finite value or no change after the core's sanitizing
+    /// (altitude clamped to 0…90, angle normalized to -180…180).
+    func withGlobalLight(angle: Double, altitude: Double) -> RasterDocument? {
+        wrap(rz_doc_set_global_light(ptr, Float(angle), Float(altitude)))
+    }
+
     // MARK: - Whole-document geometry
 
     func rotated90() -> RasterDocument? { wrap(rz_doc_rotate90(ptr)) }
