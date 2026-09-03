@@ -1,6 +1,6 @@
 # From Compositor to Photo Editor: a Gap Review
 
-**Status: proposal (September 2026), nothing here has shipped.** A
+**Status: in progress (updated 3 September 2026) — phases 1 and 2 of the order in section 4 have shipped; section 0 records what landed, what was decided along the way, and where to restart.** A
 fresh-eyes review of the shipped feature set against what a working
 photographer actually reaches for in Photoshop, followed by a large, sized
 catalog of what to build. Companion to `next-features.md` (whose open
@@ -11,6 +11,132 @@ mechanism notes apply.
 
 Sizing used throughout: **S** a day or less · **M** a few days · **L** a
 week or more · **XL** a model change that touches every op.
+
+---
+
+## 0. Progress and restart notes
+
+Work proceeds in the order of section 4, one phase per commit on the
+`refactor` branch. Each phase is built by one ultracode workflow with the
+same shape — parallel read-only mappers, an architect plan attacked by
+two critics, a sequential "spine" that owns every shared or frozen file,
+parallel fill-in items with disjoint file ownership, an integration gate
+(cargo fmt, make lint, make test, make typecheck, make app), an MCP
+end-to-end drive of the built app per the recipe in `CLAUDE.md`, and
+adversarial review rounds (reviewers, one verifier per finding that must
+reproduce it, a fix agent) until a round confirms nothing new. Keep the
+fan-out modest — five mappers, five fill items, three review lenses, one
+verifier per finding — because bursts of parallel agents have tripped
+session limits and API overloads mid-run; a workflow resumed with its run
+id replays finished agents from cache, and a lone fix is quicker done
+directly when subagents keep failing. Re-run the checks yourself before
+each commit.
+
+### Phase 1 — layer styles (§2.1): shipped, commit `125795a`
+
+Everything in §2.1 except knockout (deferred; not parsed or stored).
+Decisions worth knowing:
+
+- `Layer.style: Option<Arc<LayerStyle>>` is a core field, not `meta`;
+  its JSON (schema table in `core/src/style.rs`'s module doc) is the FFI
+  and `.rz` contract. `.rz` is at version 4.
+- Effects render from the layer's shape (alpha × enabled mask) into
+  padded planes cached inside the `Arc<LayerStyle>` and keyed on pixel
+  and mask `Arc` pointers; colour-only edits restamp cached planes, brush
+  ticks re-render only a sub-plane, and a replaced style inherits the old
+  cache lazily. Large blurs downsample. Layer opacity applies once to the
+  whole package; effects follow Photoshop's render order; Blend If weights
+  source alpha.
+- Layer > Layer Style… is one sheet (checklist + a pane per effect, live
+  preview), with Copy / Paste / Clear Layer Style; the panel badges "fx".
+  MCP: `set_layer_style`, `set_global_light`; `get_document` reports both.
+- The sheet itself was never driven interactively (no MCP surface for
+  it); worth a manual look.
+
+### Phase 2 — symbolic transforms and text typography (§2.2): shipped, commit `70000ac`
+
+- Text, shape and Live Photo payloads are version 2: `transform`
+  `[a, b, c, d]` (row-major on the wire, x′ = a·x + b·y), `origin_frac`,
+  and for text `weight`, `italic`, `tracking`, `leading`,
+  `baseline_shift`, `underline`, `strikethrough`, `box_width` (null =
+  point text). A payload whose new fields are all defaults is still
+  written as version 1. `DescribedLayer.swift` holds the anchor rule
+  (translation is the core's offset, never the payload's) and
+  `DescribedLayerGeometry.swift` the document rotate/flip/resize sync.
+- Free Transform and `transform_layer` compose any affine (a parallelogram
+  ⌘-corner drag included) and re-render; whole-pixel moves and the core's
+  exact forms take the lossless path with a meta patch. True perspective
+  still prompts to rasterize. Rasters that a pre-change Image Size
+  resampled are detected by size and never re-rendered behind the user's
+  back.
+- Two core exports were added, one more than the brief asked for:
+  `rz_doc_set_layer_content` (pixels + offset + mask atomically) and
+  `rz_doc_transform_layer_mask` (harvests a transformed mask without
+  resampling pixels about to be replaced). Both are in the header,
+  `RasterCore.swift`, the null-safety sweep and `content_tests.rs`.
+- The on-canvas text editor stays axis-aligned (opens at the anchor,
+  clamped and scrolled into view); rotated shapes re-box through the
+  inverse map; frame picks keep map, mask and style.
+
+### Phase 3 — channels (§2.3): NOT started
+
+The workflow was launched twice on 3 September and both runs died on API
+overload before any file changed; the tree is clean at `70000ac`. The
+brief its agents were given, which resolves the open choices in §2.3, is
+the starting point for the next attempt:
+
+- Core: `RzDocument.channels: Vec<Channel { name, data: Arc<GrayImage>
+  (always canvas-sized), overlay_color, overlay_opacity }>`; every
+  geometry op keeps them consistent (crop crops, canvas resize pads with
+  0, rotate/flip permute, resize resamples; flatten, merge, duplicate and
+  clone keep them); `.rz` version 5 serializes them with caps. A new
+  `doc_channel.rs` with add / remove / rename / options / set data /
+  duplicate / invert, plane readers (`composite_plane` red/green/blue/
+  luma/alpha, `layer_plane` red/green/blue/alpha/mask, canvas-sized),
+  plane writers (`with_layer_plane`), painting (`painting_channel`,
+  `painting_layer_plane`, the same lerp as mask painting), `blend_planes`
+  through the existing blend table (behind Apply Image and Calculations),
+  and `luminosity_masks` (Lights/Darks/Midtones 1–3 from Rec. 709 luma).
+  One `ffi_channel.rs`, a "Channels" header section, wrappers, a
+  `channel_tests.rs` with analytic oracles, null-sweep entries.
+- UI: a third right-panel tab "Channels" (RGB, Red, Green, Blue, the
+  active layer's mask, then alpha channels, each with a thumbnail and an
+  eye); selecting a row sets the edit target — composite, one colour
+  plane, or an alpha channel — which paint tools honour and which the
+  destructive Filters and Adjustments honour through ONE generic hook in
+  `ImageDocument`'s active-layer path (extract plane → run the op → take
+  gray → re-insert); a single plane shows in grayscale, an alpha channel
+  over RGB as a rubylith (reuse the Quick Mask overlay drawing; Quick
+  Mask itself stays as is). Row menu: Duplicate, Delete, Options, Invert,
+  Load as Selection. Footer: Load, Save Selection, New, Delete.
+- Selection: Select > Save Selection… / Load Selection… sheets (sources:
+  channel, layer transparency, layer mask, colour plane; modes replace/
+  add/subtract/intersect; invert); ⌘-click a layer thumbnail, mask
+  thumbnail or channel row loads it, with Shift / Option / Shift+Option
+  combining as the selection tools do.
+- Image > Apply Image… and Calculations… sheets with live preview;
+  Select > Add Luminosity Masks.
+- iPhone auxiliary mattes: on HEIC open through `Bitmap.swift`'s ImageIO
+  path, add Depth (or Disparity), Portrait Matte, Skin, Hair, Teeth,
+  Glasses and Sky as channels when present (`AuxiliaryMattes.swift`,
+  AVFoundation matte types, bilinear resample to the canvas); never crash
+  on a malformed dictionary; a plain HEIC (make one with `sips -s format
+  heic`) adds none. No sample with mattes exists in the repo — say so
+  rather than fabricate a check.
+- MCP: `list_channels`, `add_channel`, `delete_channel`,
+  `rename_channel`, `set_channel_options`, `invert_channel`,
+  `load_selection`, `save_selection`, `apply_image`, `calculations`,
+  `add_luminosity_masks`; `render` gains `channel`; the paint tools'
+  `target` grows to `layer|mask|red|green|blue|alpha|channel:<name>`;
+  `get_document` reports channels. README: a Channels entry, the `.rz`
+  sentence, the tool count.
+
+### Remaining order
+
+Section 4's steps 4–8 in order (colour management and metadata; the
+adjustment batch with histogram and info panels; healing brush and
+Content-Aware Fill; groups, lock, multi-select, guides and snapping; RAW
+develop and Actions), then the breadth of section 3.
 
 ---
 
@@ -64,7 +190,7 @@ destructive twin, and an MCP tool.
 
 ## 2. The three requested features
 
-### 2.1 Layer styles and blending options (drop shadow first)
+### 2.1 Layer styles and blending options (drop shadow first) — SHIPPED (§0)
 
 Blend *modes* are done. What is missing is Photoshop's **Layer Style**
 dialog, whose first pane is titled "Blending Options": the effect stack
@@ -144,7 +270,7 @@ effects into the layer with a note in the layer name. Size: **L** — the
 largest single item in this document, and the one with the most visible
 payoff.
 
-### 2.2 Symbolic transforms on parametric layers
+### 2.2 Symbolic transforms on parametric layers — SHIPPED (§0)
 
 Give every `meta` payload a `transform: [a, b, c, d, tx, ty]` (an affine
 in layer space; a homography can come later). Free Transform on a text,
@@ -165,7 +291,7 @@ tracking, leading, underline, fixed-width paragraph boxes vs point text.
 Outline and shadow come from layer styles rather than from the text
 payload, exactly as in Photoshop.
 
-### 2.3 Channels: alpha channels and per-channel colour
+### 2.3 Channels: alpha channels and per-channel colour — NEXT (brief in §0)
 
 The selection mask is already a canvas-sized u8 plane, and the GIMP study
 (§6) is explicit that selection, mask, and channel should be one
@@ -390,12 +516,12 @@ a **command palette** (⌘K-style fuzzy search over the whole menu).
 
 ## 4. Suggested order
 
-1. **Layer styles and blending options** (§2.1) — the request, the most
+1. ✅ **Layer styles and blending options** (§2.1) — the request, the most
    visible payoff, and it forces the effect cache that §3G reuses.
-2. **Symbolic transforms** on text, shape and Live Photo layers (§2.2),
+2. ✅ **Symbolic transforms** on text, shape and Live Photo layers (§2.2),
    with the text typography follow-ons — small, and it deletes a known
    limit.
-3. **Channels** (§2.3) with ⌘-click-to-select, luminosity masks, and the
+3. ▶ **Channels** (§2.3) with ⌘-click-to-select, luminosity masks, and the
    iPhone auxiliary mattes — one `.rz` bump shared with step 1.
 4. **Colour management and metadata** (§3A, first five rows) — silent
    correctness. Do it before more people export photos from the app.
