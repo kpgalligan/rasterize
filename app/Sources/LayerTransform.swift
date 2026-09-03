@@ -84,8 +84,10 @@ enum TransformHandle: CaseIterable {
 /// CGAffineTransform element order). Canvas y grows downward, so a positive
 /// angle reads as CLOCKWISE on screen.
 struct LayerTransform {
-    /// The fixed point of rotation and scaling, in canvas coordinates
-    /// (the layer rect's centre for the whole of a session).
+    /// The fixed point of rotation and scaling, in canvas coordinates, for
+    /// the whole of a session: a raster layer's rect centre, a described
+    /// layer's exact centre (`RasterDocument.describedPivot`, which a turn
+    /// leaves fixed, so a later rotate-back shares it).
     var pivot: CGPoint
     /// Canvas-space offset applied after the pivot-centred rotate/scale.
     var translation: CGVector = .zero
@@ -382,6 +384,37 @@ struct LayerTransform {
     /// `destinationExtent(of:)`, rounded exactly the core's way.
     func warpedDestinationExtent(of rect: CGRect) -> CGRect {
         Self.boundingExtent(of: warpedQuad(of: rect))
+    }
+
+    /// The exact affine a PARALLELOGRAM quad denotes, or nil for any other
+    /// quad (a true perspective, which only the projective resample can
+    /// commit). This is the core's own test and derivation
+    /// (doc_perspective.rs, `perspective_layer` → `parallelogram_affine`)
+    /// restated, so the compose paths — the UI's ⌘-corner commit on a
+    /// described layer and the agent's distort_layer — commit the very
+    /// matrix the core would have resampled through: a quad is a
+    /// parallelogram when both second differences `x0 − x1 + x2 − x3` and
+    /// `y0 − y1 + y2 − y3` vanish within 1e-9 canvas px (`LinearMap.epsilon`,
+    /// the core's EXACT_EPSILON — far below anything a corner argument can
+    /// mean, so a quad typed from a rotated rect's rounded corners still
+    /// counts), and then the rect's TL, TR and BL corners pin all six
+    /// elements (BR is implied, which is what "parallelogram" means):
+    /// `a = (x1 − x0)/w`, `b = (y1 − y0)/w`, `c = (x3 − x0)/h`,
+    /// `d = (y3 − y0)/h`, `tx = x0 − a·rx − c·ry`, `ty = y0 − b·rx − d·ry`
+    /// over the layer's CURRENT rect `(rx, ry, w, h)`.
+    static func parallelogramAffine(of rect: CGRect, onto quad: [CGPoint]) -> CGAffineTransform? {
+        guard quad.count == 4, rect.width > 0, rect.height > 0 else { return nil }
+        let dx3 = Double(quad[0].x - quad[1].x + quad[2].x - quad[3].x)
+        let dy3 = Double(quad[0].y - quad[1].y + quad[2].y - quad[3].y)
+        guard abs(dx3) <= LinearMap.epsilon, abs(dy3) <= LinearMap.epsilon else { return nil }
+        let a = (quad[1].x - quad[0].x) / rect.width
+        let b = (quad[1].y - quad[0].y) / rect.width
+        let c = (quad[3].x - quad[0].x) / rect.height
+        let d = (quad[3].y - quad[0].y) / rect.height
+        return CGAffineTransform(
+            a: a, b: b, c: c, d: d,
+            tx: quad[0].x - a * rect.minX - c * rect.minY,
+            ty: quad[0].y - b * rect.minX - d * rect.minY)
     }
 
     /// True when four canvas points form a strictly convex quad (either

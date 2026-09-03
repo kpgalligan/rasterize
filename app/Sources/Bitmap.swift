@@ -5,10 +5,13 @@ import ImageIO
 /// into the STRAIGHT (non-premultiplied) RGBA8 the FFI takes, row 0 = top.
 ///
 /// It exists because a few pixel sources are the platform's and not the
-/// core's — glyph rasterization (TextLayer), HEIC/HEIF stills and Live Photo
-/// video frames (LivePhotoLayer) — and CoreGraphics only ever renders into
-/// PREMULTIPLIED buffers. Every one of those paths converts here, so the
-/// unpremultiply rounding is written exactly once.
+/// core's — glyph rasterization (TextLayer), shape paths (ShapeLayer),
+/// HEIC/HEIF stills and Live Photo video frames (LivePhotoLayer) — and
+/// CoreGraphics only ever renders into PREMULTIPLIED buffers. Every one of
+/// those paths converts here, so the unpremultiply rounding is written
+/// exactly once, and the three described-layer renderers share ONE context
+/// builder (`renderStraightRGBA`) so their placement rule is written once
+/// too (DescribedLayer.swift).
 enum Bitmap {
     /// `image` rendered into a `width × height` straight-alpha RGBA8 buffer
     /// (row 0 = top, exactly `width * height * 4` bytes): scaled to FIT and
@@ -46,6 +49,52 @@ enum Bitmap {
             context.interpolationQuality = .high
             context.draw(image, in: rect)
             return true
+        }
+        guard drawn else { return nil }
+        unpremultiply(&pixels)
+        return pixels
+    }
+
+    /// Renders `draw` into a `width × height` straight-alpha RGBA8 buffer
+    /// (row 0 = top): a premultiplied sRGB context flipped so y grows DOWN
+    /// (CoreText and the shape paths draw in the canvas's own orientation),
+    /// then the ONE unpremultiply. `draw` receives the context with the flip
+    /// already applied and returns false to abort. `appKit: true`
+    /// additionally pushes an NSGraphicsContext around `draw` — required by
+    /// NSAttributedString drawing, and MAIN THREAD ONLY (AppKit drawing); the
+    /// shape and Live Photo renderers leave it false and stay pure
+    /// CoreGraphics, which is what lets the Live Photo sheet preview render
+    /// on PreviewRenderer's queue. nil for a degenerate size, one past the
+    /// core's pixel cap, a context CoreGraphics refuses, or an aborted draw.
+    static func renderStraightRGBA(
+        width: Int, height: Int, appKit: Bool = false, _ draw: (CGContext) -> Bool
+    ) -> [UInt8]? {
+        guard width > 0, height > 0, width * height <= RasterImage.maxResizePixels else {
+            return nil
+        }
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = pixels.withUnsafeMutableBufferPointer { buffer -> Bool in
+            // CoreGraphics renders only into PREMULTIPLIED buffers; the
+            // straight-alpha conversion happens below.
+            guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+                  let context = CGContext(
+                    data: buffer.baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: width * 4,
+                    space: colorSpace,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            // Flip so raster row 0 is the top row, as everywhere else.
+            context.translateBy(x: 0, y: CGFloat(height))
+            context.scaleBy(x: 1, y: -1)
+            guard appKit else { return draw(context) }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+            let ok = draw(context)
+            NSGraphicsContext.restoreGraphicsState()
+            return ok
         }
         guard drawn else { return nil }
         unpremultiply(&pixels)

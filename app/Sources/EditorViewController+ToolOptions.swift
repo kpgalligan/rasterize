@@ -830,6 +830,42 @@ extension EditorViewController {
         ("Light", 3), ("Regular", 5), ("Medium", 6), ("Semibold", 8), ("Bold", 9),
     ]
 
+    /// The popup row for an NSFontManager weight: the row whose weight is
+    /// NEAREST, so a description carrying a weight the popup has no row for
+    /// (an agent's `weight: 7`) reads as "Medium" rather than as "Regular"
+    /// while the store keeps the exact value until the user picks a row.
+    /// Ties go to the lighter row (the first in the table).
+    private static func textWeightRow(_ weight: Int) -> Int {
+        var best = 1
+        var bestDistance = Int.max
+        for (index, row) in textWeights.enumerated() where abs(row.weight - weight) < bestDistance {
+            best = index
+            bestDistance = abs(row.weight - weight)
+        }
+        return best
+    }
+
+    /// A typography toggle as a ONE-cell segmented control: the cell
+    /// highlights when `get` returns its index (0) and nothing when it
+    /// returns −1, and `set` fires on every click, so a single cell is a
+    /// button-style toggle with no new control kind (OptionSegmentedControl).
+    /// The setter writes the store only: the bar's onAnyEdit →
+    /// `toolOptionsEdited()` rebuilds `canvas.textStyle` from the store
+    /// (`currentTextStyle`) and restyles a live session, which is the one
+    /// path every text option takes.
+    private func textToggle(
+        id: String, symbol: String, fallback: String, label: String,
+        get: @escaping () -> Bool, toggle: @escaping () -> Void
+    ) -> OptionDescriptor {
+        OptionDescriptor(
+            id: id, overflowLabel: label,
+            kind: .segmented(
+                segments: [(symbol, fallback, label)],
+                get: { get() ? 0 : -1 },
+                set: { _ in toggle() },
+                segmentEnabled: nil))
+    }
+
     private func textClusters() -> [OptionCluster] {
         let families = NSFontManager.shared.availableFontFamilies.sorted()
         return [
@@ -852,14 +888,30 @@ extension EditorViewController {
                     id: "text.weight", overflowLabel: "Weight",
                     kind: .popup(
                         width: 92, items: Self.textWeights.map { $0.title },
-                        get: {
-                            let weight = ToolOptionsStore.shared.text.weight
-                            return Self.textWeights.firstIndex { $0.weight == weight } ?? 1
-                        },
+                        get: { Self.textWeightRow(ToolOptionsStore.shared.text.weight) },
                         set: { index in
                             guard Self.textWeights.indices.contains(index) else { return }
                             ToolOptionsStore.shared.text.weight = Self.textWeights[index].weight
                         })),
+            ]),
+            // The style toggles sit right after the face they modify. A
+            // family without an italic member previews and commits its
+            // regular face for Italic (TextStyle.nsFont) — preview and
+            // commit agree by construction, so the toggle stays live.
+            OptionCluster([
+                textToggle(
+                    id: "text.italic", symbol: "italic", fallback: "I", label: "Italic",
+                    get: { ToolOptionsStore.shared.text.italic },
+                    toggle: { ToolOptionsStore.shared.text.italic.toggle() }),
+                textToggle(
+                    id: "text.underline", symbol: "underline", fallback: "U", label: "Underline",
+                    get: { ToolOptionsStore.shared.text.underline },
+                    toggle: { ToolOptionsStore.shared.text.underline.toggle() }),
+                textToggle(
+                    id: "text.strikethrough", symbol: "strikethrough", fallback: "S",
+                    label: "Strikethrough",
+                    get: { ToolOptionsStore.shared.text.strikethrough },
+                    toggle: { ToolOptionsStore.shared.text.strikethrough.toggle() }),
             ]),
             OptionCluster([
                 OptionDescriptor(
@@ -872,15 +924,19 @@ extension EditorViewController {
                             self?.fontSize = CGFloat(value)
                             ToolOptionsStore.shared.text.size = value
                         })),
+                // Tracking is the `.kern` attribute in px (TextToolOptions):
+                // it changes line breaks, which is why the session restyles
+                // its whole storage on every edit rather than just the
+                // typing attributes.
                 OptionDescriptor(
                     id: "text.tracking", microLabel: "Track", overflowLabel: "Tracking",
                     kind: .field(
-                        width: 46, unit: "", decimals: 0, min: -100, max: 100,
+                        width: 46, unit: "", decimals: 0,
+                        min: TextToolOptions.trackingRange.lowerBound,
+                        max: TextToolOptions.trackingRange.upperBound,
                         quick: [-50, -25, -10, -5, 0, 5, 10, 25, 50],
                         get: { ToolOptionsStore.shared.text.tracking },
-                        set: { ToolOptionsStore.shared.text.tracking = $0 }),
-                    // The payload doesn't carry tracking yet.
-                    isEnabled: { false }),
+                        set: { ToolOptionsStore.shared.text.tracking = $0 })),
             ]),
             OptionCluster([
                 OptionDescriptor(
@@ -907,22 +963,31 @@ extension EditorViewController {
                         set: { [weak self] color in self?.setPaintColor(color) })),
             ]),
             OptionCluster([
+                // Leading is the line height in pt, 0 = the font's natural
+                // height (TextStyle.leading); the quick list is the classic
+                // headline spread. A leading tighter than the natural height
+                // overlaps lines, and the renderer keeps the ascent that
+                // then rises above the block (TextLayer.layout's ink-safe
+                // rect).
                 OptionDescriptor(
                     id: "text.leading", microLabel: "Leading", overflowLabel: "Leading",
                     kind: .field(
-                        width: 52, unit: " pt", decimals: 0, min: 0, max: 1000,
-                        quick: [],
+                        width: 52, unit: " pt", decimals: 0,
+                        min: TextToolOptions.leadingRange.lowerBound,
+                        max: TextToolOptions.leadingRange.upperBound,
+                        quick: [0, 12, 14, 18, 24, 36, 48, 60, 72, 96, 144],
                         get: { ToolOptionsStore.shared.text.leading },
-                        set: { ToolOptionsStore.shared.text.leading = $0 }),
-                    isEnabled: { false }),
+                        set: { ToolOptionsStore.shared.text.leading = $0 })),
+                // Baseline shift in px, positive raises (`.baselineOffset`).
                 OptionDescriptor(
                     id: "text.baseline", microLabel: "Baseline", overflowLabel: "Baseline shift",
                     kind: .field(
-                        width: 46, unit: "", decimals: 0, min: -100, max: 100,
+                        width: 46, unit: "", decimals: 0,
+                        min: TextToolOptions.baselineShiftRange.lowerBound,
+                        max: TextToolOptions.baselineShiftRange.upperBound,
                         quick: [-50, -25, -10, -5, 0, 5, 10, 25, 50],
                         get: { ToolOptionsStore.shared.text.baselineShift },
-                        set: { ToolOptionsStore.shared.text.baselineShift = $0 }),
-                    isEnabled: { false }),
+                        set: { ToolOptionsStore.shared.text.baselineShift = $0 })),
                 OptionDescriptor(
                     id: "text.antialias", overflowLabel: "Anti-alias",
                     kind: .popup(width: 84, items: ["Smooth"], get: { 0 }, set: { _ in }),

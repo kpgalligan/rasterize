@@ -3,7 +3,12 @@ import UniformTypeIdentifiers
 
 /// Live Photo commands: placing one as a layer, and picking which of its
 /// frames that layer shows. The frame picker itself is
-/// LivePhotoFrameSheetController; the model is LivePhotoLayer.swift.
+/// LivePhotoFrameSheetController; the model is LivePhotoLayer.swift. A
+/// re-frame re-renders the chosen frame through the layer's own transform
+/// at its own anchor, keeping its name, position, opacity, blend mode,
+/// mask, style and transform — a rotated or scaled Live Photo stays put.
+/// Mirrored for the agent by `add_live_photo_layer` and
+/// `set_live_photo_frame`.
 extension EditorViewController {
     /// Layer > Select Live Photo Frame… — the active layer's timeline. The
     /// layers panel's row menu and row double-click go to
@@ -19,7 +24,9 @@ extension EditorViewController {
 
     /// Opens layer `idx`'s frame picker, having made it the active layer —
     /// re-opening a layer's source selects it, exactly as the text and
-    /// adjustment paths do.
+    /// adjustment paths do. The picker previews and commits through the
+    /// layer's transform at its anchor (LivePhotoFrameSheetController), so
+    /// a transformed layer's frames land exactly where the layer is.
     func editLivePhotoLayer(_ idx: Int) {
         guard let document = document, let doc = document.doc,
               let payload = doc.livePhotoPayload(idx)

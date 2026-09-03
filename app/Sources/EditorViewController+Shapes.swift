@@ -1,17 +1,27 @@
 import AppKit
 
 // The shape tools (R): drag out a rectangle, ellipse or line and it lands
-// as a new parametric layer — pixels rendered by ShapeLayer, description
-// in the layer's meta, position in the layer's offset (so Move keeps the
-// description honest). Double-clicking a shape layer in the layers panel
-// reopens that description as an editable box (ShapeEditSession below).
-// Mirrored for the agent by `add_shape_layer` and `edit_shape_layer`.
+// as a new parametric layer — pixels rendered by ShapeLayer through the
+// layer's transform, description in the layer's meta, position in the
+// layer's offset (the anchor rule in DescribedLayer.swift, so Move keeps
+// the description honest). Double-clicking a shape layer in the layers
+// panel reopens that description as an editable box (ShapeEditSession
+// below). Mirrored for the agent by `add_shape_layer` and `edit_shape_layer`.
+//
+// RE-EDITING UNDER A MAP. A transformed shape reopens with its handles on
+// the placed quad, and every re-box happens in the shape's OWN space: the
+// pointer is inverse-mapped through the layer's 2×2 map, the local box
+// resizes exactly as an axis-aligned one would, and the anchor is
+// renormalized so the un-dragged corner stays pinned on the canvas — a
+// rotated rectangle therefore grows along its own axes. The overlay draws
+// the local path under the same placement the renderer uses, stroke
+// width scaling with the map, so what is previewed is what commits.
 extension EditorViewController {
     /// The canvas's drag committed: build the payload from the options
     /// bar's style and add the layer above the active one — the same
-    /// add-fill-move-describe chain a text commit uses.
+    /// addingDescribedLayer op a text commit uses.
     func commitShapeLayer(box: CGRect, flipped: Bool) {
-        guard let document = document, let doc = document.doc else { return }
+        guard let document = document, document.doc != nil else { return }
         let kind: String
         switch currentTool {
         case .shapeEllipse: kind = "ellipse"
@@ -27,24 +37,15 @@ extension EditorViewController {
             stroke: TextLayer.color(fromHex: options.stroke),
             strokeWidth: options.strokeWidth,
             radius: options.radius)
-        guard let raster = ShapeLayer.render(payload), let meta = payload.json() else {
-            NSSound.beep()
-            return
-        }
         let name = ShapeLayer.layerName(for: payload)
-        let offsetX = Int(floor(box.minX)) - raster.padding
-        let offsetY = Int(floor(box.minY)) - raster.padding
+        // The box's top-left lands on whole pixels (a new shape is never
+        // transformed) — the placement rule every interactive commit follows.
+        let anchor = DescribedLayer.placementAnchor(box.origin, transform: .identity)
 
         let below = document.activeLayerIndex
         let before = document.doc
-        document.applyEdit("Add \(name) Layer") { doc in
-            let idx = below + 1
-            guard let added = doc.addingLayer(above: below, name: name),
-                  let filled = added.withLayerPixels(
-                    idx, rgba: raster.pixels, width: raster.width, height: raster.height),
-                  let moved = filled.withLayerOffset(idx, offsetX, offsetY)
-            else { return nil }
-            return moved.withLayerMeta(idx, meta)
+        document.applyEdit("Add \(name) Layer") {
+            $0.addingDescribedLayer(above: below, .shape(payload), anchor: anchor, name: name)
         }
         guard document.doc !== before else { return }
         setActiveLayer(min(below + 1, document.doc.layerCount - 1))
@@ -61,7 +62,8 @@ extension EditorViewController {
     }
 
     /// A shape option changed in the bar: the canvas preview follows, and
-    /// an open edit session goes dirty and redraws with the new style.
+    /// an open edit session goes dirty and redraws with the new style —
+    /// under the same placement, which is what the commit will render.
     func shapeStyleEdited() {
         syncCanvasShapeStyle()
         if shapeEditSession != nil {
@@ -76,8 +78,9 @@ extension EditorViewController {
     /// matching shape tool and reopen the layer's description as an
     /// editable box — editTextLayer's shape-layer sibling. The options bar
     /// takes over the layer's own fill, stroke, weight and radius; handle
-    /// and interior drags adjust the box; Return, a double-click, a click
-    /// away, a tool switch or Quick Mask commits; Escape cancels.
+    /// and interior drags adjust the box in the shape's own space; Return,
+    /// a double-click, a click away, a tool switch or Quick Mask commits;
+    /// Escape cancels.
     func editShapeLayer(_ idx: Int) {
         guard let document = document, document.doc?.shapePayload(idx) != nil else {
             NSSound.beep()
@@ -100,8 +103,8 @@ extension EditorViewController {
         // Re-read AFTER selectTool: it commits a pending Free Transform,
         // which replaces the document — and can even rasterize this very
         // layer, dropping the payload (then there is nothing to reopen).
-        guard let doc = document.doc, let info = doc.layerInfo(idx),
-              let payload = doc.shapePayload(idx)
+        guard let doc = document.doc, let payload = doc.shapePayload(idx),
+              let anchor = doc.describedAnchor(idx)
         else {
             NSSound.beep()
             return
@@ -119,14 +122,16 @@ extension EditorViewController {
         ToolOptionsStore.shared.shape.radius = payload.radius
         syncCanvasShapeStyle()
         optionsBar.refreshValues()
-        // The layer's offset plus the render padding recovers the shape
-        // box's top-left — the commit's offset rule, inverted.
-        let pad = CGFloat(ShapeLayer.padding(for: payload))
+        // The layer's anchor IS the shape box's top-left — the commit's
+        // placement rule, inverted (DescribedLayer.swift) — and the
+        // session keeps it EXACT: a transformed shape's anchor is
+        // fractional, and rounding it here would shift the reopened quad
+        // off the layer's pixels and register a phantom edit on commit.
         shapeEditSession = ShapeEditSession(
             layer: idx, kind: payload.kind,
-            box: CGRect(
-                x: CGFloat(info.offsetX) + pad, y: CGFloat(info.offsetY) + pad,
-                width: CGFloat(payload.w), height: CGFloat(payload.h)),
+            anchor: anchor, openedAnchor: anchor,
+            size: CGSize(width: CGFloat(payload.w), height: CGFloat(payload.h)),
+            transform: payload.transform,
             flipped: payload.flipped)
         // Hide the layer's raster under the session, or the old shape
         // ghosts behind every adjustment — the text session's rule. An
@@ -150,8 +155,8 @@ extension EditorViewController {
             return
         }
         canvas.shapeEditOverlay = ShapeToolPreview(
-            kind: Self.shapeTool(for: session.kind), box: session.box,
-            flipped: session.flipped, style: canvas.shapeStyle)
+            kind: Self.shapeTool(for: session.kind), box: session.localBox,
+            placement: session.placement, flipped: session.flipped, style: canvas.shapeStyle)
     }
 
     // MARK: - Re-edit gesture
@@ -159,14 +164,13 @@ extension EditorViewController {
     func shapeEditMouseDown(_ point: CGPoint) {
         guard var session = shapeEditSession else { return }
         let slop = ImageCanvasView.transformHandleSize / canvas.magnification
-        if let handle = CropSession.handleIndex(at: point, rect: session.box, slop: slop) {
-            session.drag = .handle(handle, start: session.box)
+        let quad = session.quad
+        if let handle = Self.shapeHandleIndex(at: point, quad: quad, slop: slop) {
+            session.drag = .handle(handle, start: (session.anchor, session.size))
             session.pressPoint = point
             shapeEditSession = session
-        } else if session.box.insetBy(dx: -slop, dy: -slop).contains(point) {
-            // The inset keeps a hairline box grabbable — an axis-aligned
-            // line's box legitimately has a zero dimension.
-            session.drag = .move(grab: point, start: session.box)
+        } else if Self.quadGrabs(point, quad: quad, slop: slop) {
+            session.drag = .move(grab: point, start: session.anchor)
             session.pressPoint = point
             shapeEditSession = session
         } else {
@@ -174,6 +178,56 @@ extension EditorViewController {
             // click-through rule (no new shape starts from this click).
             commitShapeEditSession()
         }
+    }
+
+    /// Which of the placed quad's eight handles a press at `point` grabs,
+    /// within `slop` canvas px on each axis (the Free Transform box's
+    /// square test) — nil for none. Index order is `CropSession.handles`'.
+    static func shapeHandleIndex(at point: CGPoint, quad: [CGPoint], slop: CGFloat) -> Int? {
+        for (index, handle) in ImageCanvasView.transformHandlePoints(quad).enumerated()
+        where abs(point.x - handle.x) <= slop && abs(point.y - handle.y) <= slop {
+            return index
+        }
+        return nil
+    }
+
+    /// Whether a press at `point` grabs the quad's interior: inside the
+    /// polygon, or within `slop` canvas px of one of its edges. The edge
+    /// margin is what keeps a hairline box grabbable — an axis-aligned
+    /// line's box legitimately has a zero dimension, so its quad has no
+    /// interior at all — and it is measured on the CANVAS rather than as an
+    /// inset of the local box mapped through the placement, so the margin
+    /// is the same handful of screen pixels whatever the map (a local inset
+    /// would stretch to dozens of pixels along a scaled-up axis and vanish
+    /// along a scaled-down one).
+    static func quadGrabs(_ point: CGPoint, quad: [CGPoint], slop: CGFloat) -> Bool {
+        guard quad.count == 4 else { return false }
+        let polygon = NSBezierPath()
+        polygon.move(to: quad[0])
+        for corner in quad.dropFirst() {
+            polygon.line(to: corner)
+        }
+        polygon.close()
+        if polygon.contains(point) { return true }
+        for index in 0..<4
+        where distance(from: point, toSegment: quad[index], quad[(index + 1) % 4]) <= slop {
+            return true
+        }
+        return false
+    }
+
+    /// Euclidean distance from `p` to the segment `a`–`b` (to `a` when the
+    /// segment is a point).
+    private static func distance(from p: CGPoint, toSegment a: CGPoint, _ b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let lengthSquared = dx * dx + dy * dy
+        var t: CGFloat = 0
+        if lengthSquared > 0 {
+            t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lengthSquared
+            t = min(max(t, 0), 1)
+        }
+        return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
     }
 
     func shapeEditMouseDragged(_ point: CGPoint) {
@@ -188,25 +242,44 @@ extension EditorViewController {
         }
         switch drag {
         case let .handle(index, start):
-            // No canvas clamp, unlike the crop box: a shape may extend past
-            // the canvas edge (only its on-canvas pixels composite).
-            var box = CropSession.resizing(start, handle: index, to: point, ratio: nil)
+            // The pointer goes into the shape's own space (relative to the
+            // anchor, through the inverse map), where the box is still
+            // axis-aligned and CropSession.resizing applies unchanged. No
+            // canvas clamp, unlike the crop box: a shape may extend past
+            // the canvas edge (only its on-canvas pixels composite). The
+            // map is invertible by decode's contract; a session could only
+            // lose that to a document change, which ends it first.
+            guard let inverse = session.transform.inverted() else { return }
+            let local = inverse.apply(
+                CGPoint(x: point.x - start.anchor.x, y: point.y - start.anchor.y))
+            var box = CropSession.resizing(
+                CGRect(origin: .zero, size: start.size), handle: index, to: local, ratio: nil)
             // A degenerate axis is legitimate for a line: resizing's 1 px
             // floor would bend an axis-aligned line, so restore the axis
-            // an edge-handle drag never moved.
+            // an edge-handle drag never moved (in local space, where the
+            // axis is still an axis).
             if session.kind == "line" {
-                if start.height == 0, index == 5 || index == 7 {
-                    box.origin.y = start.origin.y
+                if start.size.height == 0, index == 5 || index == 7 {
+                    box.origin.y = 0
                     box.size.height = 0
                 }
-                if start.width == 0, index == 4 || index == 6 {
-                    box.origin.x = start.origin.x
+                if start.size.width == 0, index == 4 || index == 6 {
+                    box.origin.x = 0
                     box.size.width = 0
                 }
             }
-            session.box = box
+            // Renormalize: the local box's origin moved when a top/left
+            // handle was dragged (or a drag crossed the opposite edge), so
+            // the anchor shifts by the MAPPED origin and the local box goes
+            // back to (0, 0) — the un-dragged corner stays exactly where it
+            // was on the canvas.
+            let shift = session.transform.apply(box.origin)
+            session.anchor = CGPoint(x: start.anchor.x + shift.x, y: start.anchor.y + shift.y)
+            session.size = box.size
         case let .move(grab, start):
-            session.box = start.offsetBy(dx: point.x - grab.x, dy: point.y - grab.y)
+            // A move is a canvas-space translation of the anchor: the map
+            // and the local box are untouched (Move-tool semantics).
+            session.anchor = CGPoint(x: start.x + point.x - grab.x, y: start.y + point.y - grab.y)
         }
         session.dirty = true
         shapeEditSession = session
@@ -216,10 +289,11 @@ extension EditorViewController {
     // MARK: - Re-edit commit
 
     /// Return, a double-click, a click away, a tool switch or Quick Mask:
-    /// re-render the layer from the session's box and the options bar's
-    /// style — pixels, offset and description in ONE undo step. An
-    /// untouched session just closes; a style that renders nothing (fill
-    /// and stroke both gone) refuses rather than commit an empty raster.
+    /// re-render the layer from the session's box, through the layer's
+    /// own map, with the options bar's style — pixels, offset, description
+    /// and the re-cropped mask in ONE undo step. An untouched session just
+    /// closes; a style that renders nothing (fill and stroke both gone)
+    /// refuses rather than commit an empty raster.
     func commitShapeEditSession() {
         guard let session = shapeEditSession, let document = document,
               let doc = document.doc
@@ -229,38 +303,43 @@ extension EditorViewController {
         }
         endShapeEditSession()
         guard session.dirty else { return }
+        let idx = session.layer
+        // The session cannot change the map — only a Free Transform does —
+        // so the layer's own transform re-attaches to the edited box.
+        let old = doc.shapePayload(idx)
+        let transform = session.transform
         // The style the OVERLAY drew with — this window's canvas style,
         // not the app-global store, which another window's bar may have
         // changed since: what was previewed is what commits.
         let style = canvas.shapeStyle
         let payload = ShapeLayerPayload(
             kind: session.kind,
-            w: Double(session.box.width), h: Double(session.box.height),
+            w: Double(session.size.width), h: Double(session.size.height),
             flipped: session.flipped,
             fill: style.fill,
             stroke: style.stroke,
             strokeWidth: Double(style.strokeWidth),
-            radius: Double(style.radius))
-        guard let raster = ShapeLayer.render(payload), let meta = payload.json() else {
-            NSSound.beep()
-            return
-        }
-        let idx = session.layer
-        let offsetX = Int(floor(session.box.minX)) - raster.padding
-        let offsetY = Int(floor(session.box.minY)) - raster.padding
+            radius: Double(style.radius),
+            transform: transform)
+        // The layer's own EXACT anchor unless a drag moved it — a restyle
+        // from the bar must not nudge the shape by the half pixel the
+        // whole-pixel rule would round a fraction left by a Free Transform
+        // (nor demote it to version 1); a drag's delta lands on whole pixels
+        // for an untransformed shape and exactly under a map (a re-box on a
+        // rotated shape keeps its un-dragged corner pinned exactly).
+        let anchor = DescribedLayer.placementAnchor(
+            from: session.openedAnchor, to: session.anchor, transform: transform)
         // Reopened and put back exactly as it was (dragged away and back,
         // a style nudged and reverted): no edit, no undo step — the text
-        // commit's rule, on values rather than the intent flag.
-        if let info = doc.layerInfo(idx), doc.shapePayload(idx) == payload,
-           info.offsetX == offsetX, info.offsetY == offsetY {
+        // commit's rule, on values rather than the intent flag. The
+        // session's payload carries fraction [0, 0] by construction; the
+        // anchor comparison covers the fraction.
+        if let old = old, old.withOriginFraction(.zero) == payload,
+           doc.describedAnchor(idx) == anchor {
             return
         }
-        document.applyEdit("Edit Shape Layer") { doc in
-            guard let filled = doc.withLayerPixels(
-                    idx, rgba: raster.pixels, width: raster.width, height: raster.height),
-                  let moved = filled.withLayerOffset(idx, offsetX, offsetY)
-            else { return nil }
-            return moved.withLayerMeta(idx, meta)
+        document.applyEdit("Edit Shape Layer") {
+            $0.rerenderingDescribedLayer(idx, .shape(payload), anchor: anchor)
         }
     }
 

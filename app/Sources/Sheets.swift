@@ -268,7 +268,9 @@ final class ResizeSheetController: NSViewController, NSTextFieldDelegate {
             return
         }
         dismiss(self)
-        document.applyEdit("Image Size") { $0.resized(w: w, h: h, filter: filter) }
+        document.applyEdit("Image Size") {
+            $0.applyingDocumentGeometry(.resize(width: w, height: h, filter: filter))
+        }
     }
 
     @objc private func cancelClicked(_ sender: Any?) {

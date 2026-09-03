@@ -44,7 +44,7 @@ final class EditorViewController: NSViewController {
     private var colorPanelTargetsSelf = false
 
     // Right panel (Layers/Assistant tabs, toggled by View > Show/Hide Layers).
-    private var layersPanel: LayersPanelViewController!
+    var layersPanel: LayersPanelViewController!
     private var assistantPanel: AssistantPanelViewController!
     private var panelSeparator: NSBox!
     private var scrollTrailingToRoot: NSLayoutConstraint!
@@ -280,9 +280,8 @@ final class EditorViewController: NSViewController {
             document.endLiveEdit("Cancel Stroke")
         }
         canvas.onTextClick = { [weak self] point in self?.textClicked(point) }
-        canvas.onCommitText = { [weak self] payload, origin, wrapWidth, editingLayer in
-            self?.commitTextLayer(payload, origin: origin, wrapWidth: wrapWidth,
-                                  editing: editingLayer)
+        canvas.onCommitText = { [weak self] payload, origin, editingLayer in
+            self?.commitTextLayer(payload, origin: origin, editing: editingLayer)
         }
         canvas.onTextSessionEnd = { [weak self] in
             // Drops the layer-hidden preview a re-edit session put up.
@@ -356,8 +355,7 @@ final class EditorViewController: NSViewController {
         canvas.onZoomRect = { [weak self] rect in self?.zoomToRect(rect) }
 
         canvas.paintColor = paintColor
-        canvas.textFont = currentFont()
-        canvas.textAlignment = textAlignment
+        canvas.textStyle = currentTextStyle()
         syncCanvasPaintState()
 
         // Fixed-height options bar under the title bar; the +ToolOptions
@@ -685,7 +683,7 @@ final class EditorViewController: NSViewController {
     /// underneath it, or its mask was deleted, applied, or undone away — and
     /// forces the mask target whenever the active layer is an adjustment
     /// layer (its pixels are pointless to paint).
-    private func syncPaintTarget() {
+    func syncPaintTarget() {
         let idx = document?.activeLayerIndex ?? 0
         if document?.doc?.layerIsAdjustment(idx) == true,
            document?.doc?.layerHasMask(idx) == true {
@@ -869,188 +867,6 @@ final class EditorViewController: NSViewController {
         }
     }
 
-    /// The face the text tool draws with: the live family/size plus the
-    /// store's NSFontManager weight. Internal — the +ToolOptions descriptors
-    /// rebuild the canvas font through it.
-    func currentFont() -> NSFont {
-        let weight = min(max(ToolOptionsStore.shared.text.weight, 0), 15)
-        return NSFontManager.shared.font(
-            withFamily: fontFamily, traits: [], weight: weight, size: fontSize)
-            ?? .systemFont(ofSize: fontSize)
-    }
-
-    // MARK: - Text layers
-
-    /// A text-tool click: re-open the topmost VISIBLE text layer under the
-    /// point, or start a new text entry there.
-    private func textClicked(_ point: CGPoint) {
-        guard let doc = document?.doc, let idx = topmostTextLayer(at: point, in: doc) else {
-            canvas.beginTextSession(at: point)
-            return
-        }
-        // A click puts the caret where it landed, so nothing is preselected.
-        openTextSession(layer: idx, selectAll: false)
-    }
-
-    /// Double-clicking a TEXT layer in the layers panel: switch to the text
-    /// tool and reopen the layer's description with the whole string
-    /// selected, so typing replaces it and the options bar exposes the font,
-    /// size, color and alignment. The layer needn't be under the cursor or
-    /// even visible — the panel already said which one.
-    func editTextLayer(_ idx: Int) {
-        guard let doc = document?.doc, doc.textPayload(idx) != nil else {
-            NSSound.beep()
-            return
-        }
-        // A click that ends an open session only ends it — the rule the
-        // canvas follows too — because committing may insert a layer and
-        // renumber everything above it, `idx` included.
-        if canvas.hasActiveTextSession {
-            canvas.commitTextSession()
-            return
-        }
-        // The session belongs to the text tool; entering it also drops any
-        // mask paint target and swaps the options bar over.
-        selectTool(.text)
-        openTextSession(layer: idx, selectAll: true)
-    }
-
-    /// Opens the on-canvas editor on text layer `idx`, restoring its
-    /// description into the options bar and the session. Shared by the
-    /// text-tool click and the layers panel's double-click.
-    private func openTextSession(layer idx: Int, selectAll: Bool) {
-        guard let document = document, let doc = document.doc,
-              let info = doc.layerInfo(idx), let payload = doc.textPayload(idx)
-        else {
-            NSSound.beep()
-            return
-        }
-        // Editing a layer makes it the active one (the commit replaces its
-        // content, and the panel should show what is being edited).
-        if document.activeLayerIndex != idx {
-            document.activeLayerIndex = idx
-            syncPaintTarget()
-            layersPanel.reload()
-            updateStatus()
-            updateActiveLayerRect()
-        }
-        // The options bar reflects what is being edited, and the session
-        // draws with those very parameters.
-        applyTextOptions(payload)
-        // Hide the layer's own raster underneath the session, or the old
-        // glyphs ghost behind every edit to the string. An already-hidden
-        // layer has nothing to hide: the pure op returns nil and the session
-        // runs over the unmodified canvas, which is correct.
-        canvas.previewImage = doc.withLayerVisible(idx, false)?.flattened()?.makeCGImage()
-        canvas.beginTextSession(
-            at: TextLayer.editorOrigin(
-                offsetX: info.offsetX, offsetY: info.offsetY, payload: payload),
-            string: payload.string, editingLayer: idx, selectAll: selectAll)
-    }
-
-    /// The topmost visible layer that carries a text description and whose
-    /// extent contains `point` (image pixel coordinates). Plain raster layers
-    /// above it do not block the hit.
-    private func topmostTextLayer(at point: CGPoint, in doc: RasterDocument) -> Int? {
-        for idx in stride(from: doc.layerCount - 1, through: 0, by: -1) {
-            guard let info = doc.layerInfo(idx), info.visible else { continue }
-            let rect = CGRect(
-                x: CGFloat(info.offsetX), y: CGFloat(info.offsetY),
-                width: CGFloat(info.width), height: CGFloat(info.height))
-            guard rect.contains(point), doc.textPayload(idx) != nil else { continue }
-            return idx
-        }
-        return nil
-    }
-
-    /// Restores a layer's text parameters into the options bar and the
-    /// canvas. The session deliberately draws with the description's OWN
-    /// face, so a family that is not installed here still previews exactly
-    /// what the re-render will produce.
-    private func applyTextOptions(_ payload: TextLayerPayload) {
-        let font = payload.nsFont
-        if let family = font.familyName,
-           NSFontManager.shared.availableFontFamilies.contains(family) {
-            fontFamily = family
-        }
-        fontSize = min(max(font.pointSize, 6), 500)
-        setPaintColor(payload.nsColor)
-        textAlignment = payload.nsAlignment
-        canvas.textFont = font
-        canvas.textAlignment = textAlignment
-        // The bar shows what is being edited; the persisted defaults follow.
-        // The payload renders at the family's regular face (its schema has
-        // no weight), so the stored weight resets too — otherwise the first
-        // options-bar edit would silently rebuild the session's font at
-        // whatever weight the user last painted NEW text with.
-        var text = ToolOptionsStore.shared.text
-        text.family = fontFamily
-        text.size = Double(fontSize)
-        text.alignmentIndex = Self.alignmentIndex(textAlignment)
-        text.weight = 5
-        ToolOptionsStore.shared.text = text
-        optionsBar.refreshValues()
-    }
-
-    /// Commits a text session: a NEW text layer above the active one, or the
-    /// re-render of the layer the session was editing. Both chain their
-    /// per-layer ops into a single document handle, so each is one undo step.
-    private func commitTextLayer(
-        _ payload: TextLayerPayload, origin: CGPoint, wrapWidth: CGFloat, editing: Int?
-    ) {
-        guard let document = document, let doc = document.doc,
-              let raster = TextLayer.render(payload, origin: origin, wrapWidth: wrapWidth),
-              let meta = payload.json()
-        else {
-            NSSound.beep()
-            return
-        }
-        let name = TextLayer.layerName(for: payload.string)
-
-        if let idx = editing, let info = doc.layerInfo(idx), let old = doc.textPayload(idx) {
-            // Opening a text layer and closing it unchanged (⌘Return, or a
-            // tool switch) must not register an undo step or dirty the file.
-            guard old != payload || info.offsetX != raster.offsetX
-                || info.offsetY != raster.offsetY || info.width != raster.width
-                || info.height != raster.height
-            else { return }
-            // The name follows the text only while it still IS the text: a
-            // name the user typed themselves survives the re-edit.
-            let nameFollowsText = info.name == TextLayer.layerName(for: old.string)
-            document.applyEdit("Edit Text Layer") { doc in
-                guard let filled = doc.withLayerPixels(
-                        idx, rgba: raster.pixels, width: raster.width, height: raster.height),
-                      let moved = filled.withLayerOffset(idx, raster.offsetX, raster.offsetY),
-                      let described = moved.withLayerMeta(idx, meta)
-                else { return nil }
-                guard nameFollowsText else { return described }
-                return described.withLayerName(idx, name) ?? described
-            }
-            // The active layer is unchanged, so the change notification alone
-            // refreshes the panel, the status bar and the layer boundary.
-            return
-        }
-
-        let below = document.activeLayerIndex
-        let before = document.doc
-        document.applyEdit("Add Text Layer") { doc in
-            // The core has no "layer from a buffer" constructor: add an empty
-            // layer, then give it the rendered pixels, its offset and its
-            // description — all pure, all in one handle.
-            let idx = below + 1
-            guard let added = doc.addingLayer(above: below, name: name),
-                  let filled = added.withLayerPixels(
-                    idx, rgba: raster.pixels, width: raster.width, height: raster.height),
-                  let moved = filled.withLayerOffset(idx, raster.offsetX, raster.offsetY)
-            else { return nil }
-            return moved.withLayerMeta(idx, meta)
-        }
-        guard document.doc !== before else { return }
-        // The active layer moves to the new text layer; any mask paint target
-        // goes with it.
-        setActiveLayer(min(below + 1, document.doc.layerCount - 1))
-    }
-
     // MARK: - Free Transform
 
     /// A modal free-transform session on ONE layer. The document is NOT
@@ -1142,7 +958,11 @@ final class EditorViewController: NSViewController {
             below: stack.below,
             above: stack.above,
             opacity: CGFloat(info.opacity),
-            transform: LayerTransform(pivot: CGPoint(x: rect.midX, y: rect.midY)),
+            // A described layer pivots on its description's exact centre
+            // (EditorViewController+DescribedTransform.swift), a raster on
+            // its rect's.
+            transform: LayerTransform(
+                pivot: doc.describedPivot(idx) ?? CGPoint(x: rect.midX, y: rect.midY)),
             sampler: transformSampler,
             drag: nil)
         updateOptionsBar()
@@ -1376,9 +1196,11 @@ final class EditorViewController: NSViewController {
     // MARK: Free Transform commit / cancel
 
     /// Runs the session's matrix through the core as ONE undo step named
-    /// "Transform Layer". Returns false when the commit did NOT happen and
-    /// the session must stay open: the core refused the matrix, or the user
-    /// cancelled the rasterize prompt.
+    /// "Transform Layer" — composed into a described layer's description
+    /// (no prompt) when the session is a plain affine, resampled otherwise.
+    /// Returns false when the commit did NOT happen and the session must
+    /// stay open: the core refused the matrix, or the user cancelled the
+    /// rasterize prompt.
     @discardableResult
     private func commitTransformSession() -> Bool {
         guard let session = transformSession, let document = document, let doc = document.doc
@@ -1393,19 +1215,40 @@ final class EditorViewController: NSViewController {
             return true
         }
         let idx = session.layer
-        // A free transform rewrites the pixels a described layer — text, a
-        // Live Photo frame — was rendered from. Same prompt as every other
-        // rasterizing edit, but taken here rather than through
-        // applyRasterizingEdit: Cancel has to keep the session open instead
-        // of abandoning the whole gesture.
         let describesSource = document.layerDescribesSource(idx)
-        if describesSource, !document.confirmRasterize(layer: idx) { return false }
-        let matrix = session.transform.matrix
         // A distorted box commits through the perspective op with its warped
         // corners; a plain affine keeps the matrix path and its lossless
         // exact forms.
         let quad = session.transform.hasCornerOffsets
             ? session.transform.warpedQuad(of: session.sourceRect) : nil
+        let matrix = session.transform.matrix
+        // An affine on a described layer — plain, or a warped box that is
+        // still a parallelogram — composes into the description and
+        // re-renders (EditorViewController+DescribedTransform.swift): no
+        // prompt. A true perspective quad, or a description that cannot
+        // render right now (a missing font, a Live Photo whose source will
+        // not decode), takes the rasterize prompt below as before —
+        // resampling the real pixels is what the prompt gates. Taken here
+        // rather than through applyRasterizingEdit: Cancel has to keep the
+        // session open instead of abandoning the whole gesture.
+        if describesSource {
+            isCommittingTransform = true
+            let outcome = commitDescribedTransform(
+                layer: idx, matrix: matrix, quad: quad, sampler: session.sampler)
+            isCommittingTransform = false
+            switch outcome {
+            case .committed:
+                endTransformSession()
+                return true
+            case .refused:
+                return false
+            case .unrenderable:
+                break
+            }
+        }
+        if describesSource,
+           !document.confirmRasterize(layer: idx, reason: document.unrenderableReason(layer: idx))
+        { return false }
         let sampler = session.sampler
         let before = document.doc
         isCommittingTransform = true
@@ -1507,8 +1350,7 @@ final class EditorViewController: NSViewController {
     /// whatever may have changed into the canvas and the status line.
     func toolOptionsEdited() {
         syncCanvasPaintState()
-        canvas.textFont = currentFont()
-        canvas.textAlignment = textAlignment
+        canvas.textStyle = currentTextStyle()
         canvas.updateActiveTextSessionStyle()
         toolRail?.foregroundSwatchColor = paintColor
         toolRail?.backgroundSwatchColor = backgroundColor
@@ -1644,7 +1486,7 @@ final class EditorViewController: NSViewController {
     // the left; the active tool and its key on the right. Layer name, blend
     // mode, opacity and the zoom percentage were deliberately dropped —
     // all visible in the Layers panel or the zoom pill.
-    private func updateStatus() {
+    func updateStatus() {
         guard let document = document, let doc = document.doc else {
             statusDims.text = "No document open"
             statusMode.text = ""
@@ -1676,7 +1518,7 @@ final class EditorViewController: NSViewController {
     /// Pushes the active layer's extent (image-pixel coordinates) to the
     /// canvas, which shows the boundary while a paint tool is active and
     /// the layer doesn't cover the whole canvas.
-    private func updateActiveLayerRect() {
+    func updateActiveLayerRect() {
         guard let document = document, let doc = document.doc,
               let info = doc.layerInfo(document.activeLayerIndex)
         else {
@@ -1740,24 +1582,31 @@ final class EditorViewController: NSViewController {
         document.applyToActiveLayer(actionName, op)
     }
 
+    // Whole-document geometry goes through applyingDocumentGeometry
+    // (DescribedLayerGeometry.swift), which composes the op into every text,
+    // shape and Live Photo description so a later re-edit lands in place.
     @objc func rotateCW(_ sender: Any?) {
-        performEdit("Rotate 90° CW") { $0.rotated90() }
+        performGeometry(.rotate90)
     }
 
     @objc func rotateCCW(_ sender: Any?) {
-        performEdit("Rotate 90° CCW") { $0.rotated270() }
+        performGeometry(.rotate270)
     }
 
     @objc func rotate180(_ sender: Any?) {
-        performEdit("Rotate 180°") { $0.rotated180() }
+        performGeometry(.rotate180)
     }
 
     @objc func flipH(_ sender: Any?) {
-        performEdit("Flip Horizontal") { $0.flippedH() }
+        performGeometry(.flipHorizontal)
     }
 
     @objc func flipV(_ sender: Any?) {
-        performEdit("Flip Vertical") { $0.flippedV() }
+        performGeometry(.flipVertical)
+    }
+
+    private func performGeometry(_ op: DocumentGeometry) {
+        performEdit(op.actionName) { $0.applyingDocumentGeometry(op) }
     }
 
     @objc func cropToSelection(_ sender: Any?) {

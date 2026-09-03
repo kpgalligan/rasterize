@@ -124,17 +124,103 @@ struct ShapeToolOptions: Codable, Equatable {
     var pathOpIndex = 0
 }
 
+/// The text tool's typography. Every field is what `TextStyle` (TextLayer.swift)
+/// renders with, so a value here is exactly what the next commit writes into
+/// the layer's description; `EditorViewController.currentTextStyle()` reads
+/// them and `applyTextOptions` writes a reopened layer's back.
 struct TextToolOptions: Codable, Equatable {
     var family = "Helvetica Neue"
-    /// NSFontManager weight for the family (5 regular … 9 bold);
-    /// the popup maps its rows onto these.
+    /// NSFontManager weight for the family (0…15: 3 light, 5 regular,
+    /// 6 medium, 8 semibold, 9 bold); the popup maps its rows onto these.
     var weight = 5
     var size: Double = 48
+    /// Extra spacing between glyphs in px (the `.kern` attribute, so it
+    /// changes line breaks); 0 = the font's own spacing, negative tightens.
     var tracking: Double = 0
     /// 0 left, 1 center, 2 right.
     var alignmentIndex = 0
+    /// Line height in pt, baseline to baseline: 0 = the font's natural
+    /// height, otherwise every line is pinned to exactly this height
+    /// (`TextStyle.leading` — the options bar's "Leading … pt" field).
     var leading: Double = 0
+    /// Baseline shift in px; positive raises the glyphs (`.baselineOffset`).
     var baselineShift: Double = 0
+    var italic = false
+    var underline = false
+    var strikethrough = false
+
+    /// Spelled out so the key names stay the property names a blob saved
+    /// before the three toggles existed was written with.
+    enum CodingKeys: String, CodingKey {
+        case family, weight, size, tracking, alignmentIndex, leading, baselineShift
+        case italic, underline, strikethrough
+    }
+
+    /// The options bar's ranges for the numeric typography — the ONE home
+    /// the bar's fields, the agent's `weight` / `tracking` / `leading` /
+    /// `baseline_shift` arguments and the restore of a reopened layer's
+    /// description all read, so agent and UI accept the same values and the
+    /// store never holds one the bar cannot express.
+    static let weightRange = 0...15
+    static let trackingRange: ClosedRange<Double> = -100...100
+    static let leadingRange: ClosedRange<Double> = 0...1000
+    static let baselineShiftRange: ClosedRange<Double> = -100...100
+
+    /// The typography clamped into those ranges, a non-finite number
+    /// falling back to its default. `applyTextOptions` stores a reopened
+    /// layer's description through this: `TextLayerPayload.decode` accepts
+    /// any finite tracking, leading or shift, and a `.rz` from elsewhere
+    /// can carry one the bar cannot express — left in the store it would
+    /// type every NEW session with it (a tracking of a million lays each
+    /// glyph on its own line and pushes the commit past the pixel cap)
+    /// until the field was reset by hand. `currentTextStyle` reads the
+    /// store through it too, so a hand-edited defaults blob is bounded the
+    /// same way. The reopened SESSION itself still previews the layer's own
+    /// values (`canvas.textStyle`), so what it shows is what the layer
+    /// renders and an unchanged ⌘Return registers no edit.
+    func clampingTypography() -> TextToolOptions {
+        var clamped = self
+        clamped.weight = min(max(weight, Self.weightRange.lowerBound), Self.weightRange.upperBound)
+        clamped.tracking = Self.clamp(tracking, to: Self.trackingRange, default: 0)
+        clamped.leading = Self.clamp(leading, to: Self.leadingRange, default: 0)
+        clamped.baselineShift = Self.clamp(baselineShift, to: Self.baselineShiftRange, default: 0)
+        return clamped
+    }
+
+    private static func clamp(
+        _ value: Double, to range: ClosedRange<Double>, default fallback: Double
+    ) -> Double {
+        guard value.isFinite else { return fallback }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
+extension TextToolOptions {
+    /// Every key optional, so a blob saved before a field existed keeps the
+    /// user's family, size and weight: the synthesized decoder throws on the
+    /// first missing key and `ToolOptionsStore.load` would then drop the
+    /// whole blob back to defaults (which is what every earlier field
+    /// addition did). Declared in an extension so the struct keeps its
+    /// implicit `init()`.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = TextToolOptions()
+        family = try container.decodeIfPresent(String.self, forKey: .family) ?? defaults.family
+        weight = try container.decodeIfPresent(Int.self, forKey: .weight) ?? defaults.weight
+        size = try container.decodeIfPresent(Double.self, forKey: .size) ?? defaults.size
+        tracking = try container.decodeIfPresent(Double.self, forKey: .tracking)
+            ?? defaults.tracking
+        alignmentIndex = try container.decodeIfPresent(Int.self, forKey: .alignmentIndex)
+            ?? defaults.alignmentIndex
+        leading = try container.decodeIfPresent(Double.self, forKey: .leading) ?? defaults.leading
+        baselineShift = try container.decodeIfPresent(Double.self, forKey: .baselineShift)
+            ?? defaults.baselineShift
+        italic = try container.decodeIfPresent(Bool.self, forKey: .italic) ?? defaults.italic
+        underline = try container.decodeIfPresent(Bool.self, forKey: .underline)
+            ?? defaults.underline
+        strikethrough = try container.decodeIfPresent(Bool.self, forKey: .strikethrough)
+            ?? defaults.strikethrough
+    }
 }
 
 struct SampleToolOptions: Codable, Equatable {

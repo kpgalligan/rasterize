@@ -8,35 +8,41 @@ import AppKit
 /// FFI.
 ///
 /// Geometry is layer-LOCAL, deliberately: the payload stores only the shape
-/// box's SIZE (`w` × `h`) and styling, never a canvas position. Where the
-/// shape sits on the canvas is the layer's offset, like every other layer —
-/// which is what lets the Move tool move a shape layer without invalidating
-/// its description, and keeps the description true after any offset-only
-/// edit.
+/// box's SIZE (`w` × `h`), its styling and its 2×2 `transform`, never a
+/// canvas position. Where the shape sits on the canvas is the layer's offset
+/// (the anchor rule in DescribedLayer.swift: the box's top-left is the
+/// source origin), like every other layer — which is what lets the Move tool
+/// move a shape layer without invalidating its description, and keeps the
+/// description true after any offset-only edit.
 ///
-/// JSON shape: `{"type":"shape","version":1,"kind":"rect"|"ellipse"|"line",
-/// "w":…,"h":…,"flipped":bool?,"fill":"#RRGGBBAA"|"","stroke":"#RRGGBBAA"|"",
-/// "strokeWidth":…,"radius":…}`. `flipped` is additive and optional — a
-/// payload without it decodes as false, so the version does not bump;
-/// encoding always writes it.
+/// JSON shape, version 1: `{"type":"shape","version":1,"kind":"rect"|
+/// "ellipse"|"line","w":…,"h":…,"flipped":bool?,"fill":"#RRGGBBAA"|"",
+/// "stroke":"#RRGGBBAA"|"","strokeWidth":…,"radius":…}`. `flipped` is
+/// additive and optional (missing = false). Version 2 adds `transform`
+/// (`[a, b, c, d]`, row-major: x′ = a·x + b·y, y′ = c·x + d·y — see
+/// `LinearMap`) and
+/// `origin_frac` (`[fx, fy]`), and is written only when either is off its
+/// default; a version-1 payload decodes as the identity, so untransformed
+/// layers keep opening as shapes in older builds.
 struct ShapeLayerPayload: Codable, Equatable {
     /// The only `type` this app understands; anything else (or nothing) means
     /// the layer's metadata was written by something that is not a shape
     /// layer, and the layer is a plain raster layer.
     static let typeName = "shape"
-    /// The only `version` this app understands. A future schema change bumps
-    /// it, and older builds then read those layers as plain rasters — the
-    /// graceful degradation the format is designed for.
-    static let currentVersion = 1
+    /// The newest schema this app writes; older builds read layers at it as
+    /// plain rasters — the graceful degradation the format is designed for.
+    static let currentVersion = 2
+    /// The schema written when the transform is the identity and the anchor
+    /// is whole-pixel.
+    static let legacyVersion = 1
     /// The values `kind` may take.
     static let kinds = ["rect", "ellipse", "line"]
 
-    var type: String
-    var version: Int
     /// "rect" | "ellipse" | "line".
     var kind: String
     /// Shape box size in pixels — the SHAPE's box, not the raster's (the
-    /// raster is the box plus `ShapeLayer.padding(for:)` on every side).
+    /// raster is the box plus `ShapeLayer.padding(for:)` on every side,
+    /// mapped through the transform).
     var w: Double
     var h: Double
     /// Line only: false = the line runs from the box's top-left to its
@@ -47,13 +53,20 @@ struct ShapeLayerPayload: Codable, Equatable {
     var fill: String
     /// sRGB straight alpha, "#RRGGBBAA"; "" = no stroke.
     var stroke: String
-    /// Stroke width in pixels, centered on the path.
+    /// Stroke width in pixels, centered on the path (in SOURCE space: a
+    /// scaling transform scales it too).
     var strokeWidth: Double
     /// Rect corner radius in pixels; ignored by ellipse/line.
     var radius: Double
+    /// The 2×2 linear part of the layer's placement (DescribedLayer.swift).
+    var transform: LinearMap = .identity
+    /// The fraction of the anchor, each component in [0, 1); written only
+    /// by the described-layer commit ops, never by a caller.
+    var originFraction: CGPoint = .zero
 
     enum CodingKeys: String, CodingKey {
-        case type, version, kind, w, h, flipped, fill, stroke, strokeWidth, radius
+        case type, version, kind, w, h, flipped, fill, stroke, strokeWidth, radius, transform
+        case originFraction = "origin_frac"
     }
 
     /// Builds a payload with canonical bytes: `fill` is forced to "" for
@@ -62,10 +75,9 @@ struct ShapeLayerPayload: Codable, Equatable {
     /// ignores.
     init(
         kind: String, w: Double, h: Double, flipped: Bool = false,
-        fill: NSColor?, stroke: NSColor?, strokeWidth: Double, radius: Double = 0
+        fill: NSColor?, stroke: NSColor?, strokeWidth: Double, radius: Double = 0,
+        transform: LinearMap = .identity
     ) {
-        self.type = Self.typeName
-        self.version = Self.currentVersion
         self.kind = kind
         self.w = w
         self.h = h
@@ -75,15 +87,22 @@ struct ShapeLayerPayload: Codable, Equatable {
         self.stroke = stroke.map { TextLayer.hex($0) } ?? ""
         self.strokeWidth = strokeWidth
         self.radius = kind == "rect" ? radius : 0
+        self.transform = transform
     }
 
-    /// Custom decoding only so a MISSING `flipped` (every payload written
-    /// before the field existed) reads as false; everything else is the
-    /// synthesized behavior. Encoding stays synthesized and always writes it.
+    /// Decoding validates `type` and `version` (neither is stored: encoding
+    /// writes them back); a missing `flipped`, `transform` or `origin_frac`
+    /// reads as its default, a malformed one throws — `decode` turns every
+    /// throw into "not a shape layer".
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        type = try container.decode(String.self, forKey: .type)
-        version = try container.decode(Int.self, forKey: .version)
+        let type = try container.decode(String.self, forKey: .type)
+        let version = try container.decode(Int.self, forKey: .version)
+        guard type == Self.typeName, version == Self.legacyVersion || version == Self.currentVersion
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .version, in: container, debugDescription: "not a shape payload")
+        }
         kind = try container.decode(String.self, forKey: .kind)
         w = try container.decode(Double.self, forKey: .w)
         h = try container.decode(Double.self, forKey: .h)
@@ -92,6 +111,45 @@ struct ShapeLayerPayload: Codable, Equatable {
         stroke = try container.decode(String.self, forKey: .stroke)
         strokeWidth = try container.decode(Double.self, forKey: .strokeWidth)
         radius = try container.decode(Double.self, forKey: .radius)
+        if let elements = try container.decodeIfPresent([Double].self, forKey: .transform) {
+            guard let map = LinearMap(array: elements) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .transform, in: container, debugDescription: "malformed transform")
+            }
+            transform = map
+        }
+        if let pair = try container.decodeIfPresent([Double].self, forKey: .originFraction) {
+            guard let frac = TextLayer.originFraction(from: pair) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .originFraction, in: container,
+                    debugDescription: "malformed origin_frac")
+            }
+            originFraction = frac
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(Self.typeName, forKey: .type)
+        let legacy = isLegacyEncodable
+        try container.encode(legacy ? Self.legacyVersion : Self.currentVersion, forKey: .version)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(w, forKey: .w)
+        try container.encode(h, forKey: .h)
+        try container.encode(flipped, forKey: .flipped)
+        try container.encode(fill, forKey: .fill)
+        try container.encode(stroke, forKey: .stroke)
+        try container.encode(strokeWidth, forKey: .strokeWidth)
+        try container.encode(radius, forKey: .radius)
+        guard !legacy else { return }
+        try container.encode(transform.array, forKey: .transform)
+        try container.encode(TextLayer.originFractionArray(originFraction), forKey: .originFraction)
+    }
+
+    /// True when the transform is the identity and the anchor whole-pixel,
+    /// so the payload can be written as version 1.
+    var isLegacyEncodable: Bool {
+        transform.isIdentity && originFraction == .zero
     }
 
     /// The fill as a color, or nil when the shape has none ("" or an
@@ -103,6 +161,12 @@ struct ShapeLayerPayload: Codable, Equatable {
     /// The stroke as a color, or nil when the shape has none.
     var strokeColor: NSColor? {
         stroke.isEmpty ? nil : TextLayer.color(fromHex: stroke)
+    }
+
+    func withOriginFraction(_ frac: CGPoint) -> ShapeLayerPayload {
+        var updated = self
+        updated.originFraction = frac
+        return updated
     }
 
     /// The JSON to store as the layer's metadata; nil only if the payload
@@ -117,9 +181,10 @@ struct ShapeLayerPayload: Codable, Equatable {
 
     /// Strict, non-throwing decode: malformed JSON, a missing or unknown
     /// `type`, an unsupported `version`, an unknown `kind`, a non-finite or
-    /// negative measurement, an unparseable color, an all-empty paint, or a
-    /// size the kind cannot render all mean "this is a plain raster layer",
-    /// never an error and never a crash.
+    /// negative measurement, an unparseable color, an all-empty paint, a
+    /// size the kind cannot render, a singular transform or an out-of-range
+    /// fraction all mean "this is a plain raster layer", never an error and
+    /// never a crash.
     ///
     /// Per-kind floors: rect/ellipse need a box at least 1 px each way; a
     /// line needs at least one axis ≥ 1 px (an axis-aligned line has a zero
@@ -128,8 +193,6 @@ struct ShapeLayerPayload: Codable, Equatable {
     static func decode(_ json: String) -> ShapeLayerPayload? {
         guard let data = json.data(using: .utf8),
               let payload = try? JSONDecoder().decode(ShapeLayerPayload.self, from: data),
-              payload.type == typeName,
-              payload.version == currentVersion,
               kinds.contains(payload.kind),
               payload.w.isFinite, payload.w >= 0,
               payload.h.isFinite, payload.h >= 0,
@@ -137,7 +200,9 @@ struct ShapeLayerPayload: Codable, Equatable {
               payload.radius.isFinite, payload.radius >= 0,
               payload.fill.isEmpty || TextLayer.color(fromHex: payload.fill) != nil,
               payload.stroke.isEmpty || TextLayer.color(fromHex: payload.stroke) != nil,
-              !payload.fill.isEmpty || !payload.stroke.isEmpty
+              !payload.fill.isEmpty || !payload.stroke.isEmpty,
+              payload.transform.isInvertible,
+              TextLayer.isValidFraction(payload.originFraction)
         else { return nil }
         if payload.kind == "line" {
             guard max(payload.w, payload.h) >= 1, payload.strokeWidth >= 1,
@@ -150,41 +215,45 @@ struct ShapeLayerPayload: Codable, Equatable {
     }
 }
 
-/// A rendered shape layer: a TIGHT straight-alpha RGBA8 raster (row 0 = top,
-/// exactly `width * height * 4` bytes) plus the padding the renderer added
-/// around the shape box.
-struct ShapeLayerRaster {
-    let pixels: [UInt8]
-    let width: Int
-    let height: Int
-    /// Padding added around the shape box on every side; the caller places
-    /// the layer at (shapeOrigin − padding) so the shape lands where drawn.
-    let padding: Int
-}
-
 /// Rendering and naming for shape layers — the one entry point both the shape
 /// tools and the agent use, so a layer committed either way looks the same.
 enum ShapeLayer {
     // MARK: - Rendering
 
-    /// Rasterizes `payload` tightly: the shape box drawn at `padding(for:)`
-    /// inside a raster of `ceil(w) + 2·pad` × `ceil(h) + 2·pad`.
+    /// The padded source rect (DescribedLayer.swift): the box `(0, 0, w, h)`
+    /// inset by −`padding(for:)` on every side.
+    static func sourceRect(_ payload: ShapeLayerPayload) -> CGRect {
+        let pad = CGFloat(padding(for: payload))
+        return CGRect(x: 0, y: 0, width: CGFloat(payload.w), height: CGFloat(payload.h))
+            .insetBy(dx: -pad, dy: -pad)
+    }
+
+    /// Rasterizes `payload` with its box's top-left at `anchor` (canvas
+    /// space) through its transform, tightly: the raster is the
+    /// outward-rounded box of the padded source rect under the map
+    /// (`LinearMap.rasterRect`), the path drawn under the CTM — pure
+    /// CoreGraphics, safe off the main thread — and the offset is
+    /// `floor(anchor) + rect.origin`. Under the identity this is the
+    /// pre-transform raster: the box drawn at `padding(for:)` inside
+    /// `ceil(w) + 2·pad` × `ceil(h) + 2·pad`.
     ///
     /// Rect: a rounded-rect path over the box, radius clamped to half the
     /// shorter side (0 = square corners). Ellipse: the ellipse inscribed in
     /// the box. Both fill first, then stroke centered on the same path. Line:
     /// a single round-capped segment across the box's diagonal — top-left to
     /// bottom-right, or bottom-left to top-right when `flipped` — stroke
-    /// only.
+    /// only. The stroke width is a SOURCE-space width, so a scaling map
+    /// scales it — exactly what the re-edit overlay previews.
     ///
     /// nil for a payload `decode` would refuse (degenerate size for the kind,
-    /// nothing visible to paint — a stroke of width 0 counts as nothing) or
-    /// a raster beyond the core's pixel cap.
-    static func render(_ payload: ShapeLayerPayload) -> ShapeLayerRaster? {
+    /// nothing visible to paint — a stroke of width 0 counts as nothing), a
+    /// non-finite anchor, or a raster beyond the core's pixel cap.
+    static func render(_ payload: ShapeLayerPayload, anchor: CGPoint) -> DescribedRaster? {
         guard ShapeLayerPayload.kinds.contains(payload.kind),
               payload.w.isFinite, payload.w >= 0, payload.w <= 1e7,
               payload.h.isFinite, payload.h >= 0, payload.h <= 1e7,
-              payload.strokeWidth.isFinite, payload.strokeWidth >= 0
+              payload.strokeWidth.isFinite, payload.strokeWidth >= 0,
+              anchor.x.isFinite, anchor.y.isFinite, abs(anchor.x) < 1e7, abs(anchor.y) < 1e7
         else { return nil }
         let fillColor = payload.fillColor
         // A stroke needs both a color and a width to put ink down; treating
@@ -200,31 +269,18 @@ enum ShapeLayer {
             else { return nil }
         }
 
-        let pad = padding(for: payload)
-        let width = Int(ceil(payload.w)) + 2 * pad
-        let height = Int(ceil(payload.h)) + 2 * pad
-        guard width * height <= RasterImage.maxResizePixels else { return nil }
+        let frac = DescribedLayer.anchorFraction(anchor)
+        guard let rect = payload.transform.rasterRect(of: sourceRect(payload), fraction: frac)
+        else { return nil }
 
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        let drawn = pixels.withUnsafeMutableBufferPointer { buffer -> Bool in
-            // CoreGraphics renders only into PREMULTIPLIED buffers; the
-            // straight-alpha conversion happens below.
-            guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-                  let context = CGContext(
-                    data: buffer.baseAddress,
-                    width: width,
-                    height: height,
-                    bitsPerComponent: 8,
-                    bytesPerRow: width * 4,
-                    space: colorSpace,
-                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-            else { return false }
-            // Flip so raster row 0 is the top row, as everywhere else.
-            context.translateBy(x: 0, y: CGFloat(height))
-            context.scaleBy(x: 1, y: -1)
-            let box = CGRect(
-                x: CGFloat(pad), y: CGFloat(pad),
-                width: CGFloat(payload.w), height: CGFloat(payload.h))
+        let pixels = Bitmap.renderStraightRGBA(width: rect.width, height: rect.height) { context in
+            // Source space → raster: the anchor's fraction, less the rect's
+            // origin (relative to the anchor's whole part), after the map.
+            context.translateBy(
+                x: frac.x - CGFloat(rect.originX), y: frac.y - CGFloat(rect.originY))
+            context.concatenate(payload.transform.cgAffine)
+            context.setShouldAntialias(true)
+            let box = CGRect(x: 0, y: 0, width: CGFloat(payload.w), height: CGFloat(payload.h))
             switch payload.kind {
             case "line":
                 guard let stroke = strokeColor else { return false }
@@ -266,9 +322,11 @@ enum ShapeLayer {
             }
             return true
         }
-        guard drawn else { return nil }
-        Bitmap.unpremultiply(&pixels)
-        return ShapeLayerRaster(pixels: pixels, width: width, height: height, padding: pad)
+        guard let pixels = pixels else { return nil }
+        return DescribedRaster(
+            pixels: pixels, width: rect.width, height: rect.height,
+            offsetX: Int(anchor.x.rounded(.down)) + rect.originX,
+            offsetY: Int(anchor.y.rounded(.down)) + rect.originY)
     }
 
     /// Slack kept around the shape box, in pixels: the stroke is centered on
@@ -281,25 +339,27 @@ enum ShapeLayer {
         return min(max(slack, 2), 128)
     }
 
-    // MARK: - Naming
+    // MARK: - Naming and prompts
 
-    /// The layer name a shape gets, from its kind alone — a shape's styling
-    /// makes a poor label, its kind a good one.
     /// Asks whether a destructive edit may drop a layer's shape
     /// description. App-modal for the same reason TextLayer's is: the
     /// asking edit paths are synchronous.
-    static func confirmRasterize(layerName: String) -> Bool {
+    static func confirmRasterize(layerName: String, reason: String? = nil) -> Bool {
         let alert = NSAlert()
         alert.messageText = "Rasterize shape layer?"
-        alert.informativeText =
+        var text =
             "This edit paints over “\(layerName)”, so the layer will no longer be editable "
-            + "as a shape: the kind, size, fill, stroke and radius it was rendered from "
-            + "are dropped. The pixels themselves are kept."
+            + "as a shape: the description it was rendered from (its kind, box, styling and "
+            + "transform) is dropped. The pixels themselves are kept."
+        if let reason = reason { text += "\n\n" + reason }
+        alert.informativeText = text
         alert.addButton(withTitle: "Rasterize")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    /// The layer name a shape gets, from its kind alone — a shape's styling
+    /// makes a poor label, its kind a good one.
     static func layerName(for payload: ShapeLayerPayload) -> String {
         switch payload.kind {
         case "ellipse": return "Ellipse"

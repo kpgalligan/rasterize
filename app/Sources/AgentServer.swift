@@ -156,9 +156,9 @@ final class AgentServer {
         // Retouch strokes (AgentServer+Retouch.swift)
         "clone_stamp": { $0.cloneStamp },
         "dodge_burn": { $0.dodgeBurn },
-        // Text layers
-        "add_text_layer": addTextLayer,
-        "edit_text_layer": editTextLayer,
+        // Text layers (AgentServer+Text.swift)
+        "add_text_layer": { $0.addTextLayer },
+        "edit_text_layer": { $0.editTextLayer },
         // Shape layers (AgentServer+Shapes.swift)
         "add_shape_layer": { $0.addShapeLayer },
         "edit_shape_layer": { $0.editShapeLayer },
@@ -344,16 +344,11 @@ final class AgentServer {
                 "clipped": doc.layerClipped(index),
             ]
             // A TEXT LAYER also carries the description its pixels were
-            // rendered from; only those layers can be re-rendered with
-            // edit_text_layer, and the key's absence says "plain raster".
+            // rendered from (typography, transform and origin included);
+            // only those layers can be re-rendered with edit_text_layer, and
+            // the key's absence says "plain raster".
             if let payload = doc.textPayload(index) {
-                layer["text"] = [
-                    "string": payload.string,
-                    "font": payload.font,
-                    "size": payload.size,
-                    "color": payload.color,
-                    "alignment": payload.alignment,
-                ]
+                layer["text"] = Self.textFields(payload, anchor: doc.describedAnchor(index))
             }
             // An ADJUSTMENT layer recolors everything below it while
             // compositing and its own pixels are ignored (the core's parse
@@ -365,24 +360,15 @@ final class AgentServer {
                 layer["adjustment"] = ["op": payload.op, "params": payload.params]
             }
             // A SHAPE layer carries the parametric description its pixels
-            // were rendered from (position is the layer's offset).
+            // were rendered from (position is its origin).
             if let payload = doc.shapePayload(index) {
-                var shape: [String: Any] = [
-                    "kind": payload.kind,
-                    "w": payload.w,
-                    "h": payload.h,
-                    "fill": payload.fill,
-                    "stroke": payload.stroke,
-                    "stroke_width": payload.strokeWidth,
-                ]
-                if payload.kind == "rect" { shape["radius"] = payload.radius }
-                if payload.kind == "line" { shape["flipped"] = payload.flipped }
-                layer["shape"] = shape
+                layer["shape"] = Self.shapeFields(payload, anchor: doc.describedAnchor(index))
             }
             // A LIVE PHOTO layer shows one frame of a clip and remembers
             // which; those are the layers set_live_photo_frame can re-render.
             if let payload = doc.livePhotoPayload(index) {
-                layer["live_photo"] = Self.livePhotoFields(payload)
+                layer["live_photo"] = Self.livePhotoFields(
+                    payload, anchor: doc.describedAnchor(index))
             }
             // A STYLED layer reports its full style object (the canonical
             // JSON set_layer_style takes back).
@@ -525,9 +511,11 @@ final class AgentServer {
 
     /// performGroupedEdit for an edit that REWRITES A LAYER'S PIXELS — a brush or
     /// eraser stroke on the layer itself, a fill, a gradient, add_text, a
-    /// filter or an adjustment. Those pixels stop being the rendering of a
-    /// text layer's description, so the description is DROPPED inside the
-    /// same edit (one undo step, one handle), and the caller tells the model.
+    /// filter, an adjustment, or a transform that could not compose into the
+    /// layer's description. Those pixels stop being the rendering of a
+    /// described layer's description, so the description is DROPPED inside
+    /// the same edit (one undo step, one handle), and the caller tells the
+    /// model.
     ///
     /// The UI asks the user first (ImageDocument.applyRasterizingEdit), but
     /// the agent must never: a modal alert on this dispatched-to-main path
@@ -552,48 +540,54 @@ final class AgentServer {
         return dropped
     }
 
-    /// The kind of description layer `idx` carries, or nil for plain pixels
-    /// (the app-side mirror of ImageDocument.layerDescribesSource).
-    private static func description(
+    /// The kind of description layer `idx` carries — by the `type` its meta
+    /// claims, whatever the payload version, so an undecodable description
+    /// is dropped rather than left stale — or nil for plain pixels (the
+    /// app-side mirror of ImageDocument.layerDescribesSource).
+    static func description(
         of document: ImageDocument, layer idx: Int
     ) -> DroppedDescription? {
         guard let doc = document.doc else { return nil }
-        if doc.textPayload(idx) != nil { return .text }
-        if doc.shapePayload(idx) != nil { return .shape }
-        if doc.livePhotoPayload(idx) != nil { return .livePhoto }
-        return nil
+        return LayerDescription.claimedKind(of: doc.layerMeta(idx)).map(DroppedDescription.init)
     }
 
     /// A pixel-edit result, with the rasterization report appended when the
-    /// edit dropped a layer's description.
+    /// edit dropped a layer's description; `reason` says WHY this edit had
+    /// to rasterize when that is not obvious (a transform on a text layer
+    /// whose family is not installed here).
     func pixelEditResult(
-        _ fields: [String: Any], layer: Int, rasterized: DroppedDescription?
+        _ fields: [String: Any], layer: Int, rasterized: DroppedDescription?,
+        reason: String? = nil
     ) throws -> String {
         var result = fields
+        var note: String?
         switch rasterized {
         case .text:
             result["rasterized_text"] = true
-            result["note"] =
+            note =
                 "This edit painted over layer \(layer)'s pixels, so the layer is no longer "
-                + "editable as text: the string, font, size, color and alignment it was "
-                + "rendered from were dropped and edit_text_layer no longer works on it. The "
-                + "pixels are intact; undo restores the text layer."
+                + "editable as text: the description it was rendered from (its text, "
+                + "typography and transform) was dropped and edit_text_layer no longer works "
+                + "on it. The pixels are intact; undo restores the text layer."
         case .shape:
             result["rasterized_shape"] = true
-            result["note"] =
+            note =
                 "This edit painted over layer \(layer)'s pixels, so the layer is no longer "
-                + "editable as a shape: the kind, size, fill, stroke and radius it was "
-                + "rendered from were dropped. The pixels are intact; undo restores the "
-                + "shape layer."
+                + "editable as a shape: the description it was rendered from (its kind, box, "
+                + "styling and transform) was dropped. The pixels are intact; undo restores "
+                + "the shape layer."
         case .livePhoto:
             result["rasterized_live_photo"] = true
-            result["note"] =
+            note =
                 "This edit painted over layer \(layer)'s pixels, so the layer is no longer "
-                + "linked to its Live Photo: the clip, the moment it was showing and "
-                + "set_live_photo_frame are gone from it. The pixels are intact; undo "
-                + "restores the link."
+                + "linked to its Live Photo: the clip, the moment it was showing, its "
+                + "transform and set_live_photo_frame are gone from it. The pixels are "
+                + "intact; undo restores the link."
         case nil:
             break
+        }
+        if let note = note {
+            result["note"] = reason.map { note + " " + $0 } ?? note
         }
         return try jsonResult(result)
     }
@@ -875,10 +869,13 @@ final class AgentServer {
         }
 
         // The pivot: a named corner of the layer's CURRENT bounds, overridden
-        // per axis by an explicit canvas coordinate.
+        // per axis by an explicit canvas coordinate. A described layer's
+        // centre is its description's exact centre — the UI session's too
+        // (EditorViewController+DescribedTransform.swift) — so a rotate and
+        // a rotate-back share the pivot and return the anchor exactly.
         let anchor: CGPoint
         switch stringArg(a, "around") ?? "center" {
-        case "center": anchor = CGPoint(x: rect.midX, y: rect.midY)
+        case "center": anchor = doc.describedPivot(index) ?? CGPoint(x: rect.midX, y: rect.midY)
         case "top_left": anchor = CGPoint(x: rect.minX, y: rect.minY)
         case let other:
             throw ToolError(
@@ -951,10 +948,30 @@ final class AgentServer {
                     + "away from 0.")
         }
 
-        // performPixelEdit is the pixel-rewrite chokepoint: a transform
-        // resamples the pixels a described layer was rendered from, so the
-        // description is dropped in the SAME edit (one undo step) and
-        // reported back — the agent must never raise the UI's modal prompt.
+        let applied: [String: Any] = [
+            "rotate": Self.transformNumber(transform.degrees),
+            "scale_x": Self.transformNumber(Double(transform.scaleX)),
+            "scale_y": Self.transformNumber(Double(transform.scaleY)),
+            "translate_x": Self.transformNumber(translateX ?? 0),
+            "translate_y": Self.transformNumber(translateY ?? 0),
+            "pivot_x": Self.transformNumber(Double(pivot.x)),
+            "pivot_y": Self.transformNumber(Double(pivot.y)),
+            "sampler": sampler.name,
+        ]
+        // A described layer composes the matrix into its description and
+        // re-renders (AgentServer+Distort.swift); nil means it did not (no
+        // description, its source cannot render, or the composition was
+        // refused) and the rasterizing path below applies and reports as
+        // before.
+        if let composed = try transformDescribedLayer(
+            document, layer: index, matrix: matrix, sampler: sampler, applied: applied) {
+            return composed
+        }
+        // performPixelEdit is the pixel-rewrite chokepoint: a transform that
+        // did not compose resamples the pixels a described layer was
+        // rendered from, so the description is dropped in the SAME edit (one
+        // undo step) and reported back — the agent must never raise the UI's
+        // modal prompt.
         let rasterized: DroppedDescription?
         do {
             rasterized = try performPixelEdit(
@@ -983,17 +1000,9 @@ final class AgentServer {
                     "x": after?.offsetX ?? 0, "y": after?.offsetY ?? 0,
                     "width": after?.width ?? 0, "height": after?.height ?? 0,
                 ],
-                "applied": [
-                    "rotate": Self.transformNumber(transform.degrees),
-                    "scale_x": Self.transformNumber(Double(transform.scaleX)),
-                    "scale_y": Self.transformNumber(Double(transform.scaleY)),
-                    "translate_x": Self.transformNumber(translateX ?? 0),
-                    "translate_y": Self.transformNumber(translateY ?? 0),
-                    "pivot_x": Self.transformNumber(Double(pivot.x)),
-                    "pivot_y": Self.transformNumber(Double(pivot.y)),
-                    "sampler": sampler.name,
-                ],
-            ], layer: index, rasterized: rasterized)
+                "applied": applied,
+            ], layer: index, rasterized: rasterized,
+            reason: Self.unrenderableReason(document, layer: index, before: doc))
     }
 
     // MARK: - Filters and geometry
@@ -1408,7 +1417,7 @@ final class AgentServer {
     }
 
     /// Hex color: #RGB, #RRGGBB, or #RRGGBBAA ('#' optional).
-    private func parseColor(_ a: [String: Any], _ key: String, fallback: NSColor) throws
+    func parseColor(_ a: [String: Any], _ key: String, fallback: NSColor) throws
         -> NSColor
     {
         guard var hex = stringArg(a, key)?.trimmingCharacters(in: .whitespaces) else {
@@ -1622,201 +1631,6 @@ final class AgentServer {
                     "height": Int(measured.height.rounded(.up)),
                 ],
             ], layer: layer, rasterized: rasterized)
-    }
-
-    // MARK: - Text layers
-
-    /// The family a text layer defaults to: the one the text tool's options
-    /// bar starts on, so an agent-made layer looks like a hand-made one.
-    /// Falls back to the system font's family when it is not installed.
-    private static let defaultTextFamily: String = {
-        let preferred = "Helvetica Neue"
-        if NSFontManager.shared.availableFontFamilies.contains(preferred) { return preferred }
-        return NSFont.systemFont(ofSize: 12).familyName ?? preferred
-    }()
-
-    /// The `font` argument of the text-layer tools: an installed font
-    /// FAMILY, since the description stores a family and rebuilds the face
-    /// from it. nil when the caller named none, so the caller can keep what
-    /// the layer already says.
-    private func textFamily(_ a: [String: Any], size: Double) throws -> String? {
-        guard let name = stringArg(a, "font") else { return nil }
-        guard
-            NSFontManager.shared.font(
-                withFamily: name, traits: [], weight: 5, size: CGFloat(size)) != nil
-        else {
-            throw ToolError(
-                message: "No font family named \"\(name)\" is installed. A text layer stores a "
-                    + "font FAMILY (\"Helvetica Neue\", \"Times New Roman\", …), not a "
-                    + "PostScript face name; omit font to keep the current one.")
-        }
-        return name
-    }
-
-    /// The `alignment` argument of the text-layer tools ("left" | "center" |
-    /// "right"). nil when the caller named none, so the caller can keep what
-    /// the layer already says.
-    private func textAlignment(_ a: [String: Any]) throws -> String? {
-        guard let name = stringArg(a, "alignment") else { return nil }
-        guard TextLayerPayload.alignments.contains(name) else {
-            throw ToolError(
-                message: "alignment must be left, center, or right (got \"\(name)\")")
-        }
-        return name
-    }
-
-    /// The width the text lays out (and wraps) in: `wrap_width`, or from the
-    /// text's left edge to the canvas's right edge — the same default
-    /// add_text uses. The description has no wrap field, so an edit that
-    /// omits it re-wraps at this default rather than at whatever width the
-    /// layer was first laid out in.
-    private func textWrapWidth(
-        _ a: [String: Any], from x: Double, canvasWidth: Int
-    ) throws -> CGFloat {
-        guard let given = doubleArg(a, "wrap_width") else {
-            return CGFloat(max(Double(canvasWidth) - x, 10))
-        }
-        guard given.isFinite, given >= 1 else {
-            throw ToolError(message: "wrap_width must be at least 1 px")
-        }
-        return CGFloat(min(given, 1e6))
-    }
-
-    /// What a text-layer tool reports back: where the layer landed (the ink
-    /// box plus a few px of slack for antialiasing and glyph overhang, so
-    /// these are the layer's real bounds as get_document reports them) and
-    /// the parameters it is now rendered from.
-    private func textLayerResult(
-        layer: Int, name: String, payload: TextLayerPayload, raster: TextLayerRaster,
-        wrapWidth: CGFloat
-    ) throws -> String {
-        try jsonResult([
-            "ok": true,
-            "layer": layer,
-            "name": name,
-            "bounds": [
-                "x": raster.offsetX, "y": raster.offsetY,
-                "width": raster.width, "height": raster.height,
-            ],
-            "text": [
-                "string": payload.string, "font": payload.font,
-                "size": payload.size, "color": payload.color,
-                "alignment": payload.alignment,
-            ],
-            "wrap_width": Int(wrapWidth.rounded()),
-            "note": "Re-editable: change it with edit_text_layer. Painting on this layer "
-                + "(brush, eraser, fill, gradient, add_text, apply_filter) drops the text "
-                + "and leaves plain pixels.",
-        ])
-    }
-
-    /// Creates a RE-EDITABLE text layer above the active one: the string,
-    /// font, size, color and alignment become the layer's description and
-    /// the pixels are only their rendering. Mirrors the text tool's own commit
-    /// (EditorViewController.commitTextLayer) so both paths produce
-    /// identical layers.
-    private func addTextLayer(_ a: [String: Any]) throws -> String {
-        let document = try target(a)
-        guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
-        let text = try requiredString(a, "text")
-        guard let x = doubleArg(a, "x"), let y = doubleArg(a, "y") else {
-            throw ToolError(
-                message: "add_text_layer requires x and y (the top-left of the text block)")
-        }
-        let size = min(max(doubleArg(a, "size") ?? 48, 4), 1000)
-        let family = try textFamily(a, size: size) ?? Self.defaultTextFamily
-        let color = try parseColor(a, "color", fallback: .black)
-        let alignment = try textAlignment(a) ?? "left"
-        let payload = TextLayerPayload(
-            string: text, family: family, size: size, color: color, alignment: alignment)
-        let wrapWidth = try textWrapWidth(a, from: x, canvasWidth: doc.width)
-        guard
-            let raster = TextLayer.render(
-                payload, origin: CGPoint(x: x, y: y), wrapWidth: wrapWidth)
-        else {
-            throw ToolError(
-                message: "Could not lay the text out — check that text is not empty and that "
-                    + "x, y, size and wrap_width are sane numbers.")
-        }
-        let below = document.activeLayerIndex
-        let name = TextLayer.layerName(for: text)
-        // The core has no "layer from a buffer" constructor: add an empty
-        // layer, then give it the pixels, the offset and the description.
-        // Every op is pure, so only the final handle is committed — one
-        // undo step.
-        try performGroupedEdit(document, "Add Text Layer") { doc in
-            let idx = below + 1
-            guard let added = doc.addingLayer(above: below, name: name),
-                let filled = added.withLayerPixels(
-                    idx, rgba: raster.pixels, width: raster.width, height: raster.height),
-                let moved = filled.withLayerOffset(idx, raster.offsetX, raster.offsetY)
-            else { return nil }
-            return moved.withTextPayload(idx, payload)
-        }
-        let index = min(below + 1, (document.doc?.layerCount ?? 1) - 1)
-        document.activeLayerIndex = index
-        // The edit's own notification went out before the active layer
-        // moved, so the panel and status bar need this one to catch up.
-        NotificationCenter.default.post(
-            name: .imageDocumentImageDidChange, object: document, userInfo: ["isLive": false])
-        return try textLayerResult(
-            layer: index, name: name, payload: payload, raster: raster, wrapWidth: wrapWidth)
-    }
-
-    /// Re-renders an existing text layer from a changed description: any
-    /// field the call omits keeps the value the layer already carries.
-    /// Pixels, offset and description are replaced in one undo step.
-    private func editTextLayer(_ a: [String: Any]) throws -> String {
-        let document = try target(a)
-        let index = try paintLayerIndex(a, document)
-        guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
-        guard let info = doc.layerInfo(index) else {
-            throw ToolError(message: "Layer \(index) could not be read")
-        }
-        guard let current = doc.textPayload(index) else {
-            throw ToolError(
-                message: "Layer \(index) (\"\(info.name)\") is not a text layer — it is plain "
-                    + "pixels with no text to re-render (get_document reports a \"text\" "
-                    + "object on the layers that have one). Make re-editable text with "
-                    + "add_text_layer, or paint characters onto this layer with add_text.")
-        }
-        let text = stringArg(a, "text") ?? current.string
-        guard !text.isEmpty else {
-            throw ToolError(
-                message: "text cannot be empty; remove the layer with delete_layer instead.")
-        }
-        let size = doubleArg(a, "size").map { min(max($0, 4), 1000) } ?? current.size
-        let family = try textFamily(a, size: size) ?? current.font
-        let color = try parseColor(a, "color", fallback: current.nsColor)
-        let alignment = try textAlignment(a) ?? current.alignment
-        let payload = TextLayerPayload(
-            string: text, family: family, size: size, color: color, alignment: alignment)
-        // Lay the new description out at the very origin the layer's pixels
-        // were rendered from (the old description's padding is what its
-        // offset includes), exactly as re-opening it with the text tool does.
-        let origin = TextLayer.editorOrigin(
-            offsetX: info.offsetX, offsetY: info.offsetY, payload: current)
-        let wrapWidth = try textWrapWidth(a, from: Double(origin.x), canvasWidth: doc.width)
-        guard let raster = TextLayer.render(payload, origin: origin, wrapWidth: wrapWidth) else {
-            throw ToolError(
-                message: "Could not lay the text out — check size and wrap_width.")
-        }
-        let name = TextLayer.layerName(for: text)
-        // The name follows the text only while it still IS the text: a name
-        // somebody typed themselves survives the re-render.
-        let nameFollowsText = info.name == TextLayer.layerName(for: current.string)
-        try performGroupedEdit(document, "Edit Text Layer") { doc in
-            guard let filled = doc.withLayerPixels(
-                    index, rgba: raster.pixels, width: raster.width, height: raster.height),
-                let moved = filled.withLayerOffset(index, raster.offsetX, raster.offsetY),
-                let described = moved.withTextPayload(index, payload)
-            else { return nil }
-            guard nameFollowsText else { return described }
-            return described.withLayerName(index, name) ?? described
-        }
-        return try textLayerResult(
-            layer: index, name: nameFollowsText ? name : info.name, payload: payload,
-            raster: raster, wrapWidth: wrapWidth)
     }
 
     // MARK: - Selection, fill, gradient
@@ -2069,23 +1883,29 @@ final class AgentServer {
         ]
     }
 
+    // Whole-document geometry goes through applyingDocumentGeometry
+    // (DescribedLayerGeometry.swift) — the Image menu's own path — which
+    // composes the op into every described layer's description.
     private func rotate(_ a: [String: Any]) throws -> String {
         let degrees = intArg(a, "degrees") ?? 90
-        let actionName = "Rotate \(degrees)°"
+        let op: DocumentGeometry
         switch degrees {
-        case 90: return try docEdit(a, actionName) { $0.rotated90() }
-        case 180: return try docEdit(a, actionName) { $0.rotated180() }
-        case 270, -90: return try docEdit(a, actionName) { $0.rotated270() }
+        case 90: op = .rotate90
+        case 180: op = .rotate180
+        case 270, -90: op = .rotate270
         default: throw ToolError(message: "degrees must be 90, 180, 270, or -90 (clockwise)")
         }
+        return try docEdit(a, op.actionName) { $0.applyingDocumentGeometry(op) }
     }
 
     private func flip(_ a: [String: Any]) throws -> String {
+        let op: DocumentGeometry
         switch try requiredString(a, "axis") {
-        case "horizontal": return try docEdit(a, "Flip Horizontal") { $0.flippedH() }
-        case "vertical": return try docEdit(a, "Flip Vertical") { $0.flippedV() }
+        case "horizontal": op = .flipHorizontal
+        case "vertical": op = .flipVertical
         default: throw ToolError(message: "axis must be \"horizontal\" or \"vertical\"")
         }
+        return try docEdit(a, op.actionName) { $0.applyingDocumentGeometry(op) }
     }
 
     private func imageSize(_ a: [String: Any]) throws -> String {
@@ -2102,7 +1922,8 @@ final class AgentServer {
             }
             return match
         } ?? RZ_FILTER_LANCZOS3
-        return try docEdit(a, "Image Size") { $0.resized(w: w, h: h, filter: filter) }
+        let op = DocumentGeometry.resize(width: w, height: h, filter: filter)
+        return try docEdit(a, op.actionName) { $0.applyingDocumentGeometry(op) }
     }
 
     private func canvasSize(_ a: [String: Any]) throws -> String {

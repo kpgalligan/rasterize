@@ -255,9 +255,12 @@ final class ImageDocument: NSDocument {
     /// user is asked first: Cancel abandons the edit entirely, Rasterize
     /// drops the description inside the SAME edit, keeping it one undo step.
     ///
-    /// Whole-document geometry (rotate, flip, image/canvas size) deliberately
-    /// does NOT come through here: it moves a layer without contradicting
-    /// what the layer says it is, so the description survives.
+    /// Whole-document geometry (rotate, flip, image/canvas size) and a plain
+    /// affine Free Transform deliberately do NOT come through here: they
+    /// COMPOSE into a described layer's description (DescribedLayer.swift)
+    /// and the layer re-renders through it, so the description survives.
+    /// The perspective path and a description that cannot render right now
+    /// still do.
     ///
     /// USER-initiated edits only — it can put up a modal alert, so anything
     /// running on the agent's dispatched-to-main path must use applyEdit and
@@ -278,36 +281,79 @@ final class ImageDocument: NSDocument {
         }
     }
 
-    /// True when layer `idx`'s pixels are the RENDERING of a description the
-    /// app can re-open — a text layer's string, a live photo layer's frame —
-    /// which is exactly what a destructive edit would contradict. (An
-    /// adjustment layer has no pixels of its own to contradict, so it is
-    /// deliberately not one of these.) The paths that cannot use
-    /// applyRasterizingEdit — the live-edit brush, the Free Transform commit
-    /// — ask this, then clear the metadata themselves.
+    /// True when layer `idx`'s pixels are the RENDERING of a description —
+    /// a text layer's string, a shape's geometry, a live photo layer's frame
+    /// — which is exactly what a destructive edit would contradict. Judged
+    /// by the kind the meta CLAIMS (`LayerDescription.claimedKind`), not by
+    /// whether this build can decode it: a description at a payload version
+    /// this build does not know still describes the pixels, and leaving it
+    /// in place through a paint would hand the next build that understands
+    /// it a description of pixels that no longer exist. (An adjustment
+    /// layer has no pixels of its own to contradict, so it is deliberately
+    /// not one of these.) The paths that cannot use applyRasterizingEdit ask
+    /// this: the live-edit brush then clears the metadata itself, and the
+    /// Free Transform commit composes into the description or prompts.
     func layerDescribesSource(_ idx: Int) -> Bool {
         guard let doc = doc else { return false }
-        return doc.textPayload(idx) != nil || doc.livePhotoPayload(idx) != nil
-            || doc.shapePayload(idx) != nil
+        return LayerDescription.claimedKind(of: doc.layerMeta(idx)) != nil
+    }
+
+    /// Layer `idx`'s description (text, shape or Live Photo), for the
+    /// feature extensions; nil for a plain raster layer.
+    func layerDescription(_ idx: Int) -> LayerDescription? {
+        doc?.layerDescription(idx)
     }
 
     /// Asks — once, app-modally — whether a destructive edit may drop layer
     /// `idx`'s description, in the words of whichever kind it is. True means
     /// the edit may proceed: either the layer carries no description, or the
-    /// user confirmed.
-    func confirmRasterize(layer idx: Int) -> Bool {
+    /// user confirmed. `reason` adds a line saying why THIS edit has to
+    /// rasterize when that is not obvious (`unrenderableReason`).
+    func confirmRasterize(layer idx: Int, reason: String? = nil) -> Bool {
         guard let doc = doc else { return true }
         let name = doc.layerInfo(idx)?.name ?? "this layer"
-        if doc.textPayload(idx) != nil {
-            return TextLayer.confirmRasterize(layerName: name)
+        // By the claimed kind, like layerDescribesSource: a description this
+        // build cannot decode is still dropped, and still asked about.
+        switch LayerDescription.claimedKind(of: doc.layerMeta(idx)) {
+        case .text?:
+            return TextLayer.confirmRasterize(layerName: name, reason: reason)
+        case .livePhoto?:
+            return LivePhoto.confirmRasterize(layerName: name, reason: reason)
+        case .shape?:
+            return ShapeLayer.confirmRasterize(layerName: name, reason: reason)
+        case nil:
+            return true
         }
-        if doc.livePhotoPayload(idx) != nil {
-            return LivePhoto.confirmRasterize(layerName: name)
+    }
+
+    /// Why a Free Transform on layer `idx` has to rasterize instead of
+    /// composing into its description — because the description cannot
+    /// render right now (a text family not installed here, a Live Photo
+    /// whose source will not decode) or because the pixels are not its
+    /// rendering any more (`RasterDocument.describedRasterIsStale`); nil
+    /// for a plain layer, a shape that could render, or a description that
+    /// could render over its own raster.
+    func unrenderableReason(layer idx: Int) -> String? {
+        guard let doc = doc, let description = layerDescription(idx) else { return nil }
+        guard !description.isRenderable else {
+            guard doc.describedRasterIsStale(idx) else { return nil }
+            return "It has to rasterize because its pixels are no longer the rendering of its "
+                + "description — an earlier version's Image Size resampled them while the "
+                + "description kept its original size — so composing the transform into the "
+                + "description would re-render the layer at a size you never saw."
         }
-        if doc.shapePayload(idx) != nil {
-            return ShapeLayer.confirmRasterize(layerName: name)
+        switch description {
+        case let .text(payload):
+            return "It has to rasterize because its font family “\(payload.font)” is not "
+                + "installed here: re-rendering it through the transform would substitute a "
+                + "face."
+        case .shape:
+            return nil
+        case let .livePhoto(payload):
+            return "It has to rasterize because the source its frame is drawn from cannot "
+                + "be decoded right now (\(payload.renderSource) — moved, deleted or "
+                + "damaged), so the frame cannot be re-rendered."
         }
-        return true
     }
 
     /// Undo/redo target. Restores the snapshot AND the active-layer index

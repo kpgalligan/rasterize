@@ -4,13 +4,14 @@ import AppKit
 /// tools (R) — EditorViewController+Shapes' commitShapeLayer and the
 /// layers panel's double-click re-edit session — so a layer made or
 /// re-rendered either way is identical: pixels rendered by
-/// ShapeLayer.render, the description in the layer's meta, the position in
-/// the layer's offset (which is what lets Move keep the description
+/// ShapeLayer.render through the layer's transform, the description in the
+/// layer's meta, the position in the layer's offset (the anchor rule in
+/// DescribedLayer.swift, which is what lets Move keep the description
 /// honest).
 extension AgentServer {
     /// Adds a re-editable shape layer above the active layer and selects
-    /// it: the same payload → render → add-fill-move-describe chain the
-    /// shape tools' commit runs, as one undo step.
+    /// it: the same payload → addingDescribedLayer op the shape tools'
+    /// commit runs, as one undo step.
     func addShapeLayer(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         guard document.doc != nil else { throw ToolError(message: "Document has no image") }
@@ -35,32 +36,28 @@ extension AgentServer {
         try Self.validateShapeStyle(
             kind: kind, fill: fill, stroke: stroke, strokeWidth: strokeWidth, radius: radius)
 
+        let transform = try linearMapArg(a, "transform") ?? .identity
         let payload = ShapeLayerPayload(
             kind: kind, w: w, h: h, flipped: boolArg(a, "flipped") ?? false,
-            fill: fill, stroke: stroke, strokeWidth: strokeWidth, radius: radius)
-        guard let raster = ShapeLayer.render(payload), let meta = payload.json() else {
+            fill: fill, stroke: stroke, strokeWidth: strokeWidth, radius: radius,
+            transform: transform)
+        let name = ShapeLayer.layerName(for: payload)
+        // The shape box lands with its top-left at (x, y) — whole pixels for
+        // an untransformed box, exact otherwise: commitShapeLayer's rule.
+        let anchor = DescribedLayer.placementAnchor(CGPoint(x: x, y: y), transform: transform)
+
+        let below = document.activeLayerIndex
+        do {
+            try performGroupedEdit(document, "Add \(name) Layer") {
+                $0.addingDescribedLayer(above: below, .shape(payload), anchor: anchor, name: name)
+            }
+        } catch is ToolError {
+            // The op is nil exactly when the render is: name the inputs.
             throw ToolError(
                 message: "Could not render the shape — the box is degenerate for the kind, "
                     + "nothing would be visible, or the raster would pass the core's 100 "
-                    + "megapixel ceiling for one layer. Check w, h and stroke_width.")
-        }
-        let name = ShapeLayer.layerName(for: payload)
-        // The shape box lands with its top-left at (x, y): the raster
-        // carries `padding` px of stroke-overhang slack on every side, so
-        // the layer's offset backs up by exactly that much —
-        // commitShapeLayer's rule.
-        let offsetX = Int(floor(x)) - raster.padding
-        let offsetY = Int(floor(y)) - raster.padding
-
-        let below = document.activeLayerIndex
-        try performGroupedEdit(document, "Add \(name) Layer") { doc in
-            let idx = below + 1
-            guard let added = doc.addingLayer(above: below, name: name),
-                let filled = added.withLayerPixels(
-                    idx, rgba: raster.pixels, width: raster.width, height: raster.height),
-                let moved = filled.withLayerOffset(idx, offsetX, offsetY)
-            else { return nil }
-            return moved.withLayerMeta(idx, meta)
+                    + "megapixel ceiling for one layer. Check w, h, stroke_width and "
+                    + "transform.")
         }
         let index = min(below + 1, (document.doc?.layerCount ?? 1) - 1)
         document.activeLayerIndex = index
@@ -68,14 +65,18 @@ extension AgentServer {
         // moved, so the panel and status bar need this one to catch up.
         NotificationCenter.default.post(
             name: .imageDocumentImageDidChange, object: document, userInfo: ["isLive": false])
-        return try jsonResult(["ok": true, "layer": index, "name": name])
+        return try jsonResult([
+            "ok": true, "layer": index, "name": name,
+            "shape": Self.shapeFields(payload, anchor: document.doc?.describedAnchor(index)),
+        ])
     }
 
     /// Re-renders an existing shape layer from a changed description — the
     /// agent mirror of the layers panel's double-click re-edit session
-    /// (EditorViewController+Shapes.commitShapeEditSession): pixels, offset
-    /// and meta replaced as one undo step. Omitted arguments keep the
-    /// layer's current values; the kind is fixed at creation.
+    /// (EditorViewController+Shapes.commitShapeEditSession): pixels, offset,
+    /// meta and the re-cropped mask replaced as one undo step. Omitted
+    /// arguments keep the layer's current values (its transform included);
+    /// the kind is fixed at creation.
     func editShapeLayer(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         let index = try paintLayerIndex(a, document)
@@ -83,7 +84,8 @@ extension AgentServer {
         guard let info = doc.layerInfo(index) else {
             throw ToolError(message: "Layer \(index) could not be read")
         }
-        guard let current = doc.shapePayload(index) else {
+        guard let current = doc.shapePayload(index), let currentAnchor = doc.describedAnchor(index)
+        else {
             throw ToolError(
                 message: "Layer \(index) (\"\(info.name)\") is not a shape layer — it is "
                     + "plain pixels with no description to re-render (get_document reports "
@@ -92,17 +94,17 @@ extension AgentServer {
         }
         let kind = current.kind
         // Geometry: x/y name the shape box's top-left; the current one is
-        // recovered from offset + padding (the commit's offset rule,
-        // inverted — editShapeLayer's box on the UI side).
-        let oldPad = ShapeLayer.padding(for: current)
-        let x = doubleArg(a, "x") ?? Double(info.offsetX + oldPad)
-        let y = doubleArg(a, "y") ?? Double(info.offsetY + oldPad)
+        // the layer's anchor (the commit's placement rule, inverted —
+        // editShapeLayer's box on the UI side).
+        let x = doubleArg(a, "x") ?? Double(currentAnchor.x)
+        let y = doubleArg(a, "y") ?? Double(currentAnchor.y)
         let w = doubleArg(a, "w") ?? current.w
         let h = doubleArg(a, "h") ?? current.h
         guard x.isFinite, y.isFinite, w.isFinite, h.isFinite else {
             throw ToolError(message: "x, y, w and h must be finite numbers")
         }
         try Self.validateShapeGeometry(kind: kind, x: x, y: y, w: w, h: h)
+        let transform = try linearMapArg(a, "transform") ?? current.transform
 
         // Paints: an ABSENT argument keeps the layer's paint; a present
         // empty string removes it ("" is the payload's own "none"). The
@@ -118,31 +120,50 @@ extension AgentServer {
 
         let payload = ShapeLayerPayload(
             kind: kind, w: w, h: h, flipped: boolArg(a, "flipped") ?? current.flipped,
-            fill: fill, stroke: stroke, strokeWidth: strokeWidth, radius: radius)
-        guard let raster = ShapeLayer.render(payload), let meta = payload.json() else {
+            fill: fill, stroke: stroke, strokeWidth: strokeWidth, radius: radius,
+            transform: transform)
+        // A given x,y is a placement (whole pixels while untransformed, exact
+        // otherwise); an omitted one keeps the exact anchor as it is.
+        let anchor = a["x"] == nil && a["y"] == nil
+            ? currentAnchor
+            : DescribedLayer.placementAnchor(CGPoint(x: x, y: y), transform: transform)
+        do {
+            try performGroupedEdit(document, "Edit Shape Layer") {
+                $0.rerenderingDescribedLayer(index, .shape(payload), anchor: anchor)
+            }
+        } catch is ToolError {
             throw ToolError(
                 message: "Could not render the shape — the box is degenerate for the kind, "
                     + "nothing would be visible, or the raster would pass the core's 100 "
-                    + "megapixel ceiling for one layer. Check w, h and stroke_width.")
+                    + "megapixel ceiling for one layer. Check w, h, stroke_width and "
+                    + "transform.")
         }
-        let offsetX = Int(floor(x)) - raster.padding
-        let offsetY = Int(floor(y)) - raster.padding
-        try performGroupedEdit(document, "Edit Shape Layer") { doc in
-            guard let filled = doc.withLayerPixels(
-                    index, rgba: raster.pixels, width: raster.width, height: raster.height),
-                let moved = filled.withLayerOffset(index, offsetX, offsetY)
-            else { return nil }
-            return moved.withLayerMeta(index, meta)
-        }
+        return try jsonResult([
+            "ok": true, "layer": index,
+            "shape": Self.shapeFields(payload, anchor: document.doc?.describedAnchor(index)),
+        ])
+    }
+
+    /// The shape object get_document and the shape tools report: the
+    /// description, `transform` row-major (`LinearMap.array`), and `origin` —
+    /// the exact canvas position of the box's top-left (fractional after a
+    /// transform) — when the anchor is known.
+    static func shapeFields(_ payload: ShapeLayerPayload, anchor: CGPoint?) -> [String: Any] {
         var shape: [String: Any] = [
-            "kind": kind, "x": Self.transformNumber(x), "y": Self.transformNumber(y),
-            "w": Self.transformNumber(w), "h": Self.transformNumber(h),
-            "fill": payload.fill, "stroke": payload.stroke,
-            "stroke_width": Self.transformNumber(strokeWidth),
+            "kind": payload.kind,
+            "w": payload.w,
+            "h": payload.h,
+            "fill": payload.fill,
+            "stroke": payload.stroke,
+            "stroke_width": payload.strokeWidth,
+            "transform": payload.transform.array,
         ]
-        if kind == "rect" { shape["radius"] = Self.transformNumber(payload.radius) }
-        if kind == "line" { shape["flipped"] = payload.flipped }
-        return try jsonResult(["ok": true, "layer": index, "shape": shape])
+        if payload.kind == "rect" { shape["radius"] = payload.radius }
+        if payload.kind == "line" { shape["flipped"] = payload.flipped }
+        if let anchor = anchor {
+            shape["origin"] = ["x": Double(anchor.x), "y": Double(anchor.y)]
+        }
+        return shape
     }
 
     /// The geometry rules both shape tools share: coordinates the core can

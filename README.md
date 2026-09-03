@@ -95,8 +95,17 @@ decoding, encoding, and manipulation.
   and the commit resamples through a true projective homography, mask riding
   along; rotating, scaling and moving carry a warped box rigidly, and a box
   whose corners are pulled back to a parallelogram commits as the exact affine
-  it is, lossless fast paths included. Text layers ask to rasterize
-  first (as any destructive edit does). Selections are not transformable yet —
+  it is, lossless fast paths included. Text, shape and Live Photo layers no
+  longer rasterize for an affine transform: the session's matrix composes
+  into the layer's description and the layer re-renders through it — glyphs
+  and paths drawn under the matrix, so a rotated headline keeps crisp vector
+  edges and rotating it back is lossless — with its mask and layer style
+  riding along. Only the ⌘-corner perspective drag still asks to rasterize,
+  and so does a layer whose source cannot be re-rendered right now — a text
+  layer whose font is not installed on this machine (re-rendering it would
+  substitute a face) or a Live Photo whose still or clip has been moved,
+  deleted or damaged — since resampling the real pixels is the honest
+  outcome there. Selections are not transformable yet —
   a session always transforms the whole layer and hides the marquee while it
   runs
 - **Crop** (Image > Crop, ⌘K): the canvas shrinks to the selection's
@@ -165,7 +174,9 @@ decoding, encoding, and manipulation.
   like text, so Move keeps it honest and the `.rz` format round-trips it.
   Double-click a shape layer in the panel to reopen it: drag the eight
   handles or the interior to re-box it, restyle it from the options bar,
-  Return (or a click away) re-renders it as one undo step, Escape cancels
+  Return (or a click away) re-renders it as one undo step, Escape cancels.
+  A transformed shape reopens with its handles on the rotated box and
+  re-boxes in its own space — a rotated rectangle grows along its own axes
 - Eyedropper (I): picks the color under the cursor into the shared paint
   color, sampled from the flattened composite — what you actually see, not
   one layer — point, 3×3 or 5×5 mean sampling, a monospaced hex readout in
@@ -204,16 +215,30 @@ decoding, encoding, and manipulation.
   spread for sizes, tens for percentages, doublings for radii) alongside
   typed entry. Options persist per tool across documents and launches
 - **Re-editable text layers**: committing text adds its own layer that
-  remembers the string, font, size, color and alignment it was rendered
-  from — click it again with the text tool to reopen the editor pre-filled,
-  with its font/size/color/alignment restored into the options bar, and the
-  layers panel badges it with a "T". Double-clicking the layer's row in the
-  panel reopens it the same way from anywhere: it switches to the text tool
-  and selects the whole string, so typing replaces it. A destructive edit (filter, adjustment, fill, gradient,
-  brush, eraser) asks "Rasterize text layer?" first and drops the
-  description on confirm, keeping the pixels. The native `.rz` format stores
-  the description alongside the pixels, so text stays editable across
-  save and open
+  remembers the string, font, size, color, alignment and typography —
+  weight, italic, tracking, leading, baseline shift, underline,
+  strikethrough — it was rendered from, plus the width it wraps at:
+  paragraph text remembers its box, point text (from the agent's
+  `wrap_width: 0`) never wraps, and a layer saved before widths were
+  stored is given one the first time something rewrites it, remembered
+  from then on: the on-canvas editor re-wraps it from its origin to the
+  right edge (at most 600 px) as it always did; a Free Transform, a
+  document rotate/flip or Image Size recovers the width from the layer's
+  own raster, so its existing line breaks are kept; and the agent's
+  `edit_text_layer` keeps its canvas-edge default (no 600 px cap). Click
+  it again with the text tool to reopen the editor pre-filled, with
+  everything restored into the options bar, and the layers panel badges
+  it with a "T". Double-clicking the layer's row in the panel reopens it
+  the same way from anywhere: it switches to the text tool and selects
+  the whole string, so typing replaces it. A transformed layer opens
+  upright at its block's origin and the commit re-renders it through its
+  transform. A destructive edit
+  (filter, adjustment, fill, gradient, brush, eraser) asks "Rasterize text
+  layer?" first and drops the description on confirm, keeping the pixels.
+  The native `.rz` format stores the description alongside the pixels, so
+  text stays editable across save and open (layers with default typography
+  and no transform are written in the original version-1 form, so older
+  builds still open them as text)
 - **Live Photo layers**: open either half of an Apple Live Photo — the photo
   (`IMG_0001.HEIC`) or its clip (`IMG_0001.MOV`), which Photos exports as a
   pair sharing one name — and the layer shows the key frame, the
@@ -223,9 +248,10 @@ decoding, encoding, and manipulation.
   Photo Frame…) for a timeline slider that scrubs the clip with a live
   preview on the canvas: pick any moment, and Apply re-renders the layer
   from that frame as one undo step, keeping its name, position, opacity,
-  blend mode and mask. Video frames are scaled to the photo's size so the
-  layer's geometry never shifts, and a Key Frame button walks back to the
-  full-resolution still. The layers panel badges these layers "▶". A
+  blend mode, mask, layer style and transform — a rotated or scaled Live
+  Photo re-frames in place. Video frames are scaled to the photo's size so
+  the layer's geometry never shifts, and a Key Frame button walks back to
+  the full-resolution still. The layers panel badges these layers "▶". A
   destructive edit (filter, adjustment, fill, gradient, brush, eraser) asks
   before cutting the layer loose from its Live Photo, exactly as it does for
   text; the description is stored in `.rz` files, so the frame stays
@@ -254,11 +280,16 @@ rejected with a clear error), and PSD layer masks and clipping flags do not
 import; animated GIFs and multi-page TIFFs
 load their first frame/page only, so ⌘S on a GIF deliberately routes through
 Save As instead of overwriting the animation in place. Document-level rotate,
-flip and resize move a text layer's pixels but keep its description, so
-re-editing the text after one re-renders it upright at the layer's corner —
-selecting a different Live Photo frame after one lands the same way. A Live
-Photo's files are referenced by path, not copied into the document: move or
-delete them and the layer keeps its pixels but can no longer change frame.
+flip and resize compose into every text, shape and Live Photo description,
+so a re-edit after one lands in place; the Crop tool's straighten angle
+still rasterizes them. A layer an earlier version's Image Size resampled
+while its description kept its original size is left as it is by those
+ops — the pixels turn with the document and the description follows, but
+nothing re-renders it — and Free Transform asks to rasterize it as it does
+for any raster; its next re-edit renders the description at its own size,
+as it always did. A Live Photo's files are referenced by path, not
+copied into the document: move or delete them and the layer keeps its
+pixels but can no longer change frame.
 
 ## Built-in assistant
 
@@ -301,7 +332,10 @@ reports each one's op and params), filters, geometry —
 including `transform_layer`, the Free Transform pipeline with named parameters
 (rotate in degrees, positive is clockwise; scale, translate, pivot, sampler)
 and `distort_layer`, its perspective twin (four explicit corner destinations,
-the ⌘-corner drag as a tool), both reporting the layer's new bounds — brush
+the ⌘-corner drag as a tool), both reporting the layer's new bounds; on a
+text, shape or Live Photo layer `transform_layer` — and a parallelogram
+`distort_layer` — composes into the description instead of rasterizing,
+and `rotate` / `flip` / `image_size` keep every description honest — brush
 and eraser strokes (polyline points
 with size/color/opacity and the full tip — hardness, flow, spacing, angle,
 roundness, the same stamped pipeline as the options bar's tip, shared with
@@ -309,10 +343,13 @@ roundness, the same stamped pipeline as the options bar's tip, shared with
 paint through the layer blend-mode set, and a
 `target` choosing the layer's pixels or its mask), shape layers
 (`add_shape_layer` / `edit_shape_layer`, the parametric rect / ellipse /
-line layers the shape tools drag out and reopen), text — `add_text_layer`
-and `edit_text_layer` for re-editable text layers with an `alignment`
-parameter (`get_document` reports each layer's text parameters) and
-`add_text` for the rasterizing variant —
+line layers the shape tools drag out and reopen, with an optional
+`transform`), text — `add_text_layer` and `edit_text_layer` for re-editable
+text layers with alignment, the typography (`weight`, `italic`, `tracking`,
+`leading`, `baseline_shift`, `underline`, `strikethrough`), `wrap_width` (0
+for point text) and `transform` parameters (`get_document` reports each
+described layer's full description, its `transform` and its exact
+`origin`) and `add_text` for the rasterizing variant —
 Live Photos (`add_live_photo_layer` places one as a layer and
 `set_live_photo_frame` re-renders it at another moment of its clip;
 `get_document` reports each layer's clip, key frame and the moment it is

@@ -1767,6 +1767,10 @@ fn null_safety_sweep() {
         assert!(rz_doc_with_layer_visible(null_doc, 0, true).is_null());
         assert!(rz_doc_with_layer_offset(null_doc, 0, 0, 0).is_null());
         assert!(rz_doc_with_layer_pixels(null_doc, 0, null_img).is_null());
+        assert!(
+            rz_doc_set_layer_content(null_doc, 0, overlay.as_ptr(), 2, 2, 0, 0, ptr::null())
+                .is_null()
+        );
         assert!(rz_doc_adding_layer(null_doc, 0, name.as_ptr()).is_null());
         assert!(rz_doc_adding_image_layer(null_doc, 0, null_img, name.as_ptr()).is_null());
         assert!(rz_doc_duplicating_layer(null_doc, 0).is_null());
@@ -1835,6 +1839,7 @@ fn null_safety_sweep() {
         assert!(rz_doc_adding_image_layer(doc, 0, null_img, name.as_ptr()).is_null());
         assert!(rz_doc_adding_image_layer(doc, 0, ptr::null(), ptr::null()).is_null());
         assert!(rz_doc_with_layer_pixels(doc, 0, null_img).is_null());
+        assert!(rz_doc_set_layer_content(doc, 0, ptr::null(), 2, 2, 0, 0, ptr::null()).is_null());
         assert!(rz_doc_transform_layer(doc, 0, ptr::null(), FILTER_NEAREST).is_null());
         let mut err: *mut c_char = ptr::null_mut();
         assert!(!rz_doc_save_native(doc, ptr::null(), &mut err));

@@ -771,8 +771,11 @@ bool rz_doc_layer_clipped(const RzDocument *doc, size_t idx);
  *
  * Re-rendering a layer in place needs no special entry point: every operation
  * is pure, so chain rz_doc_with_layer_pixels_rgba, rz_doc_with_layer_offset
- * and rz_doc_with_layer_meta and commit only the final handle — one edit, one
- * undo step. */
+ * and rz_doc_with_layer_meta — or, when a mask must land with the new
+ * pixels, rz_doc_set_layer_content (after rz_doc_transform_layer when the
+ * re-render follows a transform: that moves the mask and scales the style,
+ * and the host's own rendering replaces the resampled pixels) — and commit
+ * only the final handle: one edit, one undo step. */
 
 /* Layer idx's metadata as a heap string freed with rz_string_free; NULL on
  * out-of-range idx or a layer with no metadata (so NULL means "none", not an
@@ -813,6 +816,21 @@ bool rz_doc_layer_is_adjustment(const RzDocument *doc, size_t idx);
 RzDocument *rz_doc_with_layer_pixels_rgba(const RzDocument *doc, size_t idx,
                                           const uint8_t *src, uint32_t w,
                                           uint32_t h);
+
+/* Replaces layer idx's pixels, offset and mask in ONE pure step — the
+ * re-render primitive for a described layer whose raster, position and mask
+ * change together (a text layer rotated by its own description; a Live Photo
+ * re-framed under a transform). `src` is straight RGBA8, w*h*4 bytes, row 0
+ * top; `mask` is NULL (the layer ends with no mask; mask_enabled resets to
+ * true) or exactly w*h coverage bytes at the pixels' size (mask_enabled is
+ * kept, so a disabled mask stays disabled). Name, opacity, blend mode,
+ * visibility, metadata, style and clipped flag survive. NULL on out-of-range
+ * idx, NULL src, w == 0, h == 0, or w*h > 100000000 — dimensions bounded
+ * before anything is read, as for rz_doc_with_layer_pixels_rgba. */
+RzDocument *rz_doc_set_layer_content(const RzDocument *doc, size_t idx,
+                                     const uint8_t *src, uint32_t w,
+                                     uint32_t h, int32_t x, int32_t y,
+                                     const uint8_t *mask);
 
 /* ---- Layer styles -------------------------------------------------------
  *

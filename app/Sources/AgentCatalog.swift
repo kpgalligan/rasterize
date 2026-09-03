@@ -72,6 +72,46 @@ extension AgentServer {
             "description": "Blend mode the cloned paint composites with (default Normal) "
                 + "— the layer blend-mode names.",
         ]
+        // The text-layer typography every text tool takes — the options
+        // bar's own knobs — and the described layers' shared transform.
+        let textWeightProperty: [String: Any] = [
+            "type": "integer", "minimum": 0, "maximum": 15,
+            "description": "NSFontManager weight 0-15: 3 light, 5 regular (default), 6 "
+                + "medium, 8 semibold, 9 bold — the options bar's Weight popup.",
+        ]
+        let textItalicProperty: [String: Any] = [
+            "type": "boolean", "description": "Italic face (default false).",
+        ]
+        let textUnderlineProperty: [String: Any] = [
+            "type": "boolean", "description": "Single underline (default false).",
+        ]
+        let textStrikethroughProperty: [String: Any] = [
+            "type": "boolean", "description": "Single strikethrough (default false).",
+        ]
+        let textTrackingProperty: [String: Any] = [
+            "type": "number", "minimum": -100, "maximum": 100,
+            "description": "Extra spacing between glyphs in px (kern), -100 to 100, "
+                + "default 0 — the options bar's Tracking field.",
+        ]
+        let textLeadingProperty: [String: Any] = [
+            "type": "number", "minimum": 0, "maximum": 1000,
+            "description": "Line height in px, 0 to 1000; 0 (default) = the font's natural "
+                + "height — the options bar's Leading field.",
+        ]
+        let textBaselineProperty: [String: Any] = [
+            "type": "number", "minimum": -100, "maximum": 100,
+            "description": "Baseline shift in px, -100 to 100, positive raises the text, "
+                + "default 0 — the options bar's Baseline field.",
+        ]
+        let transformProperty: (String) -> [String: Any] = { role in
+            [
+                "type": "array", "items": ["type": "number"], "minItems": 4, "maxItems": 4,
+                "description": "The layer's 2×2 linear map [a, b, c, d], row-major — "
+                    + "(x, y) maps to (a·x + b·y, c·x + d·y) — \(role); default "
+                    + "[1, 0, 0, 1]. Rotation by θ clockwise is [cos θ, -sin θ, sin θ, "
+                    + "cos θ]. transform_layer composes onto it; get_document reports it.",
+            ]
+        }
         let catalog: [[String: Any]] = [
             tool(
                 "list_documents",
@@ -92,9 +132,17 @@ extension AgentServer {
                     + "canonical JSON set_layer_style takes back — and the document reports "
                     + "global_light (angle, altitude). "
                     + "A re-editable TEXT layer also reports a text object (string, font, size, "
-                    + "color, alignment) — those are the layers edit_text_layer can change — and "
-                    + "a SHAPE layer a shape object (kind, size, fill, stroke); a "
-                    + "layer without those keys is plain pixels. An ADJUSTMENT layer reports "
+                    + "color, alignment, weight, italic, tracking, leading, baseline_shift, "
+                    + "underline, strikethrough, box_width, transform, origin) — those are the "
+                    + "layers edit_text_layer can change — a SHAPE layer a shape object (kind, "
+                    + "w, h, fill, stroke, stroke_width, radius, transform, origin), and a LIVE "
+                    + "PHOTO layer a live_photo object (video, still, time, key_time, duration, "
+                    + "showing_still, width, height, transform, origin); a layer without those "
+                    + "keys is plain pixels. transform is the layer's 2×2 map [a, b, c, d], "
+                    + "row-major — (x, y) maps to (a·x + b·y, c·x + d·y) — and "
+                    + "origin the exact canvas position of its source's top-left (the text "
+                    + "block's, the shape box's, the still's; fractional after a transform). "
+                    + "An ADJUSTMENT layer reports "
                     + "is_adjustment true plus an adjustment object (op, params) — those are "
                     + "the layers edit_adjustment_layer can change. Layer index 0 is the bottom "
                     + "layer; offsets are measured from the canvas top-left corner, y "
@@ -172,18 +220,25 @@ extension AgentServer {
                 "transform_layer",
                 "Rotates, scales and/or moves ONE layer's pixels in a single resample — the "
                     + "same pipeline as the app's Free Transform (⌘T). The rotation and the "
-                    + "scales act around a pivot (the centre of the layer's CURRENT bounds by "
-                    + "default), then the translation is added; the layer is resampled once "
+                    + "scales act around a pivot (by default the centre of the layer's CURRENT "
+                    + "bounds — for a re-editable text, shape or Live Photo layer the exact "
+                    + "centre of its description's box, which a turn leaves fixed, so rotate "
+                    + "then rotate-back returns it exactly), then the translation is added; "
+                    + "the layer is resampled once "
                     + "into the outward-rounded bounding box of its transformed corners, so "
                     + "its offset AND size both change, and it may end up extending past the "
                     + "canvas. The canvas and every other layer are untouched, and a layer "
                     + "mask rides along, resampled identically. Pass at least one of rotate, "
                     + "scale, scale_x, scale_y, translate_x, translate_y; the result reports "
                     + "the layer's new bounds so you can verify placement. For whole-document "
-                    + "geometry use rotate / flip / image_size instead. NOTE: this rewrites "
-                    + "the layer's pixels, so on a re-editable TEXT layer it drops the text "
-                    + "description (undo restores it) — to just MOVE such a layer and keep "
-                    + "its text, set offset_x / offset_y with set_layer_properties.",
+                    + "geometry use rotate / flip / image_size instead. On a re-editable TEXT, "
+                    + "SHAPE or LIVE PHOTO layer nothing rasterizes: the matrix composes into "
+                    + "the layer's description and the layer re-renders through it (crisp "
+                    + "vector edges; the result says rasterized: false and reports the new "
+                    + "transform and origin). Only a layer whose source cannot be rendered "
+                    + "right now (a text family not installed here, a Live Photo whose files "
+                    + "are gone) is resampled as pixels and drops its description, reported "
+                    + "as before with the reason (undo restores it).",
                 [
                     "layer": index,
                     "rotate": [
@@ -224,7 +279,8 @@ extension AgentServer {
                         "enum": ["center", "top_left"],
                         "description": "The pivot the rotation and scale turn/grow around: "
                             + "\"center\" (default) or \"top_left\" of the layer's current "
-                            + "bounds. pivot_x / pivot_y override it.",
+                            + "bounds; center is a described layer's exact centre, shared "
+                            + "with the app's ⌘T session. pivot_x / pivot_y override it.",
                     ],
                     "pivot_x": [
                         "type": "number",
@@ -257,12 +313,15 @@ extension AgentServer {
                     + "corners; they must form a convex quad (a concave or self-crossing "
                     + "arrangement folds the mapping and is refused). A parallelogram is "
                     + "committed as the exact affine it is — whole-pixel moves stay "
-                    + "lossless. The layer is resampled once into the corners' "
+                    + "lossless, and on a re-editable text, shape or Live Photo layer it "
+                    + "composes into the description like transform_layer (rasterized: "
+                    + "false). The layer is otherwise resampled once into the corners' "
                     + "outward-rounded bounding box, so offset AND size change; a layer "
                     + "mask rides along identically, and other layers and the canvas are "
-                    + "untouched. Like transform_layer, this rewrites pixels, so a "
-                    + "re-editable TEXT layer drops its description (undo restores it). "
-                    + "The result reports the layer's new bounds for verification.",
+                    + "untouched. A true perspective quad rewrites pixels, so a described "
+                    + "layer drops its description (rasterized_text / _shape / _live_photo: "
+                    + "true; undo restores it). The result reports the layer's new bounds "
+                    + "for verification.",
                 [
                     "layer": index,
                     "corners": [
@@ -754,15 +813,19 @@ extension AgentServer {
             tool(
                 "add_text_layer",
                 "Adds a RE-EDITABLE text layer above the active layer and selects it. The "
-                    + "layer remembers the string, font, size, color and alignment it was "
-                    + "rendered from (get_document reports them, edit_text_layer changes "
-                    + "them, and they survive saving to .rz), unlike add_text which just "
-                    + "bakes characters into pixels. x,y is the TOP-LEFT corner of the text "
-                    + "block, positioned exactly like add_text; \\n starts a new line and "
-                    + "long lines wrap at wrap_width. Returns the new layer's index and "
-                    + "bounds. NOTE: painting on the layer afterwards (brush, eraser, fill, "
-                    + "gradient, add_text, apply_filter) drops the text and leaves plain "
-                    + "pixels.",
+                    + "layer remembers the string, font, size, color, alignment, typography "
+                    + "(weight, italic, tracking, leading, baseline shift, underline, "
+                    + "strikethrough), wrap width and transform it was rendered from "
+                    + "(get_document reports them, edit_text_layer changes them, "
+                    + "transform_layer composes onto them, and they survive saving to .rz), "
+                    + "unlike add_text which just bakes characters into pixels. x,y is the "
+                    + "TOP-LEFT corner of the text block in canvas px (its origin in "
+                    + "get_document; rounded to whole px for an untransformed block, kept "
+                    + "exact under a transform), positioned exactly like add_text; \\n "
+                    + "starts a new line and long lines wrap at wrap_width. Returns the new "
+                    + "layer's index and bounds. NOTE: painting on the layer afterwards "
+                    + "(brush, eraser, fill, gradient, add_text, apply_filter) drops the "
+                    + "text and leaves plain pixels.",
                 [
                     "text": ["type": "string"],
                     "x": ["type": "number"], "y": ["type": "number"],
@@ -788,10 +851,21 @@ extension AgentServer {
                             + "inside it shift, so single-line text looks the same for all "
                             + "three values.",
                     ],
+                    "weight": textWeightProperty,
+                    "italic": textItalicProperty,
+                    "underline": textUnderlineProperty,
+                    "strikethrough": textStrikethroughProperty,
+                    "tracking": textTrackingProperty,
+                    "leading": textLeadingProperty,
+                    "baseline_shift": textBaselineProperty,
+                    "transform": transformProperty(
+                        "applied to the text before it is placed at x,y"),
                     "wrap_width": [
                         "type": "number",
-                        "description": "Width in px the lines wrap at; default is from x to "
-                            + "the canvas's right edge.",
+                        "description": "px; the block wraps at this SOURCE-space width and "
+                            + "remembers it (box_width); 0 = point text that never wraps "
+                            + "(at most 100000 px, the app's own editor cap). Default: "
+                            + "from x to the canvas's right edge.",
                     ],
                     "document_id": docID,
                 ], required: ["text", "x", "y"]),
@@ -799,14 +873,14 @@ extension AgentServer {
                 "edit_text_layer",
                 "Re-renders a text layer made by add_text_layer (or by the app's text tool) "
                     + "from changed parameters: pass any subset of text, font, size, color, "
-                    + "alignment and wrap_width, and everything you omit keeps the layer's "
-                    + "current value. The layer keeps its position (the text block is "
-                    + "re-laid-out from the same top-left corner, so the bounds follow the "
-                    + "new text), its opacity, blend mode and stacking. Errors when the "
-                    + "target layer is not a text layer — add_text_layer makes one. Returns "
-                    + "the resulting bounds. wrap_width is not stored on the layer, so "
-                    + "omitting it re-wraps at the canvas's right edge; pass it to keep a "
-                    + "narrower block narrow.",
+                    + "alignment, weight, italic, underline, strikethrough, tracking, "
+                    + "leading, baseline_shift, wrap_width and transform, and everything you "
+                    + "omit keeps the layer's current value. The layer keeps its position "
+                    + "(the block is re-laid-out from its origin, keeping its transform "
+                    + "unless you pass one, so the bounds follow the new text), its "
+                    + "opacity, blend mode, mask, style and stacking. Errors when the target "
+                    + "layer is not a text layer — add_text_layer makes one. Returns the "
+                    + "resulting bounds and the layer's full text object.",
                 [
                     "layer": index,
                     "text": ["type": "string"],
@@ -829,9 +903,26 @@ extension AgentServer {
                         "description": "How lines align within the text block; omit to keep "
                             + "the layer's current alignment.",
                     ],
+                    "weight": textWeightProperty,
+                    "italic": textItalicProperty,
+                    "underline": textUnderlineProperty,
+                    "strikethrough": textStrikethroughProperty,
+                    "tracking": textTrackingProperty,
+                    "leading": textLeadingProperty,
+                    "baseline_shift": textBaselineProperty,
+                    "transform": transformProperty(
+                        "replacing the layer's current one (default: keep it)"),
                     "wrap_width": [
                         "type": "number",
-                        "description": "Width in px the lines wrap at.",
+                        "description": "px; the block wraps at this SOURCE-space width and "
+                            + "remembers it (box_width); 0 = point text that never wraps "
+                            + "(at most 100000 px, the app's own editor cap). Default: keep "
+                            + "the layer's stored width — a layer saved before "
+                            + "widths were stored (box_width null in get_document) re-wraps "
+                            + "from its origin to the canvas's right edge, as this tool "
+                            + "always did (the app's own editor caps that legacy default at "
+                            + "600 px; the two differ only for lines wider than that), and "
+                            + "stores that width from then on.",
                     ],
                     "document_id": docID,
                 ]),
@@ -841,9 +932,10 @@ extension AgentServer {
                     + "the same parametric layers the app's shape tools drag out: the kind, "
                     + "box size, fill, stroke and corner radius become the layer's "
                     + "description and the pixels are only their rendering. x,y is the "
-                    + "TOP-LEFT corner of the shape box in canvas px and w,h its size; the "
-                    + "shape lands exactly there (the layer's raster is a few px larger on "
-                    + "every side for stroke overhang and antialiasing). rect and ellipse "
+                    + "TOP-LEFT corner of the shape box in canvas px (its origin in "
+                    + "get_document) and w,h its size; the shape lands exactly there (the "
+                    + "layer's raster is a few px larger on every side for stroke overhang "
+                    + "and antialiasing), through transform when one is given. rect and ellipse "
                     + "take fill and/or stroke — pass at least one; a line is stroke-only "
                     + "and runs across the box's diagonal, top-left to bottom-right, or "
                     + "bottom-left to top-right with flipped: true. Returns the new layer's "
@@ -898,18 +990,22 @@ extension AgentServer {
                         "description": "Rect corner radius in px (default 0 = square "
                             + "corners; ignored by ellipse and line).",
                     ],
+                    "transform": transformProperty(
+                        "applied to the box before it is placed — the box's top-left stays "
+                            + "at x,y"),
                     "document_id": docID,
                 ], required: ["kind", "x", "y", "w", "h"]),
             tool(
                 "edit_shape_layer",
                 "Changes an existing SHAPE layer's description and re-renders its pixels "
-                    + "— the box, fill, stroke, stroke width, corner radius or line "
-                    + "direction — as one undo step, the way double-clicking the layer in "
-                    + "the app reopens it. Works only on layers get_document reports a "
-                    + "\"shape\" object for; the kind (rect / ellipse / line) is fixed at "
-                    + "creation. Omitted arguments keep the layer's current values. Pass "
-                    + "fill or stroke as \"\" to remove that paint (at least one visible "
-                    + "paint must remain).",
+                    + "— the box, fill, stroke, stroke width, corner radius, line "
+                    + "direction or transform — as one undo step, the way double-clicking "
+                    + "the layer in the app reopens it. Works only on layers get_document "
+                    + "reports a \"shape\" object for; the kind (rect / ellipse / line) is "
+                    + "fixed at creation. Omitted arguments keep the layer's current values "
+                    + "(x,y default to its origin, transform to its current map); the mask "
+                    + "and style ride along. Pass fill or stroke as \"\" to remove that "
+                    + "paint (at least one visible paint must remain).",
                 [
                     "layer": index,
                     "x": [
@@ -954,6 +1050,8 @@ extension AgentServer {
                         "description": "Rect corner radius in px (default: keep; ignored by "
                             + "ellipse and line).",
                     ],
+                    "transform": transformProperty(
+                        "replacing the layer's current one (default: keep it)"),
                     "document_id": docID,
                 ]),
             tool(
@@ -993,7 +1091,8 @@ extension AgentServer {
                 "set_live_photo_frame",
                 "Shows a different moment of a live photo layer's video — the layer's pixels "
                     + "are re-rendered from that frame as one undo step, and everything else "
-                    + "about the layer (name, position, opacity, blend mode, mask) is kept. "
+                    + "about the layer (name, position, opacity, blend mode, mask, style and "
+                    + "transform) is kept. "
                     + "Frames are scaled to the layer's size, and the key frame is the "
                     + "full-resolution photo itself, so times away from it are softer. "
                     + "Errors when the target layer is not a live photo layer "
@@ -1159,13 +1258,18 @@ extension AgentServer {
                     "document_id": docID,
                 ]),
             tool(
-                "rotate", "Rotates the whole document clockwise.",
+                "rotate",
+                "Rotates the whole document clockwise. Re-editable text, shape and Live "
+                    + "Photo layers stay re-editable: the op composes into their "
+                    + "descriptions (a later edit lands in place).",
                 [
                     "degrees": ["type": "integer", "enum": [90, 180, 270, -90]],
                     "document_id": docID,
                 ], required: ["degrees"]),
             tool(
-                "flip", "Flips the whole document.",
+                "flip",
+                "Flips the whole document. Re-editable text, shape and Live Photo layers "
+                    + "stay re-editable: the op composes into their descriptions.",
                 [
                     "axis": ["type": "string", "enum": ["horizontal", "vertical"]],
                     "document_id": docID,
@@ -1194,7 +1298,9 @@ extension AgentServer {
                 ], required: ["x", "y", "width", "height"]),
             tool(
                 "image_size",
-                "Scales the whole document to a new size (max 100 megapixels).",
+                "Scales the whole document to a new size (max 100 megapixels). Re-editable "
+                    + "text, shape and Live Photo layers stay re-editable: the scale composes "
+                    + "into their descriptions, and text and shapes re-render crisply.",
                 [
                     "width": ["type": "integer"], "height": ["type": "integer"],
                     "filter": [

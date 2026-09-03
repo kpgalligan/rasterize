@@ -278,11 +278,12 @@ final class ImageCanvasView: NSView {
     private var handPanAnchorWindow: NSPoint?
     private var handPanScrollOrigin: NSPoint?
 
-    var textFont: NSFont = .systemFont(ofSize: 48)
-    /// How text-session lines align. The live session aligns within its
-    /// editing box; the commit aligns within the laid-out block
-    /// (TextLayer.render), which matches once the text wraps to fill it.
-    var textAlignment: NSTextAlignment = .left
+    /// The typography a text session draws with — exactly the attributes
+    /// the commit renders with (TextStyle.attributes), so what is previewed
+    /// is what lands. The live session aligns within its editing box; the
+    /// commit aligns within the laid-out block (TextLayer.render), which
+    /// matches once the text wraps to fill it.
+    var textStyle = TextStyle(family: "Helvetica Neue", size: 48)
 
     /// True while brush and eraser edit the active layer's MASK instead of
     /// its pixels (the layers panel's paint target). A mask is coverage, not
@@ -326,12 +327,12 @@ final class ImageCanvasView: NSView {
     /// beginTextSession.
     var onTextClick: ((CGPoint) -> Void)?
 
-    /// Called once per text-session commit with the session's parameters,
-    /// the canvas-space origin of the text block, the width it wrapped at,
-    /// and the text layer being re-edited (nil when the session is new). The
-    /// receiver renders the description into a text LAYER; the canvas itself
-    /// paints nothing.
-    var onCommitText: ((_ payload: TextLayerPayload, _ origin: CGPoint, _ wrapWidth: CGFloat, _ editingLayer: Int?) -> Void)?
+    /// Called once per text-session commit with the session's description
+    /// (its wrap width rides inside it as the box), the canvas-space origin
+    /// of the text block, and the text layer being re-edited (nil when the
+    /// session is new). The receiver renders the description into a text
+    /// LAYER; the canvas itself paints nothing.
+    var onCommitText: ((_ payload: TextLayerPayload, _ origin: CGPoint, _ editingLayer: Int?) -> Void)?
 
     /// Fired whenever a text session goes away, committed or cancelled (the
     /// receiver drops any preview it put up for the session).
@@ -1911,33 +1912,47 @@ final class ImageCanvasView: NSView {
     // MARK: - Text sessions
 
     /// Opens the on-canvas editor at `point` (the text block's top-left in
-    /// image pixels), pre-filled with `string`. `editingLayer` marks the
-    /// session as a re-edit of that text layer: the commit replaces its
-    /// content instead of adding a layer. The session always draws with the
-    /// canvas's current textFont/paintColor, so the caller restores those
-    /// from the layer's description first. `selectAll` opens with the whole
-    /// string selected — the layers panel's double-click, which has no click
-    /// position to put a caret at, so typing replaces the text.
+    /// image pixels — a re-edit's anchor), pre-filled with `string` and
+    /// `width` wide (nil = the legacy default, `TextLayer.legacyBoxWidth`).
+    /// `editingLayer` marks the session as a re-edit of that text layer: the
+    /// commit replaces its content instead of adding a layer. The session
+    /// always draws with the canvas's current textStyle/paintColor, so the
+    /// caller restores those from the layer's description first.
+    /// `selectAll` opens with the whole string selected — the layers panel's
+    /// double-click, which has no click position to put a caret at, so
+    /// typing replaces the text.
+    ///
+    /// A NEW session is shifted left rather than letting the box overhang
+    /// the right edge, where committed glyphs would be clipped. A RE-EDIT
+    /// is clamped into the canvas on both axes and scrolled into view: the
+    /// commit takes the layer's anchor from the document, never from the
+    /// editor's origin (EditorViewController.commitTextLayer), so the shift
+    /// can neither register a phantom edit nor displace the layer — and
+    /// without it a transformed layer, whose anchor is the block's origin
+    /// (a half turn puts that at the raster's far corner), or one nudged
+    /// off-canvas would open an editor nobody can see.
     func beginTextSession(
-        at point: CGPoint, string: String = "", editingLayer: Int? = nil,
-        selectAll: Bool = false
+        at point: CGPoint, width: CGFloat? = nil, string: String = "",
+        editingLayer: Int? = nil, selectAll: Bool = false
     ) {
-        // Shift the box left rather than letting the 40px minimum overhang
-        // the right edge, where committed glyphs would be clipped away.
-        let width = min(600, max(bounds.width - point.x, 40))
+        let width = width.map { min(max($0, 1), CGFloat(TextLayer.maxBoxWidth)) }
+            ?? TextLayer.legacyBoxWidth(canvasWidth: bounds.width, anchorX: point.x)
+        let height = textStyle.nsFont.pointSize * 1.5
         let x = max(0, min(point.x, bounds.width - width))
-        let height = textFont.pointSize * 1.5
+        let y = editingLayer == nil ? point.y : max(0, min(point.y, bounds.height - height))
         let textView = CanvasTextView(
-            frame: NSRect(x: x, y: point.y, width: width, height: height))
+            frame: NSRect(x: x, y: y, width: width, height: height))
         textView.drawsBackground = false
         textView.isRichText = false
         textView.allowsUndo = false
-        textView.font = textFont
+        textView.font = textStyle.nsFont
         textView.string = string
         textView.textColor = paintColor
         textView.insertionPointColor = paintColor
-        textView.defaultParagraphStyle = TextLayer.paragraphStyle(textAlignment)
-        textView.alignment = textAlignment
+        textView.typingAttributes = textStyle.attributes(color: paintColor)
+        textView.defaultParagraphStyle = TextStyle.paragraphStyle(
+            alignment: textStyle.alignment, leading: textStyle.leading)
+        textView.alignment = textStyle.alignment
         textView.minSize = NSSize(width: width, height: height)
         textView.maxSize = NSSize(width: width, height: 10_000_000)
         textView.textContainer?.widthTracksTextView = true
@@ -1954,6 +1969,7 @@ final class ImageCanvasView: NSView {
         if !string.isEmpty {
             updateActiveTextSessionStyle()
         }
+        textView.scrollToVisible(textView.bounds)
         needsDisplay = true
         window?.makeFirstResponder(textView)
         // Last, so the restyling above (which rewrites the storage) cannot
@@ -1963,22 +1979,20 @@ final class ImageCanvasView: NSView {
         }
     }
 
-    /// Applies the current textFont/paintColor/textAlignment to the whole
-    /// active session (called by the view controller when the options
-    /// change).
+    /// Applies the current textStyle/paintColor to the whole active session
+    /// (called by the view controller when the options change).
     func updateActiveTextSessionStyle() {
         guard let textView = activeTextView else { return }
-        textView.font = textFont
+        let attributes = textStyle.attributes(color: paintColor)
+        textView.font = textStyle.nsFont
         textView.textColor = paintColor
         textView.insertionPointColor = paintColor
-        textView.defaultParagraphStyle = TextLayer.paragraphStyle(textAlignment)
-        textView.alignment = textAlignment
+        textView.defaultParagraphStyle = TextStyle.paragraphStyle(
+            alignment: textStyle.alignment, leading: textStyle.leading)
+        textView.alignment = textStyle.alignment
+        textView.typingAttributes = attributes
         if let storage = textView.textStorage, storage.length > 0 {
-            let range = NSRange(location: 0, length: storage.length)
-            storage.addAttribute(.font, value: textFont, range: range)
-            storage.addAttribute(.foregroundColor, value: paintColor, range: range)
-            storage.addAttribute(
-                .paragraphStyle, value: TextLayer.paragraphStyle(textAlignment), range: range)
+            storage.setAttributes(attributes, range: NSRange(location: 0, length: storage.length))
         }
         resizeActiveTextSession()
     }
@@ -1990,7 +2004,7 @@ final class ImageCanvasView: NSView {
         else { return }
         layoutManager.ensureLayout(for: container)
         let used = layoutManager.usedRect(for: container)
-        let minHeight = (textView.font ?? textFont).pointSize * 1.5
+        let minHeight = (textView.font ?? textStyle.nsFont).pointSize * 1.5
         let height = max(used.height + textView.textContainerInset.height * 2 + 2, minHeight)
         if abs(textView.frame.height - height) > 0.5 {
             var frame = textView.frame
@@ -2000,9 +2014,9 @@ final class ImageCanvasView: NSView {
         needsDisplay = true
     }
 
-    /// Hands the session's text off as a DESCRIPTION — string, font, size,
-    /// color and alignment plus the origin and wrap width it was laid out at
-    /// — so the receiver can render it into a re-editable text layer. An
+    /// Hands the session's text off as a DESCRIPTION — string, typography,
+    /// color and the box it wrapped in, plus the origin it was laid out at —
+    /// so the receiver can render it into a re-editable text layer. An
     /// all-whitespace session cancels instead.
     func commitTextSession() {
         guard let textView = activeTextView else { return }
@@ -2011,24 +2025,26 @@ final class ImageCanvasView: NSView {
             cancelTextSession()
             return
         }
-        let sessionFont = textView.font ?? textFont
         let sessionColor = textView.textColor ?? paintColor
         let origin = textView.frame.origin
         let width = textView.frame.width
         let editingLayer = textSessionLayer
         removeTextSessionView()
 
-        // A session pushed fully outside the image (e.g. the canvas shrank
-        // underneath it) has nothing to contribute; skip the empty undo step.
-        guard origin.x < bounds.width, origin.y < bounds.height, origin.x + width > 0 else {
-            return
-        }
+        // A NEW session pushed fully outside the image (e.g. the canvas
+        // shrank underneath it) has nothing to contribute; skip the empty
+        // undo step. A re-edit whose anchor sits off-canvas is still the
+        // user's edit — an unchanged one is caught by the commit's no-op
+        // guard.
+        guard editingLayer != nil
+            || (origin.x < bounds.width && origin.y < bounds.height && origin.x + width > 0)
+        else { return }
 
         onCommitText?(
             TextLayerPayload(
-                string: string, font: sessionFont, color: sessionColor,
-                alignment: textAlignment),
-            origin, width, editingLayer)
+                string: string, style: textStyle, color: sessionColor,
+                box: .width(Double(width))),
+            origin, editingLayer)
         needsDisplay = true
     }
 

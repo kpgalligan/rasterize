@@ -376,6 +376,24 @@ final class RasterDocument {
         return wrapImage(rz_doc_layer_image(ptr, idx))
     }
 
+    /// Layer `idx`'s own straight RGBA8 bytes (width*height*4, row 0 = top),
+    /// read back verbatim through rz_doc_layer_image — the pixel twin of
+    /// `layerMaskCoverage`, for the byte-exact refits described layers make
+    /// (no CoreGraphics round trip, so no premultiply loses low bits). nil
+    /// for an out-of-range index or an empty layer.
+    func layerPixels(_ idx: Int) -> [UInt8]? {
+        guard isValidIndex(idx), let image = rz_doc_layer_image(ptr, idx) else {
+            return nil
+        }
+        defer { rz_image_free(image) }
+        let width = Int(rz_image_width(image))
+        let height = Int(rz_image_height(image))
+        guard width > 0, height > 0, let pixels = rz_image_pixels_rgba(image) else {
+            return nil
+        }
+        return Array(UnsafeBufferPointer(start: pixels, count: width * height * 4))
+    }
+
     /// A layer's own pixels on a transparent canvas-sized image, placed at
     /// its offset — `flattened()` for a single layer, and what Copy puts on
     /// the clipboard. Opacity, blend mode, visibility and the mask are
@@ -445,6 +463,39 @@ final class RasterDocument {
             wrap(
                 rz_doc_with_layer_pixels_rgba(
                     ptr, idx, buffer.baseAddress, UInt32(width), UInt32(height)))
+        }
+    }
+
+    /// The ONE-step twin of withLayerPixels + withLayerOffset (+ a mask):
+    /// straight RGBA8 `pixels`, new offset, and `mask` (nil = the layer
+    /// ends with no mask; a plane must be exactly width*height bytes) —
+    /// rz_doc_set_layer_content, the re-render primitive behind described
+    /// layers (DescribedLayer.swift). A given mask keeps the layer's
+    /// mask-enabled flag; no mask resets it. nil on a bad size, a mask of
+    /// the wrong length, or an out-of-range index.
+    func setLayerContent(
+        _ idx: Int, rgba pixels: [UInt8], width: Int, height: Int,
+        offsetX: Int, offsetY: Int, mask: [UInt8]?
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), width > 0, height > 0,
+              pixels.count == width * height * 4,
+              width * height <= RasterImage.maxResizePixels,
+              mask == nil || mask?.count == width * height
+        else { return nil }
+        let x = Int32(clamping: offsetX)
+        let y = Int32(clamping: offsetY)
+        return pixels.withUnsafeBufferPointer { buffer in
+            guard let mask = mask else {
+                return wrap(
+                    rz_doc_set_layer_content(
+                        ptr, idx, buffer.baseAddress, UInt32(width), UInt32(height), x, y, nil))
+            }
+            return mask.withUnsafeBufferPointer { plane in
+                wrap(
+                    rz_doc_set_layer_content(
+                        ptr, idx, buffer.baseAddress, UInt32(width), UInt32(height), x, y,
+                        plane.baseAddress))
+            }
         }
     }
 
@@ -681,6 +732,27 @@ final class RasterDocument {
         return wrapImage(rz_doc_layer_mask_image(ptr, idx))
     }
 
+    /// Layer `idx`'s mask as a coverage plane (width*height bytes, row 0 =
+    /// top — the selection convention at the LAYER's size), read back
+    /// through rz_doc_layer_mask_image (opaque grayscale RGBA: the red
+    /// channel is the coverage). nil without a mask.
+    func layerMaskCoverage(_ idx: Int) -> [UInt8]? {
+        guard isValidIndex(idx), let image = rz_doc_layer_mask_image(ptr, idx) else {
+            return nil
+        }
+        defer { rz_image_free(image) }
+        let width = Int(rz_image_width(image))
+        let height = Int(rz_image_height(image))
+        guard width > 0, height > 0, let pixels = rz_image_pixels_rgba(image) else {
+            return nil
+        }
+        var plane = [UInt8](repeating: 0, count: width * height)
+        for i in 0..<(width * height) {
+            plane[i] = pixels[i * 4]
+        }
+        return plane
+    }
+
     func layerHasMask(_ idx: Int) -> Bool {
         guard isValidIndex(idx) else { return false }
         return rz_doc_layer_has_mask(ptr, idx)
@@ -804,15 +876,20 @@ final class RasterDocument {
     func transformingLayer(
         _ idx: Int, _ transform: CGAffineTransform, sampler: RzResizeFilter
     ) -> RasterDocument? {
-        guard isValidIndex(idx) else { return nil }
+        guard isValidIndex(idx), let affine = Self.affineElements(transform) else { return nil }
+        return affine.withUnsafeBufferPointer { buffer in
+            wrap(rz_doc_transform_layer(ptr, idx, buffer.baseAddress, sampler))
+        }
+    }
+
+    /// The six elements in the order the FFI reads them, [a, b, c, d, tx,
+    /// ty]; nil when any is not finite (a matrix the core would refuse).
+    private static func affineElements(_ transform: CGAffineTransform) -> [Double]? {
         let affine: [Double] = [
             Double(transform.a), Double(transform.b), Double(transform.c),
             Double(transform.d), Double(transform.tx), Double(transform.ty),
         ]
-        guard affine.allSatisfy({ $0.isFinite }) else { return nil }
-        return affine.withUnsafeBufferPointer { buffer in
-            wrap(rz_doc_transform_layer(ptr, idx, buffer.baseAddress, sampler))
-        }
+        return affine.allSatisfy({ $0.isFinite }) ? affine : nil
     }
 
     /// Perspective transform of ONE layer: maps its canvas rect

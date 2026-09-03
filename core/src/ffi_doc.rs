@@ -7,7 +7,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use image::imageops::FilterType;
-use image::RgbaImage;
+use image::{GrayImage, RgbaImage};
 
 use crate::adjust::Adjustment;
 use crate::doc::{BlendMode, MaskKind, RzDocument, MAX_PIXELS};
@@ -444,6 +444,57 @@ pub unsafe extern "C" fn rz_doc_with_layer_pixels_rgba(
             let src = std::slice::from_raw_parts(src, len);
             let pixels = RgbaImage::from_raw(w, h, src.to_vec())?;
             d.with_layer_pixels(idx, pixels)
+        })
+    }
+}
+
+/// Replaces layer `idx`'s pixels, offset and mask in ONE pure step — the
+/// re-render primitive for a described layer whose raster, position and
+/// mask change together. `src` is straight RGBA8, `w * h * 4` bytes, row 0
+/// top; `mask` is NULL (the layer ends with no mask; `mask_enabled` resets
+/// to true) or exactly `w * h` coverage bytes at the pixels' size
+/// (`mask_enabled` is kept). Name, opacity, blend mode, visibility,
+/// metadata, style and clipped flag survive. NULL on out-of-range idx, NULL
+/// src, zero dimensions, or dimensions past the `MAX_PIXELS` ceiling —
+/// bounded before anything is read, as for `rz_doc_with_layer_pixels_rgba`.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `src` must
+/// be NULL or a valid pointer to at least `w * h * 4` readable bytes; `mask`
+/// must be NULL or a valid pointer to at least `w * h` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_set_layer_content(
+    doc: *const RzDocument,
+    idx: usize,
+    src: *const u8,
+    w: u32,
+    h: u32,
+    x: i32,
+    y: i32,
+    mask: *const u8,
+) -> *mut RzDocument {
+    // The dimensions are the buffers' only declared length, so they are
+    // bounded before any slice is built from them — the
+    // rz_doc_with_layer_pixels_rgba rule.
+    if src.is_null() || w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
+        return ptr::null_mut();
+    }
+    unsafe {
+        doc_op(doc, |d| {
+            // Both lengths are recomputed from the same dimensions that
+            // size the layer, with checked arithmetic — never trusted from
+            // a separate length argument.
+            let count = (w as usize).checked_mul(h as usize)?;
+            let len = count.checked_mul(4)?;
+            let src = std::slice::from_raw_parts(src, len);
+            let pixels = RgbaImage::from_raw(w, h, src.to_vec())?;
+            let mask = if mask.is_null() {
+                None
+            } else {
+                let plane = std::slice::from_raw_parts(mask, count);
+                Some(GrayImage::from_raw(w, h, plane.to_vec())?)
+            };
+            d.set_layer_content(idx, pixels, (x, y), mask)
         })
     }
 }

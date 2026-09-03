@@ -10,6 +10,7 @@ pub mod agent;
 pub mod assistant;
 mod blend;
 pub mod doc;
+pub mod doc_content;
 pub mod doc_paint;
 pub mod doc_perspective;
 pub mod doc_retouch;
