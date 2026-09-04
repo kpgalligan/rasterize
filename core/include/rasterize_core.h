@@ -207,9 +207,12 @@ void rz_doc_free(RzDocument *doc);
 
 /* Writes the native RZDC format (all layers preserved). Atomic like
  * rz_image_save. The writer enforces the reader's limits so every file it
- * produces can be read back: more than 1024 layers or a layer PNG over
- * 512 MiB is an error; layer names longer than 64 KiB are truncated on a
- * UTF-8 character boundary. Layout (little-endian): "RZDC", u32 version=4,
+ * produces can be read back: more than 1024 layers, more than 256 channels,
+ * more than 900000000 channel pixels in total (the budget the "Channels"
+ * section below states, and the one rz_max_channels_at answers), or a layer
+ * or channel PNG over 512 MiB is an error; layer and channel names longer
+ * than 64 KiB are truncated on a UTF-8 character boundary. Layout
+ * (little-endian): "RZDC", u32 version=5,
  * u32 canvas width, u32 canvas height, u32 layer count, then (version 4)
  * f32 global-light angle and f32 altitude in degrees; then per layer
  * bottom-to-top: u32 name byte length + UTF-8 name, i32 offset x, i32
@@ -223,11 +226,18 @@ void rz_doc_free(RzDocument *doc);
  * version-2 fields (each older record is a strict prefix of the next): u8
  * clipped (see "Clipping masks" below); then the version-4 field: u8
  * layer-style present and, when present, u32 byte length + UTF-8 canonical
- * style JSON (see "Layer styles" below). Version-1, -2 and -3 files still
+ * style JSON (see "Layer styles" below). After the LAST layer record comes
+ * the version-5 block, the alpha channel list (see "Channels" below): u32
+ * channel count, then per channel u32 name byte length + UTF-8 name, u8
+ * overlay red, u8 green, u8 blue, f32 overlay opacity, u8 color-indicates-
+ * selected, and u32 PNG byte length + a PNG-encoded 8-bit GRAYSCALE (L8)
+ * plane of exactly the canvas size (a channel is always canvas-sized, so its
+ * dimensions are not stored twice). Version-1, -2, -3 and -4 files still
  * load, missing fields taking their defaults: no mask and no metadata on any
  * layer (v1), clipped false (v1 and v2), no style on any layer and a
- * (120°, 30°) global light (v1–v3). A style is read leniently: a style from
- * a newer build keeps the effects this build knows. */
+ * (120°, 30°) global light (v1–v3), and no channels (v1–v4). A style is read
+ * leniently: a style from a newer build keeps the effects this build
+ * knows. */
 bool rz_doc_save_native(const RzDocument *doc, const char *path,
                         char **err_out);
 
@@ -371,7 +381,11 @@ RzDocument *rz_doc_crop(const RzDocument *doc, uint32_t x, uint32_t y,
 
 /* Scales the canvas and every layer (sizes and offsets) proportionally.
  * Limits as rz_image_resize. Layer styles scale with their layers ("Scale
- * Effects", by the mean factor sqrt(fx * fy); see "Layer styles" below). */
+ * Effects", by the mean factor sqrt(fx * fy); see "Layer styles" below).
+ * Alpha channels resample to the new canvas with it, so this is also NULL
+ * when the enlarged channel list would break the .rz total-channel-pixel
+ * budget (see "Channels") — the refusal lands here, where the user can
+ * delete channels, rather than at save time. */
 RzDocument *rz_doc_resize(const RzDocument *doc, uint32_t w, uint32_t h,
                           RzResizeFilter filter);
 
@@ -379,8 +393,11 @@ RzDocument *rz_doc_resize(const RzDocument *doc, uint32_t w, uint32_t h,
  * and every layer's offset shifts by (origin_x, origin_y) — where the old
  * canvas's top-left corner lands in the new canvas. Layer pixels are
  * untouched; content outside the new canvas is retained (as with
- * rz_doc_crop) and can be revealed later. NULL if w == 0, h == 0, or
- * w*h > 100000000. */
+ * rz_doc_crop) and can be revealed later. Alpha channels are canvas-sized,
+ * so they are padded with 0 to the new canvas; growing past the .rz
+ * total-channel-pixel budget is refused here for the same reason
+ * rz_doc_resize refuses it. NULL if w == 0, h == 0, w*h > 100000000, or that
+ * budget would break. */
 RzDocument *rz_doc_canvas_resize(const RzDocument *doc, uint32_t w,
                                  uint32_t h, int32_t origin_x,
                                  int32_t origin_y);
@@ -698,6 +715,272 @@ RzImage *rz_doc_layer_mask_image(const RzDocument *doc, size_t idx);
  * nothing to enable), so it can drive a checkbox or menu item directly. */
 bool rz_doc_layer_has_mask(const RzDocument *doc, size_t idx);
 bool rz_doc_layer_mask_enabled(const RzDocument *doc, size_t idx);
+
+/* ---- Channels -----------------------------------------------------------
+ *
+ * A channel is a NAMED, CANVAS-SIZED u8 coverage plane stored on the
+ * document — a saved selection, in exactly the representation selections and
+ * layer masks already use (0 outside, 255 inside, intermediate =
+ * anti-aliased edge). Channels never composite: they carry an overlay
+ * colour, opacity and polarity only so a host can draw one as a rubylith.
+ * Every canvas-geometry op keeps them canvas-sized — rz_doc_crop crops them,
+ * rz_doc_canvas_resize pads with 0, the rotations and flips permute them,
+ * rz_doc_resize resamples them; the per-layer ops leave them untouched, and
+ * rz_doc_flattening keeps them. A host-composed whole-document rotation (the
+ * Crop tool's straighten, which is rz_doc_transform_layer over every layer
+ * followed by rz_doc_crop) is the one geometry the core cannot recognize as
+ * such, so it has an op of its own: rz_doc_transform_channels turns the
+ * channels by the same matrix inside the same edit. They are written by rz_doc_save_native (they
+ * are what bumped the RZDC format to version 5).
+ *
+ * A PLANE crossing this boundary is always canvas width*height bytes, row 0
+ * top — the selection convention — with THREE exceptions: rz_doc_add_channel,
+ * which resamples a caller-sized plane, rz_image_plane, whose buffer is the
+ * IMAGE's size, and rz_doc_with_layer_space_plane, whose buffer is the
+ * LAYER's. Each is called out at its declaration.
+ *
+ * At most 256 channels, and at most 900000000 channel pixels in total (nine
+ * full canvases, so that rz_doc_add_luminosity_masks' fixed nine always fit
+ * a canvas this library will build); every op that creates channels — and
+ * every op that GROWS the canvas under them, rz_doc_resize and
+ * rz_doc_canvas_resize — refuses
+ * rather than build a document rz_doc_save_native could write and
+ * rz_doc_open could not read. rz_max_channels_at answers the same budget as
+ * a number, so a host can name it in the refusal instead of just failing. */
+
+typedef enum {
+  RZ_PLANE_RED = 0,
+  RZ_PLANE_GREEN = 1,
+  RZ_PLANE_BLUE = 2,
+  RZ_PLANE_ALPHA = 3,
+  RZ_PLANE_LUMA = 4, /* Rec. 709 luma; read-only */
+  RZ_PLANE_MASK = 5, /* a layer's mask; read-only, layers only */
+} RzPlane;
+
+/* --- channel list (getters) --- */
+
+/* The largest channel count a w*h canvas may carry under both caps. No
+ * document and no pointers: a zero dimension answers the count cap. Ask it
+ * before Image Size, Canvas Size or rz_doc_add_luminosity_masks to tell the
+ * user WHY those refuse, and how many channels would have to go. */
+size_t rz_max_channels_at(uint32_t w, uint32_t h);
+
+size_t rz_doc_channel_count(const RzDocument *doc);
+
+/* Channel i's STABLE IDENTITY: unique among every channel this process has
+ * minted, and the handle a host hangs per-channel view state on (which
+ * channel's eye is on, say). Names are not unique and every insert, delete or
+ * undo renumbers the list, so neither can identify a channel across an edit;
+ * the id survives a rename, a plane edit, the geometry ops and undo/redo,
+ * rz_doc_duplicate_channel mints a fresh one for the copy, and a channel that
+ * is gone takes its id with it. NOT persisted — rz_doc_open mints new ids, so
+ * the identity holds for as long as a document is open, not across sessions.
+ * 0 on NULL doc / bad index, which no live channel ever answers. */
+uint64_t rz_doc_channel_id(const RzDocument *doc, size_t i);
+
+/* Heap UTF-8 name, free with rz_string_free; NULL on NULL doc / bad index. */
+char *rz_doc_channel_name(const RzDocument *doc, size_t i);
+
+/* Writes 3 bytes (r, g, b) into rgb_out. false on NULL / bad index. */
+bool rz_doc_channel_overlay_color(const RzDocument *doc, size_t i,
+                                  uint8_t *rgb_out);
+
+/* 0.0 on NULL doc or bad index. */
+float rz_doc_channel_overlay_opacity(const RzDocument *doc, size_t i);
+
+/* "Color Indicates: Selected Areas" when true; false (the default) means the
+ * wash covers the MASKED areas, matching Quick Mask. false on NULL. */
+bool rz_doc_channel_color_indicates_selected(const RzDocument *doc, size_t i);
+
+/* --- channel list (pure mutators; NULL = refusal, per the doc comments) --- */
+
+/* Appends a channel from `plane` (w*h coverage bytes, row 0 top), with the
+ * default masked-areas polarity (rz_doc_set_channel_overlay changes it).
+ * THE FIRST EXCEPTION to the canvas-sized rule: when w/h differ from the
+ * canvas the plane is resampled bilinearly to it (the iPhone
+ * auxiliary-matte path), and the length therefore comes from the CALLER's
+ * w*h with checked arithmetic, exactly as rz_doc_with_layer_pixels_rgba
+ * already does. NULL on NULL args, w or h == 0, w*h > 100000000, a full
+ * channel list (256), or a channel list that would exceed the total pixel
+ * budget (so every document this builds can be saved and reopened). */
+RzDocument *rz_doc_add_channel(const RzDocument *doc, const char *name,
+                               const uint8_t *plane, uint32_t w, uint32_t h,
+                               uint8_t red, uint8_t green, uint8_t blue,
+                               float overlay_opacity);
+
+RzDocument *rz_doc_remove_channel(const RzDocument *doc, size_t i);
+
+/* NULL on a bad index or a name the channel already has. */
+RzDocument *rz_doc_rename_channel(const RzDocument *doc, size_t i,
+                                  const char *name);
+
+/* All three display options at once — colour, opacity and polarity (one undo
+ * step for the options sheet).
+ * NULL when none of them would change. */
+RzDocument *rz_doc_set_channel_overlay(const RzDocument *doc, size_t i,
+                                       uint8_t red, uint8_t green,
+                                       uint8_t blue, float overlay_opacity,
+                                       bool color_indicates_selected);
+
+/* `plane` is canvas-sized (w and h must equal the canvas exactly). NULL when
+ * the bytes are identical to the channel's current plane. */
+RzDocument *rz_doc_set_channel_data(const RzDocument *doc, size_t i,
+                                    const uint8_t *plane, uint32_t w,
+                                    uint32_t h);
+
+/* Inserts a copy right after i, named "<name> copy". */
+RzDocument *rz_doc_duplicate_channel(const RzDocument *doc, size_t i);
+
+/* 255 - v. NULL only on a bad index. */
+RzDocument *rz_doc_invert_channel(const RzDocument *doc, size_t i);
+
+/* Appends nine channels built from the composite's Rec. 709 luma L:
+ * "Lights n" = L^n, "Darks n" = (1-L)^n and "Midtones n" =
+ * clamp(1 - L^(n+1) - (1-L)^(n+1)) for n = 1, 2, 3, in that order. The
+ * midtone exponent is offset by one deliberately: the linear pair sums to 1
+ * at every pixel, so the un-offset formula would be black everywhere.
+ * NULL when the nine would not fit under either cap. */
+RzDocument *rz_doc_add_luminosity_masks(const RzDocument *doc);
+
+/* Resamples EVERY channel through an affine matrix in CANVAS coordinates —
+ * the same six doubles in the same order, and the same RzResizeFilter kernel,
+ * as rz_doc_transform_layer. For the one edit that turns the whole picture in
+ * place: a straighten (rz_doc_transform_layer over every layer, then
+ * rz_doc_crop) must carry the channels too, or every saved selection silently
+ * stops lining up with the picture it was saved from. The channels stay
+ * canvas-sized — the destination IS the canvas, so coverage rotated off it is
+ * dropped (a straighten's crop rect lies inside the canvas, so nothing that
+ * could survive the crop is lost) and destinations with no source read 0,
+ * exactly as a layer mask does under the same matrix.
+ *
+ * NULL on NULL args, a document with no channels, a non-finite or singular
+ * matrix, an unknown filter, or when no byte would change. */
+RzDocument *rz_doc_transform_channels(const RzDocument *doc,
+                                      const double *affine,
+                                      RzResizeFilter sampler);
+
+/* --- planes out, straight into a caller buffer (no image round trip) ---
+ * All write exactly w*h bytes and return false on NULL, a dimension
+ * mismatch, a bad index, or a plane this source cannot supply
+ * (RZ_PLANE_MASK from a composite or an image, a layer with no mask). */
+
+/* One plane of the FLATTENED composite. A ONE-SHOT op — it runs the whole
+ * projection, so a host drawing a plane repeatedly reads its own cached
+ * projection with rz_image_plane instead. */
+bool rz_doc_composite_plane(const RzDocument *doc, RzPlane plane,
+                            uint8_t *out, uint32_t w, uint32_t h);
+
+/* One plane of layer idx, CANVAS-sized: pixels outside the layer's rect read
+ * 0 for every plane, RZ_PLANE_MASK included (outside the layer there is
+ * nothing for a mask to reveal). */
+bool rz_doc_layer_plane(const RzDocument *doc, size_t idx, RzPlane plane,
+                        uint8_t *out, uint32_t w, uint32_t h);
+
+bool rz_doc_channel_plane(const RzDocument *doc, size_t i, uint8_t *out,
+                          uint32_t w, uint32_t h);
+
+/* THE SECOND EXCEPTION to the canvas-sized rule: w and h are the IMAGE's own
+ * dimensions. For an opaque grayscale image RZ_PLANE_LUMA is the identity,
+ * which makes this the lossless reader for the plane images below — and the
+ * definition of "take the result's gray" for an op that un-grays one. */
+bool rz_image_plane(const RzImage *img, RzPlane plane, uint8_t *out,
+                    uint32_t w, uint32_t h);
+
+/* --- planes out as opaque GRAYSCALE RGBA images (r == g == b, alpha 255) ---
+ * max_side == 0 gives the plane at full size; otherwise the image is
+ * aspect-fit with its longest side == max_side (the rz_doc_layer_thumbnail
+ * rule). rz_image_plane_image reads a plane out of an image the host ALREADY
+ * HAS — the cached projection — and is what a Channels panel's composite
+ * rows and a plane canvas view use; the rz_doc_composite_* form re-flattens
+ * and is for one-shot work only. */
+RzImage *rz_image_plane_image(const RzImage *img, RzPlane plane,
+                              uint32_t max_side);
+RzImage *rz_doc_composite_plane_image(const RzDocument *doc, RzPlane plane,
+                                      uint32_t max_side);
+RzImage *rz_doc_layer_plane_image(const RzDocument *doc, size_t idx,
+                                  RzPlane plane, uint32_t max_side);
+RzImage *rz_doc_channel_image(const RzDocument *doc, size_t i,
+                              uint32_t max_side);
+
+/* --- plane writers --- */
+
+/* Replaces ONLY `plane` of layer idx's pixels from a CANVAS-sized `src`,
+ * inside the layer's rect (mapped through the layer's offset exactly as
+ * rz_doc_painting_layer maps a stroke). RZ_PLANE_ALPHA writes STRAIGHT alpha
+ * and clears the colour bytes of any pixel whose new alpha is 0. NULL for
+ * RZ_PLANE_LUMA or RZ_PLANE_MASK, NULL args, dimension mismatch,
+ * out-of-range idx, a layer extent that misses the canvas, or when no byte
+ * would change — so a caller writing several planes must tolerate NULL per
+ * plane. */
+RzDocument *rz_doc_with_layer_plane(const RzDocument *doc, size_t idx,
+                                    RzPlane plane, const uint8_t *src,
+                                    uint32_t w, uint32_t h);
+
+/* THE THIRD EXCEPTION to the canvas-sized rule: `src` is LAYER-sized — w and
+ * h must equal layer idx's own pixel dimensions — and every sample is
+ * written, including the part of the layer that hangs off the canvas. The
+ * writer for the filter/adjustment round trip (rz_doc_layer_image +
+ * rz_image_plane read the plane at that same size, so a neighbourhood filter
+ * sees the layer's own border pixels rather than the zeros a canvas-sized
+ * read leaves outside its rect); its canvas-sized sibling above would leave
+ * the off-canvas ring of that ONE plane unfiltered, which the next Canvas
+ * Size or Move turns into a colour seam. Same alpha rule and same refusals as
+ * the sibling, plus NULL for a `src` that is not the layer's size. */
+RzDocument *rz_doc_with_layer_space_plane(const RzDocument *doc, size_t idx,
+                                          RzPlane plane, const uint8_t *src,
+                                          uint32_t w, uint32_t h);
+
+/* --- coverage painting (the mask-painting lerp; see
+ *     rz_doc_painting_layer_mask for the formula) ---
+ * `src` is a canvas-sized PREMULTIPLIED RGBA8 overlay, the very buffer
+ * rz_doc_painting_layer takes: white paints toward 255, black toward 0, the
+ * overlay's alpha carries the stroke's coverage. Both return NULL when no
+ * byte would change (white over white is not an edit).
+ *
+ * rz_doc_painting_layer_plane refuses RZ_PLANE_LUMA and RZ_PLANE_MASK
+ * (RZ_PLANE_MASK is rz_doc_painting_layer_mask's job) and, unlike
+ * rz_doc_with_layer_plane, never clears the colour bytes when it paints
+ * alpha to 0: a stroke is incremental, and the colour must survive an alpha
+ * that dips and is painted back up. */
+RzDocument *rz_doc_painting_channel(const RzDocument *doc, size_t i,
+                                    const uint8_t *src, uint32_t w,
+                                    uint32_t h);
+RzDocument *rz_doc_painting_layer_plane(const RzDocument *doc, size_t idx,
+                                        RzPlane plane, const uint8_t *src,
+                                        uint32_t w, uint32_t h);
+
+/* --- plane arithmetic (in place on CALLER-owned buffers, like the
+ *     rz_selection_* family) ---
+ * base = lerp(base, blend(base, source), opacity) per pixel, through the
+ * same blend table the projection uses; a gray value is the triple (v, v, v)
+ * and the result's gray is taken, so every SEPARABLE mode works, Dissolve's
+ * canvas-absolute dither included. The four NON-SEPARABLE modes (Hue,
+ * Saturation, Color, Luminosity) are REFUSED on a single plane: they are
+ * defined over an RGB triple, and a gray triple has zero saturation, which
+ * collapses three of them to the base and the fourth to Normal. Blend three
+ * planes as one colour with rz_blend_planes_rgb instead — that is where they
+ * mean something. invert_base and invert_source invert an operand FIRST, so
+ * the complement is both blended and lerped from. These two are the ONE
+ * arithmetic behind Apply Image and Calculations; Apply Image passes the
+ * target plane as `base`, Calculations passes Source 2 as `base` and Source 1
+ * as `source` (Photoshop's convention). false on NULL, a zero dimension,
+ * w*h > 100000000, an unknown mode, or a non-finite opacity; on false every
+ * buffer is left untouched.
+ *
+ * rz_blend_planes_rgb takes red, green and blue as three separate planes
+ * (base and source alike), blends them AS ONE COLOUR and writes the three
+ * results back into the base buffers — Apply Image with an RGB source onto an
+ * RGB target. It accepts every mode, the non-separable four included. The
+ * three base buffers should be distinct; aliasing them is defined but
+ * answers whichever write lands last. */
+bool rz_blend_planes(uint8_t *base, const uint8_t *source, uint32_t w,
+                     uint32_t h, RzBlendMode mode, float opacity,
+                     bool invert_base, bool invert_source);
+bool rz_blend_planes_rgb(uint8_t *base_r, uint8_t *base_g, uint8_t *base_b,
+                         const uint8_t *source_r, const uint8_t *source_g,
+                         const uint8_t *source_b, uint32_t w, uint32_t h,
+                         RzBlendMode mode, float opacity, bool invert_base,
+                         bool invert_source);
 
 /* ---- Clipping masks -----------------------------------------------------
  *

@@ -560,6 +560,35 @@ pub(crate) fn resample_mask(
     out
 }
 
+/// The whole-CANVAS twin of the per-layer resample: `src` is a canvas-space
+/// coverage plane and so is the result. There is no bounding box, because a
+/// canvas-space plane has nowhere to grow — every destination pixel centre is
+/// inverse-mapped through `m` and sampled with `filter`'s kernel, and a
+/// destination whose source lies off the plane reads 0, exactly as a layer
+/// mask does under the same rotation.
+///
+/// It is the ONE resampling primitive behind
+/// [`RzDocument::transform_channels`], which is why it lives here beside
+/// `resample_mask` rather than growing a second inverse map of its own: a
+/// channel and an identical layer mask carried through the same straighten
+/// must come out byte for byte the same. `None` for a non-finite or singular
+/// matrix (`|det| < `[`MIN_DETERMINANT`]) or a filter that is not one of the
+/// four `RzResizeFilter` values.
+pub(crate) fn resample_canvas_plane(
+    src: &GrayImage,
+    m: &Affine,
+    filter: FilterType,
+) -> Option<GrayImage> {
+    if !m.is_finite() {
+        return None;
+    }
+    let sampler = Sampler::from_filter(filter)?;
+    let inverse = m.inverse()?;
+    let (w, h) = src.dimensions();
+    let map = SourceMap::new(&inverse, (0, 0), (0, 0));
+    Some(resample_mask(src, (0, 0, w, h), &map, sampler))
+}
+
 /// The destination placement: the axis-aligned bounding box of the layer
 /// rect's four transformed corners, rounded OUTWARD (floor of the minima,
 /// ceil of the maxima) so no source pixel is clipped. A corner within

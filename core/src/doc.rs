@@ -16,8 +16,10 @@ use image::{GenericImageView, GrayImage, ImageBuffer, Luma, Pixel, RgbaImage};
 use crate::adjust::Adjustment;
 use crate::blend::{
     blend_kind, composite_buffer_into, composite_source_into, dissolve_threshold, paint_pixel,
-    BlendKind, LUMA_B, LUMA_G, LUMA_R,
+    BlendKind,
 };
+use crate::doc_channel::{self, Channel};
+use crate::doc_plane::channel_lerp;
 use crate::ops::CompositeMode;
 use crate::style::{scaled_style, GlobalLight, LayerStyle};
 use crate::style_composite::{composite_styled_into, merge_extent, CompositeEnv};
@@ -121,6 +123,9 @@ pub struct RzDocument {
     pub layers: Vec<Layer>,
     /// Shared light direction every "use global light" effect reads.
     pub global_light: GlobalLight,
+    /// Named canvas-sized coverage planes — saved selections. See
+    /// `doc_channel`; they never composite.
+    pub channels: Vec<Channel>,
 }
 
 /// Clamps opacity to [0, 1], mapping non-finite values to 1.
@@ -411,6 +416,7 @@ impl RzDocument {
             height,
             layers: vec![Layer::new(pixels, "Background")],
             global_light: GlobalLight::default(),
+            channels: Vec::new(),
         }
     }
 
@@ -685,10 +691,13 @@ impl RzDocument {
     /// pixels (a disabled mask is simply dropped with its layer), so the
     /// resulting layer carries neither a mask, meta nor style — nothing is
     /// left that could describe those pixels. The document's global light
-    /// is a preference, not layer state, and is kept.
+    /// is a preference, not layer state, and is kept; so are the alpha
+    /// channels, which are canvas-sized document state and have nothing to
+    /// do with the layer stack being collapsed.
     pub fn flattening(&self) -> Self {
         RzDocument {
             global_light: self.global_light,
+            channels: self.channels.clone(),
             ..RzDocument::from_pixels(self.flattened())
         }
     }
@@ -821,6 +830,7 @@ impl RzDocument {
             height: new_h,
             layers,
             global_light: self.global_light,
+            channels: doc_channel::geometry_channels(&self.channels, geom),
         }
     }
 
@@ -864,6 +874,7 @@ impl RzDocument {
             height: h,
             layers,
             global_light: self.global_light,
+            channels: doc_channel::cropped_channels(&self.channels, x, y, w, h),
         })
     }
 
@@ -874,8 +885,16 @@ impl RzDocument {
     ///
     /// Growing or shrinking the canvas is a pure offset change, so — exactly
     /// as in [`RzDocument::crop`] — masks and meta ride along untouched.
+    ///
+    /// Channels are canvas-sized, so growing the canvas grows every one of
+    /// them: `None` when that would push the list past the RZDC total-pixel
+    /// budget (`doc_channel::channels_fit_at`), rather than building a
+    /// document `rz_doc_save_native` could not write.
     pub fn canvas_resize(&self, w: u32, h: u32, origin: (i32, i32)) -> Option<Self> {
         if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
+            return None;
+        }
+        if !doc_channel::channels_fit_at(w, h, self.channels.len()) {
             return None;
         }
         let layers = self
@@ -894,6 +913,7 @@ impl RzDocument {
             height: h,
             layers,
             global_light: self.global_light,
+            channels: doc_channel::padded_channels(&self.channels, w, h, origin),
         })
     }
 
@@ -901,8 +921,15 @@ impl RzDocument {
     /// The total-pixel guard applies to the canvas, as in `rz_image_resize`.
     /// Layer styles are scaled with the layer ("Scale Effects", by the mean
     /// factor `sqrt(fx * fy)`).
+    ///
+    /// Channels resample to the new canvas, so — as in
+    /// [`RzDocument::canvas_resize`] — `None` when the enlarged list would
+    /// break the RZDC total-pixel budget.
     pub fn resize(&self, w: u32, h: u32, filter: FilterType) -> Option<Self> {
         if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
+            return None;
+        }
+        if !doc_channel::channels_fit_at(w, h, self.channels.len()) {
             return None;
         }
         let fx = f64::from(w) / f64::from(self.width);
@@ -935,6 +962,7 @@ impl RzDocument {
             height: h,
             layers,
             global_light: self.global_light,
+            channels: doc_channel::resized_channels(&self.channels, w, h, filter),
         })
     }
 }
@@ -1065,20 +1093,23 @@ impl RzDocument {
                 let cx = (lx + off_x) as u64;
                 let cy = (ly + off_y) as u64;
                 let si = ((cy * u64::from(self.width) + cx) * 4) as usize;
-                let a = f32::from(overlay[si + 3]) / 255.0;
-                if a <= 0.0 {
-                    continue;
-                }
-                // Unpremultiplying and taking the luma is one division: luma
-                // is linear, so luma(c / a) == luma(c) / a.
-                let luma = (LUMA_R * f32::from(overlay[si])
-                    + LUMA_G * f32::from(overlay[si + 1])
-                    + LUMA_B * f32::from(overlay[si + 2]))
-                    / a;
-                let luma = luma.clamp(0.0, 255.0);
+                let sp = [
+                    overlay[si],
+                    overlay[si + 1],
+                    overlay[si + 2],
+                    overlay[si + 3],
+                ];
                 let di = (ly as u64 * u64::from(lw) + lx as u64) as usize;
-                let m = f32::from(raw[di]);
-                raw[di] = (m + (luma - m) * a).clamp(0.0, 255.0).round() as u8;
+                // `doc_plane::channel_lerp` IS this rule (it was lifted from
+                // here), now shared with channel and colour-plane painting;
+                // None means the overlay pixel is transparent and the mask
+                // byte is left alone. This loop deliberately keeps
+                // `paint_mask`'s historic lack of a "nothing changed" latch —
+                // the channel paints have one — so the refactor changes no
+                // behaviour here.
+                if let Some(v) = channel_lerp(raw[di], sp) {
+                    raw[di] = v;
+                }
             }
         }
         self.with_layer(idx, |l| l.mask = Some(Arc::new(painted)))

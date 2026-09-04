@@ -345,9 +345,10 @@ extension AgentServer {
     // MARK: - Crop (rect + straighten)
 
     /// crop — mirrors the Crop tool, straighten included: a nonzero `angle`
-    /// first rotates EVERY layer by −angle about the crop rect's center (the
-    /// identical per-layer matrix EditorViewController+Crop.commitCropSession
-    /// commits), then the canvas window moves to the rect — one undo step.
+    /// first rotates EVERY layer, and every alpha channel, by −angle about
+    /// the crop rect's center (the identical matrix
+    /// EditorViewController+Crop.commitCropSession commits), then the canvas
+    /// window moves to the rect — one undo step.
     /// Straightening resamples every layer's pixels, so described
     /// (text/shape/Live Photo) layers silently rasterize and the result
     /// reports which — the agent-side convention, since a modal prompt would
@@ -390,6 +391,11 @@ extension AgentServer {
                 current = current?.transformingLayer(
                     idx, matrix, sampler: RZ_FILTER_CATMULL_ROM)
             }
+            // The channels ride the straighten too (the UI's commit does the
+            // same): a saved selection that stayed put would no longer line
+            // up with the picture it was saved from. nil = no channels.
+            current = current?.transformingChannels(matrix, sampler: RZ_FILTER_CATMULL_ROM)
+                ?? current
             for idx in described {
                 current = current?.withLayerMeta(idx, nil) ?? current
             }

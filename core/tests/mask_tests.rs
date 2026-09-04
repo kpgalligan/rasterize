@@ -389,7 +389,7 @@ fn rzdc_round_trips_masks_and_meta() {
     assert_eq!(&bytes[..4], b"RZDC");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        4,
+        5,
         "the writer always writes the current version"
     );
 
@@ -464,14 +464,14 @@ fn rzdc_version_1_files_still_load_without_masks() {
     assert_eq!(doc.layers[0].meta, None, "version 1 has no meta");
 
     // A future version is refused by number.
-    let mut v5 = v1.clone();
-    v5[4..8].copy_from_slice(&5u32.to_le_bytes());
-    let future = dir.path().join("v5.rzdc");
-    std::fs::write(&future, &v5).unwrap();
+    let mut v6 = v1.clone();
+    v6[4..8].copy_from_slice(&6u32.to_le_bytes());
+    let future = dir.path().join("v6.rzdc");
+    std::fs::write(&future, &v6).unwrap();
     let err = RzDocument::open(future.to_str().unwrap())
         .err()
         .expect("a future version must be refused");
-    assert!(err.contains("unsupported RZDC version 5"), "got: {err}");
+    assert!(err.contains("unsupported RZDC version 6"), "got: {err}");
 
     // A version-2 file whose mask length disagrees with the layer's pixel
     // count is rejected instead of trusted.
@@ -1896,8 +1896,9 @@ fn rzdc_v3_round_trips_clipped_flags() {
     assert_eq!(&bytes[..4], b"RZDC");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        4,
-        "the writer writes the current version (clipping bumped it to 3, layer styles to 4)"
+        5,
+        "the writer writes the current version (clipping bumped it to 3, layer \
+         styles to 4, channels to 5)"
     );
 
     let back = RzDocument::open(&spath).expect("reopen");

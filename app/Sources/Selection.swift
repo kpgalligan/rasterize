@@ -135,7 +135,10 @@ struct CanvasSelection {
     /// rasterize both operands per-byte — add max(a, b), subtract
     /// min(a, 255 − b), intersect min(a, b) — into a mask-kind selection.
     /// With no existing selection, add behaves as replace while subtract
-    /// and intersect select nothing. nil means deselect.
+    /// and intersect select nothing. nil means deselect. The four per-byte
+    /// formulas themselves live in `PlaneAlgebra` (Channel.swift) — a
+    /// channel is not a CanvasSelection (it may legitimately be all-zero),
+    /// so both need them and only one may spell them out.
     static func combine(
         _ existing: CanvasSelection?, with new: CanvasSelection, mode: SelectionCombineMode
     ) -> CanvasSelection? {
@@ -146,16 +149,7 @@ struct CanvasSelection {
         else {
             return mode == .add ? new : nil
         }
-        var a = existing.maskBytes()
-        let b = new.maskBytes()
-        switch mode {
-        case .replace, .add:
-            for i in a.indices { a[i] = max(a[i], b[i]) }
-        case .subtract:
-            for i in a.indices { a[i] = min(a[i], 255 - b[i]) }
-        case .intersect:
-            for i in a.indices { a[i] = min(a[i], b[i]) }
-        }
+        let a = PlaneAlgebra.combine(existing.maskBytes(), new.maskBytes(), mode: mode)
         return CanvasSelection(
             shape: .mask(a), canvasWidth: new.canvasWidth, canvasHeight: new.canvasHeight)
     }

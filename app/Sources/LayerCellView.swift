@@ -26,8 +26,16 @@ final class ThumbnailWellView: NSView {
     /// thumbnail). Unset, a double-click's second press falls through to
     /// onClick like any other.
     var onDoubleClick: (() -> Void)?
+    /// ⌘-click: load what this well shows as the selection (Photoshop). It
+    /// takes precedence over the double-click, which would otherwise eat
+    /// the second press of a ⌘-double-click.
+    var onCommandClick: ((NSEvent) -> Void)?
 
     override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.command), let onCommandClick = onCommandClick {
+            onCommandClick(event)
+            return
+        }
         if event.clickCount == 2, let onDoubleClick = onDoubleClick {
             onDoubleClick()
             return
@@ -167,6 +175,11 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
     /// Clicking either thumbnail selects this layer and points brush/eraser
     /// at the clicked target.
     var onSelectTarget: ((PaintTarget) -> Void)?
+    /// ⌘-click on either thumbnail: load the layer's transparency
+    /// (`.layer`) or its mask (`.mask`) as the selection, with the selection
+    /// tools' modifier convention (Shift adds, Option subtracts, both
+    /// intersect).
+    var onLoadSelection: ((PaintTarget, SelectionCombineMode) -> Void)?
     /// Double-clicking the layer's own thumbnail (the badged one, not the
     /// mask's) reopens whatever the layer was made from — a text layer's
     /// on-canvas editor, an adjustment layer's options dialog. Unset on a
@@ -199,6 +212,12 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
         }
         thumbFrame.onClick = { [weak self] in self?.onSelectTarget?(.layer) }
         maskFrame.onClick = { [weak self] in self?.onSelectTarget?(.mask) }
+        thumbFrame.onCommandClick = { [weak self] event in
+            self?.onLoadSelection?(.layer, Self.combineMode(for: event))
+        }
+        maskFrame.onCommandClick = { [weak self] event in
+            self?.onLoadSelection?(.mask, Self.combineMode(for: event))
+        }
         thumbFrame.toolTip = "Paint on the layer"
 
         for view in [thumbView, maskView] {
@@ -378,11 +397,20 @@ final class LayerCellView: NSView, NSTextFieldDelegate {
         eyeButton.toolTip = info.visible ? "Hide Layer" : "Show Layer"
     }
 
+    /// The selection tools' modifier convention (the one copy lives on
+    /// `SelectionCombineMode`), with Replace as the no-modifier base: a panel
+    /// click carries no options-bar mode.
+    private static func combineMode(for event: NSEvent) -> SelectionCombineMode {
+        SelectionCombineMode.from(event.modifierFlags)
+    }
+
     /// Rings the thumbnail brush/eraser would hit — but only on the active
-    /// layer, where the paint target means anything.
+    /// layer, where the paint target means anything. Three explicit tests,
+    /// not "layer unless mask": with a COLOUR PLANE or a CHANNEL targeted
+    /// neither well is the target, and ringing the layer would lie.
     func setTargetHighlight(layerActive: Bool, target: PaintTarget) {
         let maskRinged = layerActive && hasMask && target == .mask
-        let layerRinged = layerActive && !maskRinged
+        let layerRinged = layerActive && target == .layer
         thumbFrame.layer?.borderWidth = layerRinged ? 2 : 1
         thumbFrame.layer?.borderColor = (layerRinged ? DS.accent : DS.border).cgColor
         maskFrame.layer?.borderWidth = maskRinged ? 2 : 1

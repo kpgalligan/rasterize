@@ -13,6 +13,7 @@ use std::ptr;
 use image::{Rgba, RgbaImage};
 use rasterize_core::doc::RzDocument;
 use rasterize_core::ffi::*;
+use rasterize_core::ffi_channel::*;
 use rasterize_core::ffi_doc::*;
 use rasterize_core::ffi_style::*;
 use rasterize_core::RzImage;
@@ -1717,12 +1718,20 @@ fn psd_layered_import() {
 
 // ------------------------------------------------------------- null safety --
 
+/// RZ_PLANE_RED, mirrored from the header like the BLEND_* constants in
+/// `tests/common` (channel_tests carries the full set).
+const PLANE_RED: c_int = 0;
+
 #[test]
 fn null_safety_sweep() {
     let null_doc: *const RzDocument = ptr::null();
     let null_img: *const RzImage = ptr::null();
     let name = CString::new("x").unwrap();
     let overlay = [0u8; 16];
+    // A 2x2 canvas-sized plane and its read-back buffer, for the channel
+    // exports below.
+    let plane = [0u8; 4];
+    let mut out = [0u8; 4];
 
     unsafe {
         // Open/save.
@@ -1828,6 +1837,172 @@ fn null_safety_sweep() {
         assert!(rz_doc_set_global_light(null_doc, 0.0, 30.0).is_null());
         assert_eq!(rz_doc_global_light_angle(null_doc), 0.0);
         assert_eq!(rz_doc_global_light_altitude(null_doc), 0.0);
+
+        // Channels and planes (ffi_channel). Every export takes a NULL doc,
+        // and every one with a caller buffer takes a NULL buffer.
+        let mut rgb = [0u8; 3];
+        assert_eq!(rz_doc_channel_count(null_doc), 0);
+        assert_eq!(rz_doc_channel_id(null_doc, 0), 0);
+        assert!(rz_doc_channel_name(null_doc, 0).is_null());
+        assert!(!rz_doc_channel_overlay_color(null_doc, 0, rgb.as_mut_ptr()));
+        assert_eq!(rz_doc_channel_overlay_opacity(null_doc, 0), 0.0);
+        assert!(!rz_doc_channel_color_indicates_selected(null_doc, 0));
+        assert!(
+            rz_doc_add_channel(null_doc, name.as_ptr(), plane.as_ptr(), 2, 2, 1, 2, 3, 0.5)
+                .is_null()
+        );
+        assert!(
+            rz_doc_add_channel(null_doc, ptr::null(), plane.as_ptr(), 2, 2, 0, 0, 0, 0.5).is_null()
+        );
+        assert!(
+            rz_doc_add_channel(null_doc, name.as_ptr(), ptr::null(), 2, 2, 0, 0, 0, 0.5).is_null()
+        );
+        assert!(rz_doc_remove_channel(null_doc, 0).is_null());
+        assert!(rz_doc_rename_channel(null_doc, 0, name.as_ptr()).is_null());
+        assert!(rz_doc_rename_channel(null_doc, 0, ptr::null()).is_null());
+        assert!(rz_doc_set_channel_overlay(null_doc, 0, 1, 2, 3, 0.5, true).is_null());
+        assert!(rz_doc_set_channel_data(null_doc, 0, plane.as_ptr(), 2, 2).is_null());
+        assert!(rz_doc_set_channel_data(null_doc, 0, ptr::null(), 2, 2).is_null());
+        assert!(rz_doc_duplicate_channel(null_doc, 0).is_null());
+        assert!(rz_doc_invert_channel(null_doc, 0).is_null());
+        assert!(rz_doc_add_luminosity_masks(null_doc).is_null());
+        assert!(rz_doc_transform_channels(null_doc, identity.as_ptr(), FILTER_NEAREST).is_null());
+        assert!(rz_doc_transform_channels(null_doc, ptr::null(), FILTER_NEAREST).is_null());
+        assert!(!rz_doc_composite_plane(
+            null_doc,
+            PLANE_RED,
+            out.as_mut_ptr(),
+            2,
+            2
+        ));
+        assert!(!rz_doc_composite_plane(
+            null_doc,
+            PLANE_RED,
+            ptr::null_mut(),
+            2,
+            2
+        ));
+        assert!(!rz_doc_layer_plane(
+            null_doc,
+            0,
+            PLANE_RED,
+            out.as_mut_ptr(),
+            2,
+            2
+        ));
+        assert!(!rz_doc_layer_plane(
+            null_doc,
+            0,
+            PLANE_RED,
+            ptr::null_mut(),
+            2,
+            2
+        ));
+        assert!(!rz_doc_channel_plane(null_doc, 0, out.as_mut_ptr(), 2, 2));
+        assert!(!rz_doc_channel_plane(null_doc, 0, ptr::null_mut(), 2, 2));
+        assert!(rz_doc_composite_plane_image(null_doc, PLANE_RED, 0).is_null());
+        assert!(rz_doc_layer_plane_image(null_doc, 0, PLANE_RED, 0).is_null());
+        assert!(rz_doc_channel_image(null_doc, 0, 0).is_null());
+        assert!(rz_doc_with_layer_plane(null_doc, 0, PLANE_RED, plane.as_ptr(), 2, 2).is_null());
+        assert!(rz_doc_with_layer_plane(null_doc, 0, PLANE_RED, ptr::null(), 2, 2).is_null());
+        assert!(
+            rz_doc_with_layer_space_plane(null_doc, 0, PLANE_RED, plane.as_ptr(), 2, 2).is_null()
+        );
+        assert!(rz_doc_with_layer_space_plane(null_doc, 0, PLANE_RED, ptr::null(), 2, 2).is_null());
+        // The one channel export that takes no handle at all: it can only be
+        // asked for a size, and answers a count for every one of them.
+        assert_eq!(rz_max_channels_at(0, 0), 256);
+        assert_eq!(rz_max_channels_at(u32::MAX, u32::MAX), 0);
+        assert!(rz_doc_painting_channel(null_doc, 0, overlay.as_ptr(), 2, 2).is_null());
+        assert!(rz_doc_painting_channel(null_doc, 0, ptr::null(), 2, 2).is_null());
+        assert!(
+            rz_doc_painting_layer_plane(null_doc, 0, PLANE_RED, overlay.as_ptr(), 2, 2).is_null()
+        );
+        assert!(rz_doc_painting_layer_plane(null_doc, 0, PLANE_RED, ptr::null(), 2, 2).is_null());
+
+        // The two image-sized plane readers take a NULL image, and the one
+        // with a caller buffer takes a NULL buffer too.
+        assert!(!rz_image_plane(null_img, PLANE_RED, out.as_mut_ptr(), 2, 2));
+        assert!(!rz_image_plane(null_img, PLANE_RED, ptr::null_mut(), 2, 2));
+        assert!(rz_image_plane_image(null_img, PLANE_RED, 0).is_null());
+
+        // Plane arithmetic owns no handle: both buffers and both dimensions
+        // are the only things it can refuse on.
+        let mut base = [0u8; 4];
+        assert!(!rz_blend_planes(
+            ptr::null_mut(),
+            plane.as_ptr(),
+            2,
+            2,
+            BLEND_NORMAL,
+            1.0,
+            false,
+            false
+        ));
+        assert!(!rz_blend_planes(
+            base.as_mut_ptr(),
+            ptr::null(),
+            2,
+            2,
+            BLEND_NORMAL,
+            1.0,
+            false,
+            false
+        ));
+        assert!(!rz_blend_planes(
+            base.as_mut_ptr(),
+            plane.as_ptr(),
+            0,
+            0,
+            BLEND_NORMAL,
+            1.0,
+            false,
+            false
+        ));
+        // The RGB twin refuses a NULL in any of its six buffers.
+        let mut base_g = [0u8; 4];
+        let mut base_b = [0u8; 4];
+        for hole in 0..6 {
+            let mut planes: [*mut u8; 3] =
+                [base.as_mut_ptr(), base_g.as_mut_ptr(), base_b.as_mut_ptr()];
+            let mut sources: [*const u8; 3] = [plane.as_ptr(), plane.as_ptr(), plane.as_ptr()];
+            if hole < 3 {
+                planes[hole] = ptr::null_mut();
+            } else {
+                sources[hole - 3] = ptr::null();
+            }
+            assert!(
+                !rz_blend_planes_rgb(
+                    planes[0],
+                    planes[1],
+                    planes[2],
+                    sources[0],
+                    sources[1],
+                    sources[2],
+                    2,
+                    2,
+                    BLEND_NORMAL,
+                    1.0,
+                    false,
+                    false
+                ),
+                "NULL buffer {hole} must be refused"
+            );
+        }
+        assert!(!rz_blend_planes_rgb(
+            base.as_mut_ptr(),
+            base_g.as_mut_ptr(),
+            base_b.as_mut_ptr(),
+            plane.as_ptr(),
+            plane.as_ptr(),
+            plane.as_ptr(),
+            0,
+            0,
+            BLEND_NORMAL,
+            1.0,
+            false,
+            false
+        ));
     }
 
     // NULL name / NULL image arguments on a valid doc.
@@ -1841,6 +2016,30 @@ fn null_safety_sweep() {
         assert!(rz_doc_with_layer_pixels(doc, 0, null_img).is_null());
         assert!(rz_doc_set_layer_content(doc, 0, ptr::null(), 2, 2, 0, 0, ptr::null()).is_null());
         assert!(rz_doc_transform_layer(doc, 0, ptr::null(), FILTER_NEAREST).is_null());
+        assert!(rz_doc_transform_channels(doc, ptr::null(), FILTER_NEAREST).is_null());
+        assert!(rz_doc_add_channel(doc, ptr::null(), plane.as_ptr(), 2, 2, 0, 0, 0, 0.5).is_null());
+        assert!(rz_doc_add_channel(doc, name.as_ptr(), ptr::null(), 2, 2, 0, 0, 0, 0.5).is_null());
+        assert!(rz_doc_rename_channel(doc, 0, ptr::null()).is_null());
+        assert!(rz_doc_set_channel_data(doc, 0, ptr::null(), 2, 2).is_null());
+        assert!(!rz_doc_composite_plane(
+            doc,
+            PLANE_RED,
+            ptr::null_mut(),
+            2,
+            2
+        ));
+        assert!(!rz_doc_layer_plane(
+            doc,
+            0,
+            PLANE_RED,
+            ptr::null_mut(),
+            2,
+            2
+        ));
+        assert!(!rz_doc_channel_plane(doc, 0, ptr::null_mut(), 2, 2));
+        assert!(rz_doc_with_layer_plane(doc, 0, PLANE_RED, ptr::null(), 2, 2).is_null());
+        assert!(rz_doc_painting_channel(doc, 0, ptr::null(), 2, 2).is_null());
+        assert!(rz_doc_painting_layer_plane(doc, 0, PLANE_RED, ptr::null(), 2, 2).is_null());
         let mut err: *mut c_char = ptr::null_mut();
         assert!(!rz_doc_save_native(doc, ptr::null(), &mut err));
         assert!(!take_err_string(err).is_empty());

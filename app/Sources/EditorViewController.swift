@@ -1,14 +1,5 @@
 import AppKit
 
-/// What brush and eraser edit on the active layer: its pixels, or its layer
-/// mask. Pure UI state owned by EditorViewController — not undoable, not
-/// persisted, and reset to `.layer` whenever the active layer changes, its
-/// mask goes away, or the document is replaced.
-enum PaintTarget {
-    case layer
-    case mask
-}
-
 final class EditorViewController: NSViewController {
     // Not private: the per-feature extension files (EditorViewController+…)
     // are handlers of this controller and need the document they act on.
@@ -43,15 +34,19 @@ final class EditorViewController: NSViewController {
     // editor; deinit then clears the panel's (unretained) target.
     private var colorPanelTargetsSelf = false
 
-    // Right panel (Layers/Assistant tabs, toggled by View > Show/Hide Layers).
+    // Right panel (Layers/Channels/Assistant tabs, toggled by View >
+    // Show/Hide Layers). The tab state is internal, like `document` above:
+    // the +Feature extension files are handlers of this controller, and
+    // EditorViewController+Channels owns the Channels tab's entry points.
     var layersPanel: LayersPanelViewController!
+    var channelsPanel: ChannelsPanelViewController!
     private var assistantPanel: AssistantPanelViewController!
     private var panelSeparator: NSBox!
     private var scrollTrailingToRoot: NSLayoutConstraint!
     private var scrollTrailingToPanel: NSLayoutConstraint!
-    private var layersPanelVisible = true
-    /// 0 = Layers, 1 = Assistant.
-    private var panelTab = 0
+    var layersPanelVisible = true
+    /// 0 = Layers, 1 = Channels, 2 = Assistant.
+    var panelTab = 0
 
     // Move-tool drag state: the active layer's offset when the drag began.
     private var moveStartOffset: (x: Int, y: Int)?
@@ -67,7 +62,10 @@ final class EditorViewController: NSViewController {
     // live projection always shows the committed result. Mask strokes leave
     // it nil — they never live-edit, they commit once on mouse-up.
     private var strokeBase: RasterDocument?
-    private var strokeTargetsMask = false
+    // …and which coverage target it commits to. Internal, like the panels
+    // above: EditorViewController+Channels.commitCoverageOverlay switches
+    // on it at mouse-up.
+    var strokeTarget: PaintTarget = .layer
     // The tool the stroke began with, so ticks route to the right op
     // (dodge/burn is a retouch op, everything else paints the overlay).
     private var strokeTool: EditorTool = .brush
@@ -84,6 +82,14 @@ final class EditorViewController: NSViewController {
     // for: selecting a different layer drops the choice back to .layer.
     private(set) var paintTarget: PaintTarget = .layer
     private var paintTargetLayer = 0
+    /// …and, for a `.channel` target, the STABLE ID of the channel it names
+    /// (0 for every other target). `.channel` carries a list position, and a
+    /// delete, a duplicate above it or an undo renumbers the list under it —
+    /// a range check alone would then leave the target silently pointing at
+    /// the neighbour. `channelTargetResolved()` re-finds the index by this
+    /// id, exactly as the Channels panel's eye column re-finds its own rows
+    /// (`resolveChannelVisibility`); this is that set's single-value twin.
+    private(set) var paintTargetChannelID: UInt64 = 0
 
     // Live copies of the shared colors and text parameters — the canvas and
     // payload builders read these as native types; ToolOptionsStore keeps
@@ -162,31 +168,56 @@ final class EditorViewController: NSViewController {
         }
         canvas.onSelectionChange = { [weak self] _ in self?.updateStatus() }
         canvas.onStrokeBegin = { [weak self] in
-            guard let self = self, let document = self.document, let doc = document.doc,
-                  doc.layerInfo(document.activeLayerIndex)?.visible == true
-            else { return false } // hidden layer: refuse instead of painting invisibly
+            guard let self = self, let document = self.document, let doc = document.doc
+            else { return false }
             self.strokeTool = self.currentTool
+            let idx = document.activeLayerIndex
+            let isAdjustment = doc.layerIsAdjustment(idx)
+            // Only brush and eraser ever paint COVERAGE; clone and dodge run
+            // their own pixel ops and cannot reach a coverage target at all.
+            let paintsMaskTool = self.strokeTool == .brush || self.strokeTool == .eraser
+            // True when the target names a channel this document still has —
+            // the one case where the active layer has nothing to do with the
+            // edit. (`paintsCoverageTarget` is what validates the index.)
+            let onChannel = self.paintTarget.isChannel && self.paintsCoverageTarget
+            // A channel is the ONLY target that can still stand under a tool
+            // that cannot reach it: `toolReachableTarget` exempts it from the
+            // coercion a mask or a colour plane takes (so its Duplicate /
+            // Delete / Options / Invert commands keep working whatever tool is
+            // picked), and the status bar, the row's ring and both unringed
+            // layer wells then all say the channel is the target. Such a
+            // stroke therefore REFUSES, rather than quietly rewriting the
+            // photograph under indicators that name the channel.
+            guard !onChannel || paintsMaskTool else { return false }
+            // A hidden layer: refuse instead of painting invisibly. A CHANNEL
+            // is canvas-sized document state that the layer's eye says nothing
+            // about, so a channel stroke is exempt — a `.mask` or `.plane`
+            // target still belongs to the hidden layer and keeps refusing.
+            // (The agent's brush_stroke {target: "channel:…"} has always been
+            // exempt; this is the UI agreeing with it.)
+            guard doc.layerInfo(idx)?.visible == true || onChannel else { return false }
             // An adjustment layer's pixels are ignored by the compositor, so
             // strokes ALWAYS land on its mask; with the mask deleted there
             // is nothing left to paint — refuse (the canvas beeps). Clone
             // and dodge rewrite pixels, which an adjustment layer hasn't
             // got, so they refuse outright.
-            let idx = document.activeLayerIndex
-            let isAdjustment = doc.layerIsAdjustment(idx)
             if self.strokeTool == .clone || self.strokeTool == .dodge, isAdjustment {
                 return false
             }
-            if isAdjustment, !doc.layerHasMask(idx) { return false }
+            if isAdjustment, !doc.layerHasMask(idx), !onChannel { return false }
             // Decided once per stroke so a target change mid-drag can never
-            // split it across the layer and its mask. Only brush and eraser
-            // ever target a mask.
-            let paintsMaskTool = self.strokeTool == .brush || self.strokeTool == .eraser
-            let targetsMask = isAdjustment || (paintsMaskTool && self.paintsActiveMask)
-            self.strokeTargetsMask = targetsMask
-            self.canvas.paintsMask = targetsMask
-            guard !targetsMask else {
-                // Mask strokes ghost on the canvas and commit in one step
-                // from onCommitMaskOverlay: no live-edit session.
+            // split it across two targets. A CHANNEL is document state: an
+            // adjustment layer neither forces it nor blocks it (the layer is
+            // not being painted at all), and `paintsCoverageTarget` is what
+            // validates its index.
+            let target: PaintTarget = paintsMaskTool && self.paintsCoverageTarget
+                ? self.paintTarget
+                : (isAdjustment ? .mask : .layer)
+            self.strokeTarget = target
+            self.canvas.paintTarget = target
+            guard !target.isCoverage else {
+                // Coverage strokes ghost on the canvas and commit in one
+                // step from onCommitMaskOverlay: no live-edit session.
                 self.strokeBase = nil
                 return true
             }
@@ -225,22 +256,21 @@ final class EditorViewController: NSViewController {
                 document.updateLiveEdit(updated)
             }
         }
-        canvas.onCommitMaskOverlay = { [weak self] data, actionName in
-            guard let self = self, let document = self.document else { return }
-            let idx = document.activeLayerIndex
-            guard document.doc?.layerHasMask(idx) == true else {
-                NSSound.beep()
-                return
-            }
-            document.applyEdit(actionName) { doc in
-                doc.paintingLayerMask(idx, overlay: data, w: doc.width, h: doc.height)
-            }
-        }
+        canvas.onCommitMaskOverlay = { [weak self] data, _ in self?.commitCoverageOverlay(data) }
         canvas.onStrokeEnd = { [weak self] actionName in
             guard let self = self, let document = self.document else { return }
-            let wasMask = self.strokeTargetsMask
+            let wasMask = self.strokeTarget != .layer
             let base = self.strokeBase
-            self.strokeTargetsMask = false
+            self.strokeTarget = .layer
+            // The canvas's mirror goes back to the editor's REAL target: the
+            // stroke latched its own into it at mouse-down, and setPaintTarget
+            // (the only other writer) never runs again when `paintTarget`
+            // itself never changed. Left stale, a clone or dodge stroke made
+            // with a channel row selected would leave the canvas drawing the
+            // active-layer boundary over a canvas-sized channel, and washing
+            // a sheet's grayscale plane preview in that channel's own
+            // rubylith — the two things this mirror exists to get right.
+            self.canvas.paintTarget = self.paintTarget
             self.strokeBase = nil
             // A mask stroke already committed itself (onCommitMaskOverlay)
             // and never opened a live-edit session.
@@ -269,7 +299,9 @@ final class EditorViewController: NSViewController {
         }
         canvas.onStrokeCancel = { [weak self] in
             guard let self = self, let document = self.document else { return }
-            self.strokeTargetsMask = false
+            self.strokeTarget = .layer
+            // …and the canvas's mirror with it (see onStrokeEnd).
+            self.canvas.paintTarget = self.paintTarget
             // An abandoned mask stroke never touched the document (strokeBase
             // is nil): dropping the overlay is the whole rollback.
             guard let base = self.strokeBase else { return }
@@ -400,6 +432,11 @@ final class EditorViewController: NSViewController {
             self?.syncPaintTarget()
             self?.updateStatus()
             self?.updateActiveLayerRect()
+            // The active layer is not a document change and posts no
+            // notification, yet the "<layer> Mask" row is computed from it —
+            // and so is the canvas's mask base and rubylith.
+            self?.channelsPanel?.activeLayerChanged()
+            self?.refreshChannelDisplay()
         }
         layersPanel.onPaintTargetChange = { [weak self] target in
             self?.setPaintTarget(target)
@@ -419,13 +456,44 @@ final class EditorViewController: NSViewController {
         layersPanel.onLayerStyleEdit = { [weak self] idx in
             self?.editLayerStyle(idx)
         }
+        layersPanel.onShowChannels = { [weak self] in self?.showChannelsTab() }
         layersPanel.onShowAssistant = { [weak self] in
-            self?.panelTab = 1
+            self?.panelTab = 2
             self?.updatePanelVisibility()
+        }
+        layersPanel.onLoadLayerSelection = { [weak self] idx, target, mode in
+            self?.loadLayerSelection(layer: idx, target: target, mode: mode)
         }
         addChild(layersPanel)
         let panelView = layersPanel.view
         panelView.translatesAutoresizingMaskIntoConstraints = false
+
+        channelsPanel = ChannelsPanelViewController()
+        channelsPanel.document = document
+        channelsPanel.onShowLayers = { [weak self] in
+            self?.panelTab = 0
+            self?.updatePanelVisibility()
+        }
+        channelsPanel.onShowAssistant = { [weak self] in
+            self?.panelTab = 2
+            self?.updatePanelVisibility()
+        }
+        channelsPanel.onSelectTarget = { [weak self] target in
+            self?.setChannelRowTarget(target)
+        }
+        channelsPanel.onVisibilityChange = { [weak self] visibility in
+            self?.channelViewChanged(visibility)
+        }
+        channelsPanel.onLoadSelection = { [weak self] source, mode in
+            self?.loadRowSelection(source, mode: mode)
+        }
+        channelsPanel.onRenameChannel = { [weak self] id, name in
+            self?.renameChannel(id: id, to: name)
+        }
+        addChild(channelsPanel)
+        let channelsView = channelsPanel.view
+        channelsView.translatesAutoresizingMaskIntoConstraints = false
+        channelsView.isHidden = true
 
         assistantPanel = AssistantPanelViewController()
         assistantPanel.document = document
@@ -433,6 +501,7 @@ final class EditorViewController: NSViewController {
             self?.panelTab = 0
             self?.updatePanelVisibility()
         }
+        assistantPanel.onShowChannels = { [weak self] in self?.showChannelsTab() }
         addChild(assistantPanel)
         let assistantView = assistantPanel.view
         assistantView.translatesAutoresizingMaskIntoConstraints = false
@@ -448,6 +517,7 @@ final class EditorViewController: NSViewController {
         root.addSubview(zoomPill)
         root.addSubview(panelSeparator)
         root.addSubview(panelView)
+        root.addSubview(channelsView)
         root.addSubview(assistantView)
         root.addSubview(statusBar)
 
@@ -477,6 +547,11 @@ final class EditorViewController: NSViewController {
             panelView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
             panelView.topAnchor.constraint(equalTo: scrollView.topAnchor),
             panelView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+
+            channelsView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            channelsView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
+            channelsView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            channelsView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             assistantView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             assistantView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
@@ -576,12 +651,15 @@ final class EditorViewController: NSViewController {
         }
         currentTool = tool
         canvas.tool = tool
-        // Only brush and eraser edit masks; picking one of the other paint
-        // tools silently points the target back at the layer rather than
-        // blocking the tool or painting the wrong thing.
-        if tool == .fill || tool == .gradient || tool == .text
-            || tool == .clone || tool == .dodge {
-            setPaintTarget(.layer)
+        // Picking a tool that cannot reach the standing target silently
+        // points the target back at the layer rather than blocking the tool
+        // or painting the wrong thing — one rule
+        // (`toolReachableTarget`, EditorViewController+Channels), applied
+        // here on the tool edge and inside `setPaintTarget` on the target
+        // edge, so the two orders agree.
+        let reachable = toolReachableTarget(paintTarget)
+        if reachable != paintTarget {
+            setPaintTarget(reachable)
         }
         if tool == .crop {
             beginCropSession()
@@ -645,46 +723,70 @@ final class EditorViewController: NSViewController {
         optionsBar.refreshValues()
     }
 
-    // MARK: - Paint target (layer vs. its mask)
+    // MARK: - Paint target (layer, its mask, a colour plane, a channel)
 
-    /// True when brush/eraser strokes should land on the active layer's
-    /// mask: the chosen target, confirmed against the live document.
-    private var paintsActiveMask: Bool {
-        guard paintTarget == .mask, let document = document, let doc = document.doc else {
-            return false
-        }
-        return doc.layerHasMask(document.activeLayerIndex)
-    }
-
-    /// Points brush/eraser at the layer or at its mask (a mask target falls
-    /// back to the layer when there is no mask), and mirrors the choice into
-    /// the canvas and the layers panel's focus ring. An adjustment layer's
-    /// PIXEL target is never selectable — the compositor ignores its pixels
-    /// — so any request lands on the mask while one exists.
+    /// Points every edit at the layer, its mask, one of its colour planes or
+    /// one of the document's alpha channels (a mask target falls back to the
+    /// layer when there is no mask, a channel target when the channel has
+    /// gone), and mirrors the choice into the canvas, both panels and the
+    /// document's own filter/adjustment hook.
+    ///
+    /// An adjustment layer's PIXEL target is never selectable — the
+    /// compositor ignores its pixels — so a `.layer` or `.plane` request
+    /// lands on the mask while one exists. A `.channel` request is document
+    /// state and is deliberately left alone.
+    ///
+    /// A target the current tool cannot reach lands on the layer first
+    /// (`toolReachableTarget`): this is the ONE writer of `paintTarget`, so
+    /// coercing here is what makes "pick the Red row, then the Clone Stamp"
+    /// and "pick the Clone Stamp, then the Red row" end in the same state.
     func setPaintTarget(_ target: PaintTarget) {
         let idx = document?.activeLayerIndex ?? 0
-        var target = target
-        if document?.doc?.layerIsAdjustment(idx) == true,
+        var target = toolReachableTarget(target)
+        if !target.isChannel,
+           document?.doc?.layerIsAdjustment(idx) == true,
            document?.doc?.layerHasMask(idx) == true {
             target = .mask
         }
         if target == .mask, document?.doc?.layerHasMask(idx) != true {
             target = .layer
         }
+        target = channelTargetClamped(target)
         let changed = target != paintTarget
         paintTarget = target
+        // The identity of the channel just chosen, so a later renumbering can
+        // find it again (channelTargetResolved). Recorded here rather than at
+        // every call site because this is the ONE writer of paintTarget.
+        paintTargetChannelID = channelIdentity(of: target)
         paintTargetLayer = idx
-        canvas.paintsMask = target == .mask
+        canvas.paintTarget = target
         layersPanel?.setPaintTarget(target)
-        if changed { updateStatus() }
+        channelsPanel?.setPaintTarget(target)
+        document?.planeEditTarget = target
+        if changed {
+            updateStatus()
+            refreshChannelDisplay()
+        }
     }
 
-    /// Drops a mask target that no longer applies — the active layer changed
-    /// underneath it, or its mask was deleted, applied, or undone away — and
-    /// forces the mask target whenever the active layer is an adjustment
-    /// layer (its pixels are pointless to paint).
+    /// Drops a target that no longer applies — the active layer changed
+    /// underneath a mask target, its mask was deleted, applied, or undone
+    /// away, or a channel has gone — and forces the mask target whenever the
+    /// active layer is an adjustment layer (its pixels are pointless to
+    /// paint). A colour plane survives a layer change: planes always exist,
+    /// and painting Red on another layer is meaningful.
     func syncPaintTarget() {
         let idx = document?.activeLayerIndex ?? 0
+        // A CHANNEL is document state and survives any layer change; it only
+        // goes away when the channel itself does — but the list renumbers
+        // under it, so the index is re-found by identity, never range-checked
+        // in place.
+        if case .channel = paintTarget {
+            paintTargetLayer = idx
+            let resolved = channelTargetResolved()
+            if resolved != paintTarget { setPaintTarget(resolved) }
+            return
+        }
         if document?.doc?.layerIsAdjustment(idx) == true,
            document?.doc?.layerHasMask(idx) == true {
             setPaintTarget(.mask)
@@ -746,8 +848,10 @@ final class EditorViewController: NSViewController {
 
     // MARK: - Wand, fill, gradient actions
 
-    /// sRGB bytes of a color (straight alpha).
-    private func colorBytes(_ color: NSColor) -> [UInt8] {
+    /// sRGB bytes of a color (straight alpha). Internal, like the panels
+    /// above: EditorViewController+PlanePaint builds a plane fill's gray
+    /// with it.
+    func colorBytes(_ color: NSColor) -> [UInt8] {
         let c = color.usingColorSpace(.sRGB) ?? .black
         return [
             UInt8((c.redComponent * 255).rounded()),
@@ -781,6 +885,15 @@ final class EditorViewController: NSViewController {
 
     private func fillClicked(_ point: CGPoint) {
         guard let document = document else { return }
+        // A colour plane or a channel fills through the plane round trip.
+        // Deliberately NOT `isCoverage`: a `.mask` target with the fill tool
+        // active is reachable (selectTool only resets on a TOOL change, so
+        // the user can pick fill and then click the mask well) and must keep
+        // filling the layer's pixels exactly as today.
+        if paintTarget.targetsPlaneOrChannel {
+            fillPlane(at: point)
+            return
+        }
         // A canvas click can't be blocked by menu validation: refuse a fill
         // aimed at an adjustment layer's (ignored) pixels with the alert.
         guard !refuseAdjustmentPixelEdit() else { return }
@@ -845,6 +958,12 @@ final class EditorViewController: NSViewController {
 
     private func gradientCommitted(_ a: CGPoint, _ b: CGPoint) {
         guard let document = document else { return }
+        // Same plane redirect as fillClicked, and for the same reason a
+        // `.mask` target is deliberately excluded.
+        if paintTarget.targetsPlaneOrChannel {
+            gradientPlane(from: a, to: b)
+            return
+        }
         // Same rule as fillClicked: a gradient drag ends on the canvas,
         // outside menu validation's reach.
         guard !refuseAdjustmentPixelEdit() else { return }
@@ -1461,6 +1580,7 @@ final class EditorViewController: NSViewController {
         let dimensionsChanged = canvas.frame.size != newSize
         canvas.image = document.projection?.makeCGImage()
         canvas.previewImage = nil
+        channelDisplayDidChange(note)
         canvas.setFrameSize(newSize)
         if dimensionsChanged {
             // The canvas.image setter also drops selections when the size
@@ -1487,6 +1607,12 @@ final class EditorViewController: NSViewController {
     // mode, opacity and the zoom percentage were deliberately dropped —
     // all visible in the Layers panel or the zoom pill.
     func updateStatus() {
+        // The Channels panel's Load and Save Selection buttons are nil-target
+        // actions, which AppKit never validates: they take their menu twins'
+        // own rules from here, where every selection change and every Quick
+        // Mask toggle already lands.
+        channelsPanel?.setSelectionState(
+            hasSelection: canvas.selection != nil, quickMask: canvas.quickMaskActive)
         guard let document = document, let doc = document.doc else {
             statusDims.text = "No document open"
             statusMode.text = ""
@@ -1506,9 +1632,9 @@ final class EditorViewController: NSViewController {
         } else {
             statusSelection.text = "Selection: none"
         }
-        // Brush and eraser hit the mask when it is the paint target; say
-        // so, alongside the panel's focus ring.
-        let maskSuffix = paintTarget == .mask ? " · Mask" : ""
+        // Brush and eraser hit the mask, a colour plane or an alpha channel
+        // when one is the edit target; say so, alongside the panels' rings.
+        let maskSuffix = paintTarget.statusSuffix(in: document.doc)
         statusTool.text = isTransforming
             ? "Free Transform"
             : "\(currentTool.displayName) · \(currentTool.keyCharacter.uppercased())\(maskSuffix)"
@@ -1577,8 +1703,11 @@ final class EditorViewController: NSViewController {
             return
         }
         // Menu validation already disables the one-shot filters on an
-        // adjustment layer; this backstop covers any path around it.
-        guard !refuseAdjustmentPixelEdit() else { return }
+        // adjustment layer; this backstop covers any path around it. A
+        // CHANNEL target is exempt: the edit lands on document state, not on
+        // the (ignored) pixels of the adjustment layer that happens to be
+        // active — §0.4's rule, the same one `onStrokeBegin` applies above.
+        guard paintTarget.isChannel || !refuseAdjustmentPixelEdit() else { return }
         document.applyToActiveLayer(actionName, op)
     }
 
@@ -1650,12 +1779,9 @@ final class EditorViewController: NSViewController {
         let before = document.doc
         document.applyEdit("New Layer") { $0.addingLayer(above: idx, name: name) }
         guard document.doc !== before else { return }
-        document.activeLayerIndex = min(idx + 1, document.doc.layerCount - 1)
-        // The active layer moved: any mask paint target goes with it.
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        // The active layer moved: setActiveLayer carries the whole invariant
+        // (paint target, both panels, the canvas's mask base and rubylith).
+        setActiveLayer(min(idx + 1, document.doc.layerCount - 1))
     }
 
     @objc func duplicateLayer(_ sender: Any?) {
@@ -1667,12 +1793,8 @@ final class EditorViewController: NSViewController {
         let before = document.doc
         document.applyEdit("Duplicate Layer") { $0.duplicatingLayer(idx) }
         guard document.doc !== before else { return }
-        document.activeLayerIndex = min(idx + 1, document.doc.layerCount - 1)
-        // The active layer moved: any mask paint target goes with it.
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        // The active layer moved: setActiveLayer carries the whole invariant.
+        setActiveLayer(min(idx + 1, document.doc.layerCount - 1))
     }
 
     @objc func deleteLayer(_ sender: Any?) {
@@ -1700,12 +1822,8 @@ final class EditorViewController: NSViewController {
         let before = document.doc
         document.applyEdit("Merge Down") { $0.mergingDown(idx) }
         guard document.doc !== before else { return }
-        document.activeLayerIndex = idx - 1
-        // The active layer moved: any mask paint target goes with it.
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        // The active layer moved: setActiveLayer carries the whole invariant.
+        setActiveLayer(idx - 1)
     }
 
     @objc func flattenImage(_ sender: Any?) {
@@ -1726,12 +1844,11 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
+        // ImageDocument.pasteAsNewLayer moves the active layer to the pasted
+        // one AFTER its edit has posted, so this owes the same bookkeeping
+        // setActiveLayer does for the paths that move it here.
         document.pasteAsNewLayer()
-        // The active layer moved: any mask paint target goes with it.
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        activeLayerDidChange()
     }
 
     // Bound to ⌘V through the responder chain, so a focused field editor
@@ -1864,7 +1981,9 @@ final class EditorViewController: NSViewController {
     /// outside menu validation's reach); true when refused. Move and Free
     /// Transform deliberately do NOT come through here: they move the mask
     /// footprint, which is meaningful.
-    private func refuseAdjustmentPixelEdit() -> Bool {
+    /// Internal, like `colorBytes` above: EditorViewController+PlanePaint's
+    /// fill and gradient guard with the same alert.
+    func refuseAdjustmentPixelEdit() -> Bool {
         guard activeLayerIsAdjustment else { return false }
         let alert = NSAlert()
         alert.messageText = "Adjustment layers have no pixels to edit."
@@ -1926,10 +2045,10 @@ final class EditorViewController: NSViewController {
     private func didCommitAdjustmentLayer(_ idx: Int) {
         guard let document = document, document.doc != nil else { return }
         document.activeLayerIndex = min(max(idx, 0), document.doc.layerCount - 1)
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        // Unconditional (not setActiveLayer): re-committing the SAME
+        // adjustment layer from its options sheet moves no index but still
+        // needs every panel and the canvas refreshed.
+        activeLayerDidChange()
     }
 
     /// Layer > Adjustment Options… — enabled only when the active layer is
@@ -1952,8 +2071,27 @@ final class EditorViewController: NSViewController {
               idx >= 0, idx < doc.layerCount, idx != document.activeLayerIndex
         else { return }
         document.activeLayerIndex = idx
+        activeLayerDidChange()
+    }
+
+    /// The bookkeeping every path that MOVES the active layer owes, in ONE
+    /// place so the invariant is not five copies of four lines.
+    ///
+    /// The Channels panel's "<layer> Mask" row and the canvas's mask base and
+    /// rubylith are computed from the active layer, so they follow it — not
+    /// just when the move starts in the layers panel. The paths that assign
+    /// `activeLayerIndex` AFTER their edit (New Layer, Duplicate Layer, Merge
+    /// Down, an adjustment-layer commit, opening a text layer) reach this
+    /// through `setActiveLayer`; the document-change notification has already
+    /// been posted by then, so nothing else would refresh the panel and it
+    /// would keep listing — and washing the canvas with — the PREVIOUS
+    /// layer's mask. (Delete Layer and Flatten rely on `applyEdit`'s own
+    /// re-clamp, which happens before that post.)
+    func activeLayerDidChange() {
         syncPaintTarget()
         layersPanel.reload()
+        channelsPanel?.activeLayerChanged()
+        refreshChannelDisplay()
         updateStatus()
         updateActiveLayerRect()
     }
@@ -1996,13 +2134,15 @@ final class EditorViewController: NSViewController {
     /// View > Assistant (also the panel's Assistant tab).
     @objc func showAssistant(_ sender: Any?) {
         layersPanelVisible = true
-        panelTab = 1
+        panelTab = 2
         updatePanelVisibility()
     }
 
-    private func updatePanelVisibility() {
+    func updatePanelVisibility() {
         layersPanel.view.isHidden = !layersPanelVisible || panelTab != 0
-        assistantPanel.view.isHidden = !layersPanelVisible || panelTab != 1
+        channelsPanel.view.isHidden = !layersPanelVisible || panelTab != 1
+        channelsPanel.setPanelVisible(!channelsPanel.view.isHidden)
+        assistantPanel.view.isHidden = !layersPanelVisible || panelTab != 2
         panelSeparator.isHidden = !layersPanelVisible
         scrollTrailingToRoot.isActive = false
         scrollTrailingToPanel.isActive = false
@@ -2214,9 +2354,12 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        // Validation disables the menu item on an adjustment layer; this
-        // backstop covers any path around it.
-        guard !refuseAdjustmentPixelEdit() else { return }
+        // Validation disables the menu item on an adjustment layer, and with
+        // a colour plane or an alpha channel targeted (Clear has no plane
+        // route in this build, and must not hit the layer while every
+        // indicator names the channel); these backstops cover any path
+        // around it.
+        guard !refuseAdjustmentPixelEdit(), !refusePlaneTargetEdit() else { return }
         let idx = document.activeLayerIndex
         let mask = selection.maskBytes()
         // Rewriting pixels invalidates a text layer's description, so this
@@ -2240,9 +2383,11 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        // Validation disables the menu item on an adjustment layer; this
-        // backstop covers any path around it.
-        guard !refuseAdjustmentPixelEdit() else { return }
+        // Validation disables the menu item on an adjustment layer, and with
+        // a plane or channel targeted (Cut copies the LAYER's pixels, which
+        // such a target does not name); these backstops cover any path
+        // around it.
+        guard !refuseAdjustmentPixelEdit(), !refusePlaneTargetEdit() else { return }
         let idx = document.activeLayerIndex
         guard copyToPasteboard(doc.layerCanvasImage(idx)) else { return }
         let mask = selection.maskBytes()
@@ -2456,16 +2601,26 @@ extension EditorViewController: NSUserInterfaceValidations {
             // above, and this also covers the window's field editors (the
             // options bar, the layer name field, the assistant's input),
             // where ⌫ must keep deleting characters. An adjustment layer has
-            // no pixels worth clearing.
-            guard !isEditingText, canvas.selection != nil, !activeLayerIsAdjustment
+            // no pixels worth clearing. Nor does a colour plane or an alpha
+            // channel: Clear rewrites the LAYER's pixels and has no plane
+            // route in this build, so rather than erase the photograph while
+            // the status bar, the channel row's ring and both unringed layer
+            // wells name a channel, the item stands down (the Fill tool is
+            // how a plane or channel is cleared).
+            guard !isEditingText, canvas.selection != nil, !activeLayerIsAdjustment,
+                  !paintTarget.targetsPlaneOrChannel
             else { return false }
             return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
         case #selector(cut(_:)):
             // Cut is Copy + Clear in one step, so it needs what Clear needs:
-            // a selection and an active layer with pixels. No text-editing
-            // guard — ⌘X reaches a field editor first, which claims cut:
-            // itself, exactly as ⌘C does for copy.
-            guard canvas.selection != nil, !activeLayerIsAdjustment else { return false }
+            // a selection and an active layer with pixels, and no plane or
+            // channel target — its copy half takes the LAYER's pixels, so on
+            // such a target it would cut one thing and copy another. No
+            // text-editing guard — ⌘X reaches a field editor first, which
+            // claims cut: itself, exactly as ⌘C does for copy.
+            guard canvas.selection != nil, !activeLayerIsAdjustment,
+                  !paintTarget.targetsPlaneOrChannel
+            else { return false }
             return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
         case #selector(showAdjustments(_:)), #selector(showBlur(_:)),
             #selector(showHueRotate(_:)), #selector(showLevels(_:)),
@@ -2476,8 +2631,10 @@ extension EditorViewController: NSUserInterfaceValidations {
             #selector(applyEdgeDetect(_:)), #selector(applyEmboss(_:)):
             // Destructive filters rewrite the active layer's PIXELS, which
             // an adjustment layer doesn't meaningfully have; its parameters
-            // re-open through Adjustment Options… instead.
-            return !activeLayerIsAdjustment
+            // re-open through Adjustment Options… instead. With a CHANNEL
+            // targeted they rewrite that channel instead of any layer, so
+            // the active layer's kind is irrelevant (§0.4).
+            return paintTarget.isChannel || !activeLayerIsAdjustment
         case #selector(selectLivePhotoFrame(_:)):
             // Only a layer that still says which Live Photo it came from can
             // show a different frame of it; a missing clip is reported when
@@ -2540,6 +2697,13 @@ extension EditorViewController: NSUserInterfaceValidations {
                 menuItem.title = layersPanelVisible ? "Hide Layers" : "Show Layers"
             }
             return true
+        case #selector(showChannels(_:)), #selector(newChannel(_:)),
+             #selector(duplicateChannel(_:)), #selector(deleteChannel(_:)),
+             #selector(channelOptions(_:)), #selector(invertChannel(_:)),
+             #selector(loadChannelAsSelection(_:)), #selector(saveSelectionSheet(_:)),
+             #selector(loadSelectionSheet(_:)), #selector(addLuminosityMasks(_:)),
+             #selector(applyImageSheet(_:)), #selector(calculationsSheet(_:)):
+            return validateChannelItem(item)
         case #selector(undo(_:)):
             if let menuItem = item as? NSMenuItem, let manager = activeUndoManager {
                 menuItem.title = manager.undoMenuItemTitle

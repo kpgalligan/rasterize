@@ -13,8 +13,17 @@ final class LayersPanelViewController: NSViewController {
     /// (the editor updates its status bar).
     var onActiveLayerChange: (() -> Void)?
 
+    /// Called when the user clicks the Channels tab.
+    var onShowChannels: (() -> Void)?
+
     /// Called when the user clicks the Assistant tab.
     var onShowAssistant: (() -> Void)?
+
+    /// Called on a ⌘-click on a layer's own thumbnail (`.layer` — load its
+    /// transparency) or its mask thumbnail (`.mask` — load the mask), with
+    /// the selection tools' modifier convention for the combine mode.
+    /// Loading a selection is never an edit.
+    var onLoadLayerSelection: ((Int, PaintTarget, SelectionCombineMode) -> Void)?
 
     /// Called when the user clicks a layer's own thumbnail or its mask
     /// thumbnail: the editor points brush/eraser at that target.
@@ -86,10 +95,12 @@ final class LayersPanelViewController: NSViewController {
         let root = NSView(frame: NSRect(x: 0, y: 0, width: DS.panelWidth, height: 400))
         root.wantsLayer = true
 
-        // Panel tab row: Layers active here, Assistant switches over.
-        let tab = PanelTabsView(titles: ["Layers", "Assistant"], activeIndex: 0) {
+        // Panel tab row: Layers active here, Channels and Assistant switch
+        // over.
+        let tab = PanelTabsView(titles: ["Layers", "Channels", "Assistant"], activeIndex: 0) {
             [weak self] index in
-            if index == 1 { self?.onShowAssistant?() }
+            if index == 1 { self?.onShowChannels?() }
+            if index == 2 { self?.onShowAssistant?() }
         }
         tab.translatesAutoresizingMaskIntoConstraints = false
 
@@ -540,6 +551,9 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
             selected: idx == document.activeLayerIndex, paintTarget: paintTarget)
         cell.onSelectTarget = { [weak self] target in
             self?.selectPaintTarget(target, layer: idx)
+        }
+        cell.onLoadSelection = { [weak self] target, mode in
+            self?.onLoadLayerSelection?(idx, target, mode)
         }
         cell.onEditSource = { [weak self] in
             self?.editLayerSource(idx)

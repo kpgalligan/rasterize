@@ -9,6 +9,7 @@ use image::{ExtendedColorType, GrayImage, ImageEncoder};
 
 use crate::blend::BlendMode;
 use crate::doc::{sane_opacity, Layer, RzDocument, MAX_PIXELS};
+use crate::doc_channel::{Channel, MAX_CHANNELS};
 use crate::rz_image::save_atomically;
 use crate::style::{GlobalLight, LayerStyle};
 
@@ -16,21 +17,45 @@ use crate::style::{GlobalLight, LayerStyle};
 /// for absurd allocations. The meta cap is shared by BOTH per-layer string
 /// slots (meta and the layer style) and is also what the FFI meta and style
 /// setters enforce, so a document can never carry a string the writer would
-/// refuse.
+/// refuse. Channel names share the layer-name slot rule (same cap, same
+/// truncation, same `put_name` writer).
 const MAX_RZDC_LAYERS: u32 = 1024;
 const MAX_RZDC_NAME_LEN: u32 = 64 * 1024;
 const MAX_RZDC_PNG_LEN: u32 = 512 * 1024 * 1024;
 pub(crate) const MAX_RZDC_META_LEN: u32 = 16 * 1024 * 1024;
 
 /// The RZDC revision this build writes. Version 1 files (no mask, no layer
-/// meta), version 2 files (no clipped flag) and version 3 files (no layer
-/// style, no global light) still load; anything newer is refused.
-const RZDC_VERSION: u32 = 4;
+/// meta), version 2 files (no clipped flag), version 3 files (no layer style,
+/// no global light) and version 4 files (no channels) still load; anything
+/// newer is refused.
+const RZDC_VERSION: u32 = 5;
 
 /// Ceiling on the SUM of decoded layer pixels across one RZDC file: even when
 /// every individual layer looks reasonable, a crafted file must not be able
 /// to stack layers until memory is exhausted.
 const MAX_RZDC_TOTAL_LAYER_PIXELS: u64 = 4 * MAX_PIXELS;
+
+/// The same ceiling for the channel list. The COUNT cap
+/// (`doc_channel::MAX_CHANNELS`) alone is not enough: 256 channels on a
+/// 24 MP canvas is 6.4 GB of coverage, so the reader also checks the total —
+/// and, unlike layers, it can do so UP FRONT, because a channel's size is
+/// always the canvas's and the count is in the header.
+///
+/// NINE full canvases, deliberately: `add_luminosity_masks` appends exactly
+/// nine canvas-sized planes, so any smaller multiple makes the feature refuse
+/// itself on a large canvas. At four it did — a 45 MP camera file (8192 x
+/// 5464, the size the feature exists for) allowed only eight channels, so the
+/// nine masks were refused on a document with no channels to delete. At nine
+/// the whole set fits the largest canvas any op will build (`MAX_PIXELS`),
+/// which is the invariant worth having: an op that creates channels is never
+/// refused for a reason the user cannot act on. A crafted file is still
+/// bounded — 900 MB of coverage, well under the 1.6 GB of layer pixels
+/// `MAX_RZDC_TOTAL_LAYER_PIXELS` already admits.
+///
+/// `doc_channel::channels_fit` enforces the same number at CREATION time, so
+/// for a document this build made the writer's check can never fire; it is
+/// there so the writer provably enforces every cap the reader does.
+pub(crate) const MAX_RZDC_TOTAL_CHANNEL_PIXELS: u64 = 9 * MAX_PIXELS;
 
 impl RzDocument {
     /// Serializes to the RZDC layout (see the header comment): "RZDC",
@@ -56,6 +81,23 @@ impl RzDocument {
     /// is a strict prefix of a version-4 one): u8 style present and, when
     /// present, u32 style len + UTF-8 canonical style JSON (see `style`),
     /// encoded and capped exactly like meta.
+    ///
+    /// Version 5 appends the ALPHA CHANNEL list after the LAST LAYER RECORD,
+    /// so a version-4 file is a strict prefix of a version-5 one: u32 channel
+    /// count (at most `doc_channel::MAX_CHANNELS`), then per channel u32 name
+    /// byte length + UTF-8 name (truncated exactly like a layer name), u8
+    /// overlay red, u8 green, u8 blue, f32 overlay opacity, u8 "color
+    /// indicates selected" (0 — the default — means the wash covers the
+    /// MASKED areas, matching Quick Mask; any non-zero value reads as 1), and
+    /// u32 PNG byte length + a PNG-encoded 8-bit GRAYSCALE (L8) plane of
+    /// exactly the canvas size (a channel is always canvas-sized, so its
+    /// dimensions are not stored twice). The plane is PNG-compressed rather
+    /// than raw like a layer mask because a channel is always the WHOLE
+    /// canvas: nine luminosity masks on a 24 MP canvas would be 216 MB raw,
+    /// and coverage planes are exactly the flat, large-run data PNG's filters
+    /// collapse. `Channel::id` is NOT written: it is a per-process handle a
+    /// host hangs view state on, minted fresh whenever a channel is created,
+    /// this reader included.
     fn encode_native(&self) -> Result<Vec<u8>, String> {
         // The writer enforces the reader's caps, so every file it produces
         // can be read back: layer count and per-layer PNG size are hard
@@ -75,17 +117,7 @@ impl RzDocument {
         buf.extend_from_slice(&light.angle.to_le_bytes());
         buf.extend_from_slice(&light.altitude.to_le_bytes());
         for layer in &self.layers {
-            let mut name = layer.name.as_str();
-            if name.len() > MAX_RZDC_NAME_LEN as usize {
-                let mut end = MAX_RZDC_NAME_LEN as usize;
-                while !name.is_char_boundary(end) {
-                    end -= 1;
-                }
-                name = &name[..end];
-            }
-            let name = name.as_bytes();
-            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
-            buf.extend_from_slice(name);
+            put_name(&mut buf, &layer.name);
             buf.extend_from_slice(&layer.offset.0.to_le_bytes());
             buf.extend_from_slice(&layer.offset.1.to_le_bytes());
             buf.extend_from_slice(&layer.opacity.to_le_bytes());
@@ -123,6 +155,48 @@ impl RzDocument {
             let style = layer.style.as_ref().map(|s| s.to_json());
             put_opt_string(&mut buf, style.as_deref(), "style")?;
         }
+        // Version 5: the alpha channel list, after the last layer record.
+        // Every cap the reader enforces is enforced here too — the count, the
+        // total pixel budget (which the reader checks up front from this very
+        // count) and the per-channel PNG size — so no document this build can
+        // build is one it cannot read back.
+        let channel_count = u32::try_from(self.channels.len())
+            .ok()
+            .filter(|&c| c as usize <= MAX_CHANNELS)
+            .ok_or_else(|| format!("too many channels (max {MAX_CHANNELS})"))?;
+        let total_channel_pixels =
+            u64::from(channel_count) * u64::from(self.width) * u64::from(self.height);
+        if total_channel_pixels > MAX_RZDC_TOTAL_CHANNEL_PIXELS {
+            return Err(format!(
+                "total channel pixels exceed {MAX_RZDC_TOTAL_CHANNEL_PIXELS}"
+            ));
+        }
+        buf.extend_from_slice(&channel_count.to_le_bytes());
+        for channel in &self.channels {
+            let (cw, ch) = channel.data.dimensions();
+            if (cw, ch) != (self.width, self.height) {
+                // The model's invariant; a broken one would write a file the
+                // reader must reject, so refuse to write it at all.
+                return Err(format!(
+                    "channel plane {cw}x{ch} does not match the {}x{} canvas",
+                    self.width, self.height
+                ));
+            }
+            put_name(&mut buf, &channel.name);
+            buf.extend_from_slice(&channel.overlay_color);
+            buf.extend_from_slice(&sane_opacity(channel.overlay_opacity).to_le_bytes());
+            buf.push(u8::from(channel.color_indicates_selected));
+            let mut png = Vec::new();
+            PngEncoder::new(&mut png)
+                .write_image(channel.data.as_raw(), cw, ch, ExtendedColorType::L8)
+                .map_err(|e| format!("PNG encoding failed: {e}"))?;
+            let png_len = u32::try_from(png.len())
+                .ok()
+                .filter(|&len| len <= MAX_RZDC_PNG_LEN)
+                .ok_or_else(|| "channel PNG too large".to_string())?;
+            buf.extend_from_slice(&png_len.to_le_bytes());
+            buf.extend_from_slice(&png);
+        }
         Ok(buf)
     }
 
@@ -137,6 +211,23 @@ impl RzDocument {
             std::fs::write(tmp_path, &bytes).map_err(|e| format!("failed to create {path}: {e}"))
         })
     }
+}
+
+/// Writes a NAME slot — u32 byte length + UTF-8 bytes — truncating an
+/// over-long name on a UTF-8 character boundary rather than failing the save.
+/// The ONE implementation, shared by the layer loop and the channel loop.
+fn put_name(buf: &mut Vec<u8>, name: &str) {
+    let mut name = name;
+    if name.len() > MAX_RZDC_NAME_LEN as usize {
+        let mut end = MAX_RZDC_NAME_LEN as usize;
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name = &name[..end];
+    }
+    let bytes = name.as_bytes();
+    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(bytes);
 }
 
 /// Writes an optional string slot (meta, style): u8 present, then u32 len +
@@ -210,10 +301,11 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Parses an RZDC buffer of version 1 to 4 (version 1 predates layer masks
+/// Parses an RZDC buffer of version 1 to 5 (version 1 predates layer masks
 /// and layer meta, which default to absent; versions 1 and 2 predate the
 /// clipped flag, which defaults to false; versions 1 to 3 predate the layer
-/// style and the global light, which default to absent / (120°, 30°)).
+/// style and the global light, which default to absent / (120°, 30°);
+/// versions 1 to 4 predate the channel list, which defaults to empty).
 /// Corrupt or truncated input produces `Err`, never a panic; unknown
 /// blend-mode values fall back to Normal, opacity is clamped, the light is
 /// sanitized, and a style is read LENIENTLY (`LayerStyle::from_json_lenient`:
@@ -234,6 +326,7 @@ pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
     let has_mask_and_meta = version >= 2;
     let has_clipped = version >= 3;
     let has_style = version >= 4;
+    let has_channels = version >= 5;
     let width = r.u32()?;
     let height = r.u32()?;
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
@@ -330,10 +423,60 @@ pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
             style,
         });
     }
+    let mut channels = Vec::new();
+    if has_channels {
+        let count = r.u32()?;
+        if count as usize > MAX_CHANNELS {
+            return Err(format!("invalid channel count {count}"));
+        }
+        // Unlike layers, a channel's size is knowable from the header (it is
+        // always the canvas's), so the total is checked BEFORE a single plane
+        // is decoded.
+        if u64::from(count) * u64::from(width) * u64::from(height) > MAX_RZDC_TOTAL_CHANNEL_PIXELS {
+            return Err(format!(
+                "total channel pixels exceed {MAX_RZDC_TOTAL_CHANNEL_PIXELS}"
+            ));
+        }
+        channels = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let name_len = r.u32()?;
+            if name_len > MAX_RZDC_NAME_LEN {
+                return Err(format!("channel name length {name_len} out of range"));
+            }
+            let name = String::from_utf8_lossy(r.take(name_len as usize)?).into_owned();
+            let overlay_color = [r.u8()?, r.u8()?, r.u8()?];
+            let overlay_opacity = sane_opacity(r.f32()?);
+            let color_indicates_selected = r.u8()? != 0;
+            let png_len = r.u32()?;
+            if png_len > MAX_RZDC_PNG_LEN {
+                return Err(format!("channel PNG length {png_len} out of range"));
+            }
+            let png = r.take(png_len as usize)?;
+            let plane = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+                .map_err(|e| format!("failed to decode channel plane: {e}"))?
+                .to_luma8();
+            if plane.dimensions() != (width, height) {
+                let (cw, ch) = plane.dimensions();
+                return Err(format!(
+                    "channel plane {cw}x{ch} does not match the {width}x{height} canvas"
+                ));
+            }
+            // Through `Channel::new`, so the loaded channel gets a fresh
+            // identity: `Channel::id` is a host-facing handle for as long as a
+            // document is open, never a persisted property (see its doc).
+            channels.push(Channel {
+                overlay_color,
+                overlay_opacity,
+                color_indicates_selected,
+                ..Channel::new(&name, Arc::new(plane))
+            });
+        }
+    }
     Ok(RzDocument {
         width,
         height,
         layers,
         global_light,
+        channels,
     })
 }

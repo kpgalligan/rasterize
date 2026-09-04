@@ -145,6 +145,56 @@ where
     }
 }
 
+/// The image twin of [`doc_get`]: a pure query against `img`, returning
+/// `default` for NULL input, `None`, or a panic.
+///
+/// # Safety
+/// `img` must be NULL or a valid pointer to a live `RzImage`.
+pub(crate) unsafe fn img_get<T, F>(img: *const RzImage, default: T, get: F) -> T
+where
+    F: FnOnce(&RzImage) -> Option<T>,
+{
+    if img.is_null() {
+        return default;
+    }
+    let image = unsafe { &*img };
+    match catch_unwind(AssertUnwindSafe(|| get(image))) {
+        Ok(Some(value)) => value,
+        _ => default,
+    }
+}
+
+/// Reads an optional caller buffer pointer (a canvas-sized selection mask, a
+/// canvas-sized paint overlay, a canvas-sized plane) into a slice of exactly
+/// `len` bytes. `len` is always derived from the core's own dimensions, never
+/// from the caller.
+///
+/// # Safety
+/// `buffer` must be NULL or valid for `len` bytes for the duration of the
+/// caller.
+pub(crate) unsafe fn mask_slice<'a>(buffer: *const u8, len: usize) -> Option<&'a [u8]> {
+    if buffer.is_null() {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(buffer, len) })
+    }
+}
+
+/// Aspect-fit thumbnail dimensions with the longest side `max(1, max_side)`,
+/// each at least 1 — the ONE sizing rule, shared by `rz_doc_layer_thumbnail`
+/// and the plane-image getters. `w` and `h` must be non-zero (every caller
+/// checks for an empty source first, since there is nothing to scale).
+pub(crate) fn thumb_dims(w: u32, h: u32, max_side: u32) -> (u32, u32) {
+    let side = max_side.max(1);
+    if w >= h {
+        let th = (f64::from(h) * f64::from(side) / f64::from(w)).round() as u32;
+        (side, th.max(1))
+    } else {
+        let tw = (f64::from(w) * f64::from(side) / f64::from(h)).round() as u32;
+        (tw.max(1), side)
+    }
+}
+
 /// Maps a raw `RzResizeFilter` value — the ONE mapping shared by
 /// `rz_image_resize`, `rz_doc_resize`, and the layer transform.
 pub(crate) fn filter_from_c(value: c_int) -> Option<FilterType> {

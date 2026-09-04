@@ -177,6 +177,19 @@ final class AgentServer {
         "fill": fill,
         "gradient": gradient,
         "clear_selection": clearSelection,
+        // Channels (AgentServer+Channels.swift)
+        "list_channels": { $0.listChannels },
+        "add_channel": { $0.addChannel },
+        "duplicate_channel": { $0.duplicateChannel },
+        "delete_channel": { $0.deleteChannel },
+        "rename_channel": { $0.renameChannel },
+        "set_channel_options": { $0.setChannelOptions },
+        "invert_channel": { $0.invertChannel },
+        "load_selection": { $0.loadSelection },
+        "save_selection": { $0.saveSelection },
+        "apply_image": { $0.applyImage },
+        "calculations": { $0.calculations },
+        "add_luminosity_masks": { $0.addLuminosityMasks },
         // Whole-document geometry
         "rotate": rotate,
         "flip": flip,
@@ -380,6 +393,10 @@ final class AgentServer {
         var result = summary(document)
         result["layers"] = layers
         result["global_light"] = Self.globalLightFields(doc)
+        // The document's ALPHA CHANNELS — saved selections, never part of
+        // the picture (AgentServer+ChannelTargets.swift).
+        let channels = Self.channelFields(doc)
+        if !channels.isEmpty { result["channels"] = channels }
         if let selection = editor(document)?.agentSelection {
             let b = selection.bounds
             let kind: String
@@ -406,7 +423,15 @@ final class AgentServer {
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
         let source: RasterImage?
         var what: String
-        if let layer = intArg(a, "layer") {
+        if let channel = stringArg(a, "channel") {
+            // ONE plane as grayscale instead of the colour image, described
+            // by what the argument actually resolved to — an alpha channel
+            // belongs to no layer (AgentServer+ChannelTargets.swift).
+            let resolved = try Self.planeRenderImage(
+                doc, channel: channel, layer: intArg(a, "layer"))
+            source = resolved.image
+            what = resolved.what
+        } else if let layer = intArg(a, "layer") {
             guard layer >= 0, layer < doc.layerCount else {
                 throw ToolError(message: "Layer \(layer) is out of range (0..\(doc.layerCount - 1))")
             }
@@ -693,7 +718,9 @@ final class AgentServer {
 
     /// The mask-owning layer a call targets, verified to actually have a
     /// mask so the failure names the fix instead of a generic edit error.
-    private func maskedLayerIndex(
+    /// Internal, not private: AgentServer+ChannelTargets routes a mask
+    /// target through it.
+    func maskedLayerIndex(
         _ a: [String: Any], _ document: ImageDocument, _ what: String
     ) throws -> Int {
         let index = try paintLayerIndex(a, document)
@@ -1014,8 +1041,18 @@ final class AgentServer {
         guard index >= 0, index < count else {
             throw ToolError(message: "Layer \(index) is out of range (0..\(count - 1))")
         }
-        try rejectAdjustmentPixelEdit(document, index)
         let filter = try requiredString(a, "filter")
+        // A colour plane or an alpha channel runs the SAME op on that plane
+        // alone (AgentServer+ChannelTargets.swift); it must not go through
+        // ImageDocument.applyToActiveLayer, which can raise a modal alert on
+        // this dispatched-to-main path.
+        let planeTarget = try paintTarget(a, document, allowMask: false)
+        if planeTarget != .layer {
+            return try applyPlaneFilter(
+                document, target: planeTarget, layer: index, filter: filter
+            ) { self.filtered($0, filter, a) }
+        }
+        try rejectAdjustmentPixelEdit(document, index)
         let rasterized = try performPixelEdit(
             document, "Apply \(filter)", pixelLayer: index
         ) { doc in
@@ -1318,17 +1355,18 @@ final class AgentServer {
     /// Builds a canvas-sized premultiplied RGBA8 overlay (row 0 = top,
     /// drawing coordinates top-left-origin — the same format the canvas
     /// view's stroke pipeline uses), lets `draw` fill it, and composites
-    /// it onto `layer` through the regular performGroupedEdit path. With
-    /// `toMask` the very same overlay is painted into the layer's MASK
-    /// instead (white reveals, black hides, the overlay's own alpha is
-    /// the blend — `mode` and `alpha` do not apply there).
+    /// it onto `layer` through the regular performGroupedEdit path. With a
+    /// COVERAGE `target` — the layer's mask, one of its colour planes or a
+    /// document channel — the very same overlay is painted there instead
+    /// (white reveals, black hides, the overlay's own alpha is the blend —
+    /// `mode` and `alpha` do not apply).
     ///
     /// Returns the kind of description painting the layer's pixels dropped
-    /// (see performPixelEdit); a MASK stroke never drops one.
+    /// (see performPixelEdit); a MASK or CHANNEL stroke never drops one.
     @discardableResult
     private func paintOverlay(
         _ document: ImageDocument, layer: Int, actionName: String,
-        mode: RzCompositeMode, alpha: Double, toMask: Bool = false,
+        mode: RzCompositeMode, alpha: Double, target: PaintTarget = .layer,
         blend: RzBlendMode? = nil, onOpRefusal: (() -> Void)? = nil,
         draw: (CGContext) -> Void
     ) throws -> DroppedDescription? {
@@ -1337,7 +1375,7 @@ final class AgentServer {
         let height = doc.height
         var data = [UInt8](repeating: 0, count: width * height * 4)
         return try performPixelEdit(
-            document, actionName, pixelLayer: toMask ? nil : layer
+            document, actionName, pixelLayer: pixelLayer(for: target, layer: layer)
         ) { current in
             data.withUnsafeMutableBufferPointer { buffer -> RasterDocument? in
                 guard let base = buffer.baseAddress,
@@ -1355,9 +1393,10 @@ final class AgentServer {
                     selection.clip(context)
                 }
                 draw(context)
-                if toMask {
-                    return current.paintingLayerMask(
-                        layer, overlay: base, w: width, h: height)
+                if target.isCoverage {
+                    return commitCoverage(
+                        current, target: target, layer: layer, overlay: base, width: width,
+                        height: height, onRefusal: onOpRefusal)
                 }
                 if let blend = blend, blend != RZ_BLEND_NORMAL {
                     // The Blend option: composite through the layer
@@ -1440,36 +1479,9 @@ final class AgentServer {
             alpha: alpha)
     }
 
-    /// The brush/eraser "target" argument: the layer's pixels (default) or
-    /// the layer's mask.
-    private func paintTargetsMask(_ a: [String: Any]) throws -> Bool {
-        switch stringArg(a, "target") ?? "layer" {
-        case "layer": return false
-        case "mask": return true
-        case let other:
-            throw ToolError(message: "target must be \"layer\" or \"mask\" (got \"\(other)\")")
-        }
-    }
-
     private func paintStroke(_ a: [String: Any], erase: Bool) throws -> String {
         let document = try target(a)
-        let requestedMask = try paintTargetsMask(a)
         let index = try paintLayerIndex(a, document)
-        // Strokes on an ADJUSTMENT layer always paint its MASK, whatever
-        // target asked for — the compositor ignores such a layer's pixels,
-        // and the UI's paint target enforces the same routing. Not an
-        // error; the result reports target "mask".
-        let isAdjustment = document.doc?.layerIsAdjustment(index) == true
-        if isAdjustment, document.doc?.layerHasMask(index) != true {
-            throw ToolError(
-                message: "Layer \(index) is an adjustment layer, so strokes paint its MASK "
-                    + "— but its mask was deleted. Add one with add_layer_mask.")
-        }
-        let toMask = requestedMask || isAdjustment
-        let layer =
-            toMask
-            ? try maskedLayerIndex(a, document, erase ? "erase" : "paint")
-            : index
         let points = try parsePoints(a)
         let size = CGFloat(min(max(doubleArg(a, "size") ?? 16, 1), 512))
         let opacity = min(max(doubleArg(a, "opacity") ?? 1, 0), 1)
@@ -1480,49 +1492,22 @@ final class AgentServer {
                 message: "eraser_stroke has no blend_mode — erasing removes alpha; blend "
                     + "modes apply to brush_stroke and clone_stamp.")
         }
-        if blend != nil, toMask {
-            if isAdjustment, !requestedMask {
-                // The caller DID target the layer; the adjustment routing
-                // moved the stroke, so "use the layer target" would loop.
-                throw ToolError(
-                    message: "Layer \(index) is an adjustment layer, so strokes always "
-                        + "paint its MASK — blend_mode cannot apply there. Drop "
-                        + "blend_mode, or stroke a pixel layer.")
-            }
-            throw ToolError(
-                message: "blend_mode does not apply to a mask stroke — a mask is coverage, "
-                    + "not color. Stroke the layer target instead.")
-        }
-        // In ERASE mode only the overlay's alpha matters. A MASK is coverage
-        // rather than color — white reveals, black hides, whatever color was
-        // asked for — and it carries the opacity in the stroke's own alpha,
-        // since the mask-painting call takes no separate alpha.
-        let color: NSColor
-        if toMask {
-            let level: CGFloat = erase ? 0 : 1
-            color = NSColor(
-                srgbRed: level, green: level, blue: level, alpha: CGFloat(opacity))
-        } else if erase {
-            color = .black
-        } else {
-            color = try parseColor(a, "color", fallback: .black)
-        }
-        let actionName: String
-        if toMask {
-            actionName = erase ? "Erase Mask" : "Paint Mask"
-        } else {
-            actionName = erase ? "Eraser Stroke" : "Brush Stroke"
-        }
-        // Latched when the BLEND PAINT OP answers nil: with a blend mode
-        // the op also refuses a stroke that changes no pixel (an identity
-        // blend), which is a no-op to report, never a parameter error.
+        // The whole routing decision — the widened target vocabulary, the
+        // adjustment-layer forcing, the coverage colour, the blend_mode
+        // refusals and the undo name (AgentServer+ChannelTargets.swift).
+        let (target, layer, actionName, color, targetNote) = try resolvePaintTarget(
+            a, document, requestedLayer: index, erase: erase, blend: blend)
+        // Latched when the PAINT OP answers nil for "nothing would change":
+        // a blend mode's identity blend, or a coverage stroke on a plane or
+        // a channel that painted what was already there. A no-op to report,
+        // never a parameter error.
         var opRefused = false
         let rasterized: DroppedDescription?
         do {
             rasterized = try paintOverlay(
                 document, layer: layer, actionName: actionName,
                 mode: erase ? RZ_COMPOSITE_ERASE : RZ_COMPOSITE_OVER, alpha: opacity,
-                toMask: toMask, blend: blend, onOpRefusal: { opRefused = true }
+                target: target, blend: blend, onOpRefusal: { opRefused = true }
             ) { context in
                 context.setFillColor(color.cgColor)
                 context.setStrokeColor(color.cgColor)
@@ -1566,24 +1551,14 @@ final class AgentServer {
                 context.strokePath()
             }
         } catch let error as ToolError {
-            guard opRefused, let blend = blend else { throw error }
-            return try jsonResult([
-                "ok": true, "changed": false, "layer": layer,
-                "note": "Nothing changed: blend mode \(RzBlendMode.displayName(for: blend)) "
-                    + "left every covered pixel exactly as it was (an identity blend, like "
-                    + "Multiply by white), or the stroke never reached layer \(layer)'s "
-                    + "pixels. No undo step was added.",
-            ])
+            guard opRefused else { throw error }
+            return try noOpStrokeResult(document, target: target, layer: layer, blend: blend)
         }
         var fields: [String: Any] = [
             "ok": true, "action": actionName, "layer": layer, "points": points.count,
-            "target": toMask ? "mask" : "layer",
+            "target": target.agentName(in: document.doc),
         ]
-        if isAdjustment, !requestedMask {
-            fields["note"] =
-                "Layer \(layer) is an adjustment layer (no pixels to paint), so the stroke "
-                + "was routed to its mask."
-        }
+        if let targetNote = targetNote { fields["note"] = targetNote }
         return try pixelEditResult(fields, layer: layer, rasterized: rasterized)
     }
 
@@ -1685,8 +1660,10 @@ final class AgentServer {
     }
 
     /// Applies a combine/modify result: an empty (nil) result deselects,
-    /// reported in-band rather than as an error.
-    private func setCombined(
+    /// reported in-band rather than as an error. Internal, not private: the
+    /// channel tools route an empty plane straight here rather than through
+    /// applySelection, which throws on one.
+    func setCombined(
         _ editorVC: EditorViewController, _ selection: CanvasSelection?,
         extra: [String: Any] = [:]
     ) throws -> String {
@@ -1802,18 +1779,21 @@ final class AgentServer {
     private func fill(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         let index = try paintLayerIndex(a, document)
-        try rejectAdjustmentPixelEdit(document, index)
-        guard let x = intArg(a, "x"), let y = intArg(a, "y") else {
-            throw ToolError(message: "fill requires x and y (the seed point)")
-        }
-        let rgba = try colorRGBA(parseColor(a, "color", fallback: .black))
-        let tolerance = intArg(a, "tolerance") ?? 32
-        let contiguous = boolArg(a, "contiguous") ?? true
+        // A colour plane or an alpha channel fills THAT plane instead
+        // (AgentServer+ChannelTargets), mirroring the Fill tool's redirect in
+        // EditorViewController+PlanePaint.
+        let planeTarget = try paintTarget(a, document, allowMask: false)
+        let arguments = try fillArguments(a)
         let mask = selectionMask(document)
+        if planeTarget != .layer {
+            return try fillPlane(
+                document, target: planeTarget, layer: index, arguments, mask: mask)
+        }
+        try rejectAdjustmentPixelEdit(document, index)
         let rasterized = try performPixelEdit(document, "Fill", pixelLayer: index) { doc in
             doc.bucketFilled(
-                index, x: x, y: y, tolerance: tolerance, rgba: rgba,
-                contiguous: contiguous, mask: mask)
+                index, x: arguments.x, y: arguments.y, tolerance: arguments.tolerance,
+                rgba: arguments.rgba, contiguous: arguments.contiguous, mask: mask)
         }
         return try pixelEditResult(
             ["ok": true, "layer": index], layer: index, rasterized: rasterized)
@@ -1822,30 +1802,20 @@ final class AgentServer {
     private func gradient(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         let index = try paintLayerIndex(a, document)
-        try rejectAdjustmentPixelEdit(document, index)
-        guard let x0 = doubleArg(a, "x0"), let y0 = doubleArg(a, "y0"),
-            let x1 = doubleArg(a, "x1"), let y1 = doubleArg(a, "y1")
-        else {
-            throw ToolError(message: "gradient requires x0, y0, x1, y1")
-        }
-        let start = try colorRGBA(parseColor(a, "start_color", fallback: .black))
-        let end: [UInt8]
-        if stringArg(a, "end_color") != nil {
-            end = try colorRGBA(parseColor(a, "end_color", fallback: .clear))
-        } else {
-            end = [0, 0, 0, 0] // fade to transparent
-        }
-        let kind: RzGradientKind
-        switch stringArg(a, "shape") ?? "linear" {
-        case "linear": kind = RZ_GRADIENT_LINEAR
-        case "radial": kind = RZ_GRADIENT_RADIAL
-        default: throw ToolError(message: "shape must be \"linear\" or \"radial\"")
-        }
+        // As in fill: a plane or channel target lays the ramp down THAT plane
+        // (AgentServer+ChannelTargets), mirroring the Gradient tool.
+        let planeTarget = try paintTarget(a, document, allowMask: false)
+        let arguments = try gradientArguments(a)
         let mask = selectionMask(document)
+        if planeTarget != .layer {
+            return try gradientPlane(
+                document, target: planeTarget, layer: index, arguments, mask: mask)
+        }
+        try rejectAdjustmentPixelEdit(document, index)
         let rasterized = try performPixelEdit(document, "Gradient", pixelLayer: index) { doc in
             doc.gradiented(
-                index, from: CGPoint(x: x0, y: y0), to: CGPoint(x: x1, y: y1),
-                start: start, end: end, kind: kind, mask: mask)
+                index, from: arguments.from, to: arguments.to, start: arguments.start,
+                end: arguments.end, kind: arguments.kind, mask: mask)
         }
         return try pixelEditResult(
             ["ok": true, "layer": index], layer: index, rasterized: rasterized)
@@ -1870,8 +1840,10 @@ final class AgentServer {
             ["ok": true, "layer": index], layer: index, rasterized: rasterized)
     }
 
-    /// sRGB straight-alpha bytes of a parsed color.
-    private func colorRGBA(_ color: NSColor) throws -> [UInt8] {
+    /// sRGB straight-alpha bytes of a parsed color. Internal, not private:
+    /// the plane fill/gradient mirrors in AgentServer+ChannelTargets parse
+    /// the same colours.
+    func colorRGBA(_ color: NSColor) throws -> [UInt8] {
         guard let c = color.usingColorSpace(.sRGB) else {
             throw ToolError(message: "Could not convert the color")
         }
@@ -1922,6 +1894,11 @@ final class AgentServer {
             }
             return match
         } ?? RZ_FILTER_LANCZOS3
+        // The channel budget, asked as the Image Size sheet asks it: the core
+        // refuses the resize outright when the channels would no longer fit,
+        // and a generic failure would tell a model to fix the one thing that
+        // is right (the size).
+        try requireChannelBudget(try target(a), width: w, height: h)
         let op = DocumentGeometry.resize(width: w, height: h, filter: filter)
         return try docEdit(a, op.actionName) { $0.applyingDocumentGeometry(op) }
     }
@@ -1941,6 +1918,8 @@ final class AgentServer {
         guard let anchor = anchors[anchorName] else {
             throw ToolError(message: "anchor must be one of \(anchors.keys.sorted())")
         }
+        // The same channel-budget question the Canvas Size sheet asks first.
+        try requireChannelBudget(document, width: w, height: h)
         // Matches the Canvas Size sheet: the anchor's column/row chooses how
         // much of the size delta lands left/above the old canvas origin.
         let originX = Int((Double(w - doc.width) * Double(anchor.col) / 2.0).rounded())

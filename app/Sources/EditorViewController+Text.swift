@@ -11,6 +11,11 @@ extension EditorViewController {
     /// A text-tool click: re-open the topmost VISIBLE text layer under the
     /// point, or start a new text entry there.
     func textClicked(_ point: CGPoint) {
+        // A channel is the one target that survives picking the text tool
+        // (EditorViewController+Channels.refuseChannelTargetEdit): text
+        // cannot be written into a channel, so the session refuses rather
+        // than editing the picture while every indicator names the channel.
+        guard !refuseChannelTargetEdit() else { return }
         guard let doc = document?.doc, let idx = topmostTextLayer(at: point, in: doc) else {
             canvas.beginTextSession(at: point)
             return
@@ -55,7 +60,10 @@ extension EditorViewController {
     /// enough for its longest line, so a line longer than the legacy width
     /// still shows unwrapped.
     func openTextSession(layer idx: Int, selectAll: Bool) {
-        guard let document = document, let doc = document.doc,
+        // The other door into a session (the layers panel's double-click)
+        // takes the same refusal as the canvas click.
+        guard !refuseChannelTargetEdit() else { return }
+        guard let doc = document?.doc,
               let payload = doc.textPayload(idx), let anchor = doc.describedAnchor(idx)
         else {
             NSSound.beep()
@@ -63,13 +71,10 @@ extension EditorViewController {
         }
         // Editing a layer makes it the active one (the commit replaces its
         // content, and the panel should show what is being edited).
-        if document.activeLayerIndex != idx {
-            document.activeLayerIndex = idx
-            syncPaintTarget()
-            layersPanel.reload()
-            updateStatus()
-            updateActiveLayerRect()
-        }
+        // setActiveLayer is the one path that moves it: it no-ops when the
+        // layer is already active and carries the Channels panel and the
+        // canvas's mask display with it when it is not.
+        setActiveLayer(idx)
         let width: CGFloat?
         switch payload.box {
         case let .width(w):

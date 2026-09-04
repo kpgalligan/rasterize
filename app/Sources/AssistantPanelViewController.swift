@@ -9,6 +9,9 @@ final class AssistantPanelViewController: NSViewController {
     /// Called when the user clicks the Layers tab.
     var onShowLayers: (() -> Void)?
 
+    /// Called when the user clicks the Channels tab.
+    var onShowChannels: (() -> Void)?
+
     private var session: AssistantSession?
     private var busy = false
 
@@ -41,9 +44,10 @@ final class AssistantPanelViewController: NSViewController {
         root.wantsLayer = true
         root.layer?.backgroundColor = DS.chromeBackground.cgColor
 
-        let tabs = PanelTabsView(titles: ["Layers", "Assistant"], activeIndex: 1) {
+        let tabs = PanelTabsView(titles: ["Layers", "Channels", "Assistant"], activeIndex: 2) {
             [weak self] index in
             if index == 0 { self?.onShowLayers?() }
+            if index == 1 { self?.onShowChannels?() }
         }
         tabs.translatesAutoresizingMaskIntoConstraints = false
 

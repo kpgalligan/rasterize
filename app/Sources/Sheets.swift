@@ -267,6 +267,13 @@ final class ResizeSheetController: NSViewController, NSTextFieldDelegate {
             }
             return
         }
+        // The core refuses a resize that would push the channel list past the
+        // .rz pixel budget; say which channels and which budget (ChannelBudget)
+        // instead of letting applyEdit beep.
+        if let reason = document.doc?.channelBudgetRefusal(width: w, height: h) {
+            presentChannelBudgetAlert(reason)
+            return
+        }
         dismiss(self)
         document.applyEdit("Image Size") {
             $0.applyingDocumentGeometry(.resize(width: w, height: h, filter: filter))
@@ -448,6 +455,12 @@ final class CanvasSizeSheetController: NSViewController {
             }
             return
         }
+        // Same refusal, same reason (ChannelBudget): growing the canvas grows
+        // every channel with it.
+        if let reason = document.doc?.channelBudgetRefusal(width: w, height: h) {
+            presentChannelBudgetAlert(reason)
+            return
+        }
         // The anchor pins the existing content: its column/row chooses how
         // much of the size delta lands left/above the old canvas origin.
         let fx = Double(anchorGrid.anchor.col) / 2.0
@@ -477,6 +490,12 @@ final class AdjustSheetController: NSViewController {
     private let baseDoc: RasterDocument?
     private let layerIndex: Int
     private let baseLayer: RasterImage?
+    /// The plane a plane/channel target previews on, captured ONCE here.
+    /// Extracting it is a canvas-sized read, so doing it per slider tick —
+    /// ahead of PreviewRenderer's debounce, on the main thread — would hang
+    /// the dialog on a large image. The edit target cannot change while the
+    /// sheet is modal, so one capture is all there is (ImageDocument+Channels).
+    private let planePreview: PlanePreview?
     private let renderer = PreviewRenderer()
 
     private let brightnessSlider = NSSlider(
@@ -495,6 +514,7 @@ final class AdjustSheetController: NSViewController {
         self.baseDoc = document.doc
         self.layerIndex = document.activeLayerIndex
         self.baseLayer = document.doc?.layerImage(document.activeLayerIndex)
+        self.planePreview = document.targetPlanePreview()
         super.init(nibName: nil, bundle: nil)
         renderer.onRender = { [weak self] cgImage in
             self?.canvas?.previewImage = cgImage
@@ -552,7 +572,19 @@ final class AdjustSheetController: NSViewController {
         let contrast = contrastSlider.doubleValue
         let saturation = saturationSlider.doubleValue
         let idx = layerIndex
+        // A colour plane or an alpha channel is targeted: preview the op on
+        // THAT plane, in grayscale, not on the whole layer in colour. The
+        // capture was taken in init (see `planePreview`); the closure below
+        // runs on PreviewRenderer's background queue, so it captures the
+        // immutable handle, never `self`.
+        let planePreview = self.planePreview
         renderer.request {
+            if let planePreview = planePreview {
+                return planePreview.preview {
+                    $0.adjusted(
+                        brightness: brightness, contrast: contrast, saturation: saturation)
+                }
+            }
             guard
                 let filtered = baseLayer.adjusted(
                     brightness: brightness, contrast: contrast, saturation: saturation),
@@ -605,6 +637,12 @@ final class BlurSheetController: NSViewController {
     private let baseDoc: RasterDocument?
     private let layerIndex: Int
     private let baseLayer: RasterImage?
+    /// The plane a plane/channel target previews on, captured ONCE here.
+    /// Extracting it is a canvas-sized read, so doing it per slider tick —
+    /// ahead of PreviewRenderer's debounce, on the main thread — would hang
+    /// the dialog on a large image. The edit target cannot change while the
+    /// sheet is modal, so one capture is all there is (ImageDocument+Channels).
+    private let planePreview: PlanePreview?
     private let renderer = PreviewRenderer()
 
     private let sigmaSlider = NSSlider(
@@ -617,6 +655,7 @@ final class BlurSheetController: NSViewController {
         self.baseDoc = document.doc
         self.layerIndex = document.activeLayerIndex
         self.baseLayer = document.doc?.layerImage(document.activeLayerIndex)
+        self.planePreview = document.targetPlanePreview()
         super.init(nibName: nil, bundle: nil)
         renderer.onRender = { [weak self] cgImage in
             self?.canvas?.previewImage = cgImage
@@ -660,7 +699,13 @@ final class BlurSheetController: NSViewController {
         guard let baseDoc = baseDoc, let baseLayer = baseLayer else { return }
         let sigma = sigmaSlider.doubleValue
         let idx = layerIndex
+        // See AdjustSheetController.requestPreview: a plane target previews
+        // the SAME op on that plane, on the handle captured in init.
+        let planePreview = self.planePreview
         renderer.request {
+            if let planePreview = planePreview {
+                return planePreview.preview { $0.blurred(sigma: sigma) }
+            }
             guard let filtered = baseLayer.blurred(sigma: sigma),
                   let previewDoc = baseDoc.withLayerPixels(idx, filtered)
             else { return nil }
@@ -909,6 +954,12 @@ final class SliderSheetController: NSViewController {
     private let baseDoc: RasterDocument?
     private let layerIndex: Int
     private let baseLayer: RasterImage?
+    /// The plane a plane/channel target previews on, captured ONCE here.
+    /// Extracting it is a canvas-sized read, so doing it per slider tick —
+    /// ahead of PreviewRenderer's debounce, on the main thread — would hang
+    /// the dialog on a large image. The edit target cannot change while the
+    /// sheet is modal, so one capture is all there is (ImageDocument+Channels).
+    private let planePreview: PlanePreview?
     private let renderer = PreviewRenderer()
     private var sliders: [NSSlider] = []
     private var valueLabels: [NSTextField] = []
@@ -933,6 +984,7 @@ final class SliderSheetController: NSViewController {
         self.baseDoc = document.doc
         self.layerIndex = document.activeLayerIndex
         self.baseLayer = document.doc?.layerImage(document.activeLayerIndex)
+        self.planePreview = document.targetPlanePreview()
         super.init(nibName: nil, bundle: nil)
         renderer.onRender = { [weak self] cgImage in
             self?.canvas?.previewImage = cgImage
@@ -1005,7 +1057,13 @@ final class SliderSheetController: NSViewController {
         let values = mappedValues()
         let idx = layerIndex
         let compute = compute
+        // See AdjustSheetController.requestPreview: a plane target previews
+        // the SAME op on that plane, on the handle captured in init.
+        let planePreview = self.planePreview
         renderer.request {
+            if let planePreview = planePreview {
+                return planePreview.preview { compute($0, values) }
+            }
             guard let filtered = compute(baseLayer, values),
                   let previewDoc = baseDoc.withLayerPixels(idx, filtered)
             else { return nil }

@@ -284,6 +284,24 @@ extension RzBlendMode {
     /// Flat menu-order list for callers that don't care about grouping.
     static let allBlendModes: [(RzBlendMode, String)] = blendModeGroups.flatMap { $0 }
 
+    /// The four HSL modes, which carry NO information on a SINGLE 8-bit
+    /// plane: the W3C defines them over an RGB triple, and a gray triple has
+    /// zero saturation, so Hue, Saturation and Color answer the base verbatim
+    /// while Luminosity collapses to Normal. `rz_blend_planes` refuses them
+    /// for that reason (see the header's "Channels" section), so anything
+    /// offering blend modes for one plane — Calculations, and Apply Image
+    /// onto a colour plane or an alpha channel — leaves them out. Three
+    /// planes blended as one colour (`RasterPlaneMath.blendRGB`) accept them:
+    /// that is the form in which they mean something.
+    static let grayDegenerateModes: [RzBlendMode] = [
+        RZ_BLEND_HUE, RZ_BLEND_SATURATION, RZ_BLEND_COLOR, RZ_BLEND_LUMINOSITY,
+    ]
+
+    /// True for a mode `rz_blend_planes` refuses on one plane.
+    static func degeneratesOnGray(_ mode: RzBlendMode) -> Bool {
+        grayDegenerateModes.contains { $0 == mode }
+    }
+
     /// Display name for a mode (status bar, layer-row meta lines).
     static func displayName(for mode: RzBlendMode) -> String {
         allBlendModes.first { $0.0 == mode }?.1 ?? "Normal"
@@ -765,6 +783,253 @@ final class RasterDocument {
         return rz_doc_layer_mask_enabled(ptr, idx)
     }
 
+    // MARK: - Channels and planes
+
+    /// Value snapshot of one alpha channel (see the header's "Channels"
+    /// section): a named canvas-sized coverage plane plus the rubylith a host
+    /// draws it with. The plane itself comes from `channelPlane` or
+    /// `channelImage`.
+    struct ChannelInfo {
+        /// The core's stable per-channel identity: unique while the app runs,
+        /// kept through a rename, a plane edit, the geometry ops and
+        /// undo/redo, fresh for a duplicate, and gone when the channel is.
+        /// It is how view state (which channel's eye is on) stays attached to
+        /// a channel — names are not unique and indices renumber on every
+        /// insert, delete and undo.
+        let id: UInt64
+        let name: String
+        let red: UInt8
+        let green: UInt8
+        let blue: UInt8
+        let opacity: Double
+        /// false = the rubylith covers the MASKED areas (the default, and
+        /// what the Quick Mask overlay already draws).
+        let colorIndicatesSelected: Bool
+    }
+
+    var channelCount: Int { Int(rz_doc_channel_count(ptr)) }
+
+    /// The largest channel count a `w` x `h` canvas may carry: the core's own
+    /// budget (256 channels, and 900 M channel pixels in total — nine full
+    /// canvases), asked as a number so a refusal can name it. Image Size,
+    /// Canvas Size and every channel-creating command refuse on it, and a beep
+    /// alone leaves the user no way to learn why.
+    /// A size past what a canvas can be answers 0 — nothing fits a canvas
+    /// that could not exist in the first place.
+    static func maxChannels(width w: Int, height h: Int) -> Int {
+        guard w >= 0, h >= 0, w <= Int(UInt32.max), h <= Int(UInt32.max) else { return 0 }
+        return Int(rz_max_channels_at(UInt32(w), UInt32(h)))
+    }
+
+    private func isValidChannel(_ i: Int) -> Bool {
+        i >= 0 && i < channelCount
+    }
+
+    /// Channel `i`'s stable identity alone (see `ChannelInfo.id`), 0 for an
+    /// out-of-range index. The cheap half of `channelInfo` — no name string
+    /// crosses the boundary — for the view state that only needs identity.
+    func channelID(_ i: Int) -> UInt64 {
+        guard isValidChannel(i) else { return 0 }
+        return rz_doc_channel_id(ptr, i)
+    }
+
+    func channelInfo(_ i: Int) -> ChannelInfo? {
+        guard isValidChannel(i) else { return nil }
+        var name = ""
+        if let cName = rz_doc_channel_name(ptr, i) {
+            name = String(cString: cName)
+            rz_string_free(cName)
+        }
+        var rgb = [UInt8](repeating: 0, count: 3)
+        let ok = rgb.withUnsafeMutableBufferPointer { buffer in
+            rz_doc_channel_overlay_color(ptr, i, buffer.baseAddress)
+        }
+        guard ok else { return nil }
+        return ChannelInfo(
+            id: rz_doc_channel_id(ptr, i),
+            name: name, red: rgb[0], green: rgb[1], blue: rgb[2],
+            opacity: Double(rz_doc_channel_overlay_opacity(ptr, i)),
+            colorIndicatesSelected: rz_doc_channel_color_indicates_selected(ptr, i))
+    }
+
+    /// A canvas-sized plane read STRAIGHT into a Swift buffer — never through
+    /// an image handle, which would cost five times the memory for bytes that
+    /// are u8 coverage to begin with.
+    private func readCanvasPlane(_ read: (UnsafeMutablePointer<UInt8>?) -> Bool) -> [UInt8]? {
+        guard width > 0, height > 0 else { return nil }
+        var plane = [UInt8](repeating: 0, count: width * height)
+        let ok = plane.withUnsafeMutableBufferPointer { read($0.baseAddress) }
+        return ok ? plane : nil
+    }
+
+    /// Channel `i`'s coverage bytes (canvas-sized, row 0 = top — the
+    /// selection convention).
+    func channelPlane(_ i: Int) -> [UInt8]? {
+        guard isValidChannel(i) else { return nil }
+        return readCanvasPlane { out in
+            rz_doc_channel_plane(ptr, i, out, UInt32(width), UInt32(height))
+        }
+    }
+
+    /// One plane of the FLATTENED composite, canvas-sized. A ONE-SHOT read:
+    /// it runs the whole projection, so a display path reads the cached
+    /// projection with `RasterImage.plane` instead. nil for `RZ_PLANE_MASK`.
+    func compositePlane(_ plane: RzPlane) -> [UInt8]? {
+        readCanvasPlane { out in
+            rz_doc_composite_plane(ptr, plane, out, UInt32(width), UInt32(height))
+        }
+    }
+
+    /// One plane of layer `idx`, CANVAS-sized: pixels outside the layer's
+    /// rect read 0, `RZ_PLANE_MASK` included. nil when the layer has no mask
+    /// and `RZ_PLANE_MASK` was asked for.
+    func layerPlane(_ idx: Int, _ plane: RzPlane) -> [UInt8]? {
+        guard isValidIndex(idx) else { return nil }
+        return readCanvasPlane { out in
+            rz_doc_layer_plane(ptr, idx, plane, out, UInt32(width), UInt32(height))
+        }
+    }
+
+    /// One-shot plane image (it re-flattens). For a DISPLAY path use
+    /// `RasterImage.planeImage` on the cached projection instead.
+    /// `maxSide` 0 means full size.
+    func compositePlaneImage(_ plane: RzPlane, maxSide: Int) -> RasterImage? {
+        guard maxSide >= 0 else { return nil }
+        return wrapImage(rz_doc_composite_plane_image(ptr, plane, UInt32(maxSide)))
+    }
+
+    /// One CANVAS-sized plane of layer `idx` as an opaque grayscale image.
+    func layerPlaneImage(_ idx: Int, _ plane: RzPlane, maxSide: Int) -> RasterImage? {
+        guard isValidIndex(idx), maxSide >= 0 else { return nil }
+        return wrapImage(rz_doc_layer_plane_image(ptr, idx, plane, UInt32(maxSide)))
+    }
+
+    /// Channel `i` as an opaque grayscale image — the panel's thumbnail
+    /// source (the core does the downsampling; `maxSide` 0 means full size).
+    func channelImage(_ i: Int, maxSide: Int) -> RasterImage? {
+        guard isValidChannel(i), maxSide >= 0 else { return nil }
+        return wrapImage(rz_doc_channel_image(ptr, i, UInt32(maxSide)))
+    }
+
+    /// Appends a channel from `plane` (`width * height` coverage bytes). A
+    /// plane that is not canvas-sized is resampled to the canvas bilinearly —
+    /// the iPhone auxiliary-matte path. nil when the list is full or the nine
+    /// would not fit the total pixel budget.
+    func addingChannel(
+        name: String, plane: [UInt8], width w: Int, height h: Int,
+        red: UInt8 = 255, green: UInt8 = 0, blue: UInt8 = 0, opacity: Double = 0.5
+    ) -> RasterDocument? {
+        guard w > 0, h > 0, plane.count == w * h else { return nil }
+        return plane.withUnsafeBufferPointer { buffer in
+            wrap(
+                rz_doc_add_channel(
+                    ptr, name, buffer.baseAddress, UInt32(w), UInt32(h),
+                    red, green, blue, Float(opacity)))
+        }
+    }
+
+    func removingChannel(_ i: Int) -> RasterDocument? {
+        guard isValidChannel(i) else { return nil }
+        return wrap(rz_doc_remove_channel(ptr, i))
+    }
+
+    /// nil for a name the channel already has (renaming to itself is not an
+    /// edit).
+    func renamingChannel(_ i: Int, _ name: String) -> RasterDocument? {
+        guard isValidChannel(i) else { return nil }
+        return wrap(rz_doc_rename_channel(ptr, i, name))
+    }
+
+    /// All the display options at once, so the options sheet is one undo
+    /// step. nil when none of them would change.
+    func settingChannelOverlay(
+        _ i: Int, red: UInt8, green: UInt8, blue: UInt8, opacity: Double,
+        indicatesSelected: Bool
+    ) -> RasterDocument? {
+        guard isValidChannel(i) else { return nil }
+        return wrap(
+            rz_doc_set_channel_overlay(
+                ptr, i, red, green, blue, Float(opacity), indicatesSelected))
+    }
+
+    /// Replaces channel `i`'s coverage with a CANVAS-sized plane; nil when
+    /// the bytes are what the channel already holds.
+    func settingChannelData(_ i: Int, _ plane: [UInt8]) -> RasterDocument? {
+        guard isValidChannel(i), plane.count == width * height else { return nil }
+        return plane.withUnsafeBufferPointer { buffer in
+            wrap(
+                rz_doc_set_channel_data(
+                    ptr, i, buffer.baseAddress, UInt32(width), UInt32(height)))
+        }
+    }
+
+    func duplicatingChannel(_ i: Int) -> RasterDocument? {
+        guard isValidChannel(i) else { return nil }
+        return wrap(rz_doc_duplicate_channel(ptr, i))
+    }
+
+    func invertingChannel(_ i: Int) -> RasterDocument? {
+        guard isValidChannel(i) else { return nil }
+        return wrap(rz_doc_invert_channel(ptr, i))
+    }
+
+    /// Appends the nine luminosity masks ("Lights 1".."Midtones 3") built
+    /// from the composite's Rec. 709 luma; nil when they would not fit.
+    func addingLuminosityMasks() -> RasterDocument? {
+        wrap(rz_doc_add_luminosity_masks(ptr))
+    }
+
+    /// Replaces ONLY `plane` of layer `idx`'s pixels from a CANVAS-sized
+    /// buffer, inside the layer's rect. nil for `RZ_PLANE_LUMA`/
+    /// `RZ_PLANE_MASK` and — importantly — when NO BYTE WOULD CHANGE, so a
+    /// caller writing red, green and blue in turn must fall through per
+    /// plane rather than chain the optionals.
+    func withLayerPlane(_ idx: Int, _ plane: RzPlane, _ src: [UInt8]) -> RasterDocument? {
+        guard isValidIndex(idx), src.count == width * height else { return nil }
+        return src.withUnsafeBufferPointer { buffer in
+            wrap(
+                rz_doc_with_layer_plane(
+                    ptr, idx, plane, buffer.baseAddress, UInt32(width), UInt32(height)))
+        }
+    }
+
+    /// Replaces ONLY `plane` of layer `idx`'s pixels from a LAYER-SIZED
+    /// buffer — `src` is `w * h` bytes of the layer's OWN pixel grid — and
+    /// writes every sample, the part of the layer that hangs off the canvas
+    /// included. The writer for the filter/adjustment round trip, whose
+    /// source is `layerSpacePlaneImage` at that same size; `withLayerPlane`
+    /// is the canvas-sized sibling. nil for the derived planes, for a
+    /// buffer that is not the layer's size, and when no byte would change.
+    func withLayerSpacePlane(
+        _ idx: Int, _ plane: RzPlane, _ src: [UInt8], width w: Int, height h: Int
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), w > 0, h > 0, src.count == w * h else { return nil }
+        return src.withUnsafeBufferPointer { buffer in
+            wrap(
+                rz_doc_with_layer_space_plane(
+                    ptr, idx, plane, buffer.baseAddress, UInt32(w), UInt32(h)))
+        }
+    }
+
+    /// Paints channel `i` with a CANVAS-frame premultiplied overlay — the
+    /// very buffer `paintingLayer` takes: white paints toward 255, black
+    /// toward 0. nil when no byte would change.
+    func paintingChannel(
+        _ i: Int, overlay data: UnsafePointer<UInt8>, w: Int, h: Int
+    ) -> RasterDocument? {
+        guard isValidChannel(i), w == width, h == height else { return nil }
+        return wrap(rz_doc_painting_channel(ptr, i, data, UInt32(w), UInt32(h)))
+    }
+
+    /// The same coverage paint into ONE colour plane of layer `idx`. nil for
+    /// `RZ_PLANE_LUMA`/`RZ_PLANE_MASK` or when no byte would change.
+    func paintingLayerPlane(
+        _ idx: Int, _ plane: RzPlane, overlay data: UnsafePointer<UInt8>, w: Int, h: Int
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), w == width, h == height else { return nil }
+        return wrap(rz_doc_painting_layer_plane(ptr, idx, plane, data, UInt32(w), UInt32(h)))
+    }
+
     // MARK: - Clipping masks
 
     /// Sets or clears layer `idx`'s clipped flag: a clipped layer is
@@ -882,6 +1147,23 @@ final class RasterDocument {
         }
     }
 
+    /// The whole-document half of `transformingLayer`, for the one edit that
+    /// turns the picture in place: the Crop tool's straighten rotates every
+    /// layer (and its mask) about a point, and the alpha channels — saved
+    /// selections OF that picture — have to ride the same matrix or they
+    /// silently stop lining up with what they were saved from. Channels stay
+    /// canvas-sized; coverage rotated off the canvas is dropped, which the
+    /// straighten's own crop would have dropped anyway. nil when the document
+    /// has no channels, so a caller chains it with `?? current`.
+    func transformingChannels(
+        _ transform: CGAffineTransform, sampler: RzResizeFilter
+    ) -> RasterDocument? {
+        guard let affine = Self.affineElements(transform) else { return nil }
+        return affine.withUnsafeBufferPointer { buffer in
+            wrap(rz_doc_transform_channels(ptr, buffer.baseAddress, sampler))
+        }
+    }
+
     /// The six elements in the order the FFI reads them, [a, b, c, d, tx,
     /// ty]; nil when any is not finite (a matrix the core would refuse).
     private static func affineElements(_ transform: CGAffineTransform) -> [Double]? {
@@ -917,6 +1199,109 @@ final class RasterDocument {
         guard rz_doc_save_native(ptr, url.path, &err) else {
             throw RasterCoreError(
                 message: takeErrorMessage(err, fallback: "Could not save \(url.lastPathComponent)."))
+        }
+    }
+}
+
+extension RasterImage {
+    /// One plane of THIS image (`width * height` bytes, row 0 = top) — the
+    /// ONE plane reader. Exact for the opaque grayscale images the
+    /// plane-image getters return, which is what makes `.luma` the
+    /// definition of "take the result's gray". nil for `RZ_PLANE_MASK`.
+    func plane(_ plane: RzPlane) -> [UInt8]? {
+        guard width > 0, height > 0 else { return nil }
+        var out = [UInt8](repeating: 0, count: width * height)
+        let ok = out.withUnsafeMutableBufferPointer { buffer in
+            rz_image_plane(ptr, plane, buffer.baseAddress, UInt32(width), UInt32(height))
+        }
+        return ok ? out : nil
+    }
+
+    /// Shorthand for `plane(RZ_PLANE_LUMA)` — how an op's result comes back
+    /// as a plane.
+    func lumaPlane() -> [UInt8]? { plane(RZ_PLANE_LUMA) }
+
+    /// One plane of THIS image as an opaque grayscale image — the DISPLAY
+    /// reader, run on the cached projection (`ImageDocument.projection`) so a
+    /// panel row or a canvas redraw never re-flattens. `maxSide` 0 means full
+    /// size.
+    func planeImage(_ plane: RzPlane, maxSide: Int) -> RasterImage? {
+        guard maxSide >= 0 else { return nil }
+        return wrap(rz_image_plane_image(ptr, plane, UInt32(maxSide)))
+    }
+}
+
+/// Plane arithmetic on caller-owned buffers — the ONE function behind Apply
+/// Image and Calculations. Mirrors `RasterSelection`'s shape: planes cross
+/// the FFI as raw canvas-sized u8 buffers, not handles.
+enum RasterPlaneMath {
+    /// `base` blended with `source` IN PLACE:
+    /// `base = lerp(base, blend(base, source), opacity)` per pixel, through
+    /// the same blend table the projection uses. `invertBase`/`invertSource`
+    /// invert an operand FIRST, so the complement is both blended and lerped
+    /// from. false on a length mismatch, a non-finite opacity, or one of the
+    /// four HSL modes (`RzBlendMode.grayDegenerateModes`), which say nothing
+    /// about a single gray plane — blend three planes as one colour with
+    /// `blendRGB` for those.
+    static func blend(
+        _ base: inout [UInt8], with source: [UInt8], width: Int, height: Int,
+        mode: RzBlendMode, opacity: Double, invertBase: Bool, invertSource: Bool
+    ) -> Bool {
+        guard width > 0, height > 0, base.count == width * height,
+              source.count == width * height
+        else { return false }
+        return base.withUnsafeMutableBufferPointer { b in
+            source.withUnsafeBufferPointer { s in
+                rz_blend_planes(
+                    b.baseAddress, s.baseAddress, UInt32(width), UInt32(height),
+                    mode, Float(opacity), invertBase, invertSource)
+            }
+        }
+    }
+
+    /// Red, green and blue blended AS ONE COLOUR, in place on the three base
+    /// planes — Apply Image with an RGB source onto an RGB target. Same rules
+    /// as `blend`, and the one form in which the four HSL modes mean anything
+    /// (blending the planes independently would hand each of them a gray
+    /// triple, which is what made three of the four the identity). false on a
+    /// length mismatch or a non-finite opacity.
+    /// The three planes are separate `inout` parameters rather than one array
+    /// of three: `base[0].withUnsafeMutableBufferPointer { base[1]… }` would
+    /// be overlapping access to the same array, which Swift's exclusivity
+    /// checking traps on.
+    // Six buffers is what "blend a colour" costs at this boundary; bundling
+    // them into a struct would only move the count, and the C declaration
+    // spells the same six out.
+    static func blendRGB(
+        red: inout [UInt8], green: inout [UInt8], blue: inout [UInt8],
+        withRed sourceRed: [UInt8], green sourceGreen: [UInt8], blue sourceBlue: [UInt8],
+        width: Int, height: Int, mode: RzBlendMode, opacity: Double,
+        invertBase: Bool, invertSource: Bool
+    ) -> Bool {
+        let count = width * height
+        guard width > 0, height > 0,
+              red.count == count, green.count == count, blue.count == count,
+              sourceRed.count == count, sourceGreen.count == count, sourceBlue.count == count
+        else { return false }
+        // Six nested pointer scopes rather than a flattened interleave: the
+        // core takes the three planes as they already are, so nothing is
+        // copied on either side of the boundary.
+        return red.withUnsafeMutableBufferPointer { r in
+            green.withUnsafeMutableBufferPointer { g in
+                blue.withUnsafeMutableBufferPointer { b in
+                    sourceRed.withUnsafeBufferPointer { sr in
+                        sourceGreen.withUnsafeBufferPointer { sg in
+                            sourceBlue.withUnsafeBufferPointer { sb in
+                                rz_blend_planes_rgb(
+                                    r.baseAddress, g.baseAddress, b.baseAddress,
+                                    sr.baseAddress, sg.baseAddress, sb.baseAddress,
+                                    UInt32(width), UInt32(height), mode, Float(opacity),
+                                    invertBase, invertSource)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

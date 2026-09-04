@@ -25,6 +25,13 @@ final class ImageDocument: NSDocument {
     /// undo step. Re-clamped whenever `doc` changes.
     var activeLayerIndex: Int = 0
 
+    /// The editor's paint target, mirrored down so the ONE active-layer edit
+    /// path can route a filter or an adjustment onto a single plane or an
+    /// alpha channel (ImageDocument+Channels.swift). UI state: never
+    /// persisted, never undoable, written only by
+    /// EditorViewController.setPaintTarget.
+    var planeEditTarget: PaintTarget = .layer
+
     /// Snapshot taken by beginLiveEdit, consumed by endLiveEdit.
     private var liveEditBase: RasterDocument?
 
@@ -146,13 +153,18 @@ final class ImageDocument: NSDocument {
         {
             return livePhoto
         }
+        // iPhone auxiliary images — depth, the portrait matte, the semantic
+        // segmentation mattes — become named alpha channels on BOTH open
+        // paths: "Most Compatible" mode writes JPEGs carrying the same
+        // auxiliary images, and a JPEG is decoded by the core.
         do {
-            return try RasterDocument.open(url: url)
+            let opened = try RasterDocument.open(url: url)
+            return AuxiliaryMattes.attaching(to: opened, from: url) ?? opened
         } catch {
             guard let image = RasterImage.decoded(from: url),
                   let decoded = RasterDocument.from(image: image)
             else { throw error }
-            return decoded
+            return AuxiliaryMattes.attaching(to: decoded, from: url) ?? decoded
         }
     }
 
@@ -241,6 +253,9 @@ final class ImageDocument: NSDocument {
     /// layer invalidates its description, so this goes through
     /// applyRasterizingEdit.
     func applyToActiveLayer(_ actionName: String, _ op: (RasterImage) -> RasterImage?) {
+        // A colour plane or an alpha channel is targeted: the same op runs
+        // on that plane alone (ImageDocument+Channels.swift).
+        if applyToTargetPlane(actionName, op) { return }
         let idx = activeLayerIndex
         applyRasterizingEdit(actionName, layer: idx) { doc in
             guard let layer = doc.layerImage(idx), let filtered = op(layer) else { return nil }

@@ -16,8 +16,8 @@ decoding, encoding, and manipulation.
   new/delete/duplicate/merge-down/flatten; Move tool (V) with arrow-key
   nudges; Paste as New Layer; PSD files import with their real layers; the
   native `.rz` format saves the full layer stack — masks, clipping flags,
-  layer styles, the global light, and text and adjustment descriptions
-  included — losslessly, and older `.rz` files still load
+  layer styles, the global light, alpha channels, and text and adjustment
+  descriptions included — losslessly, and older `.rz` files still load
 - **Layer masks**: a grayscale coverage mask per layer that hides pixels
   without erasing them — Layer > Mask adds one revealing all, hiding all, or
   built from the current selection, then enables/disables it (a disabled mask
@@ -27,6 +27,48 @@ decoding, encoding, and manipulation.
   layers panel — click either to aim the brush and eraser, which paint the
   mask white to reveal and black to hide. A mask is the layer's size and
   moves, rotates, crops and scales with it
+- **Channels** (View > Channels, ⌃⌘C): a third tab of the right panel beside
+  Layers and Assistant, listing RGB, the composite's Red, Green and Blue
+  planes, the active layer's mask while it has one, and every **alpha
+  channel** the document carries — named canvas-sized coverage planes that
+  are saved selections, never part of the picture. Each row draws its own
+  grayscale thumbnail and carries an eye: RGB shows the colour image, a
+  single colour plane's eye shows that plane in grayscale, and a channel's
+  eye washes it over the picture as a rubylith in its own colour, opacity
+  and polarity (Color Indicates: Masked Areas by default — the same side
+  Quick Mask washes). Selecting a row *is* the edit target: with Red
+  selected the brush, eraser, fill, gradient and every destructive
+  Filters/Adjustments item run on that one 8-bit plane of the active layer
+  (previewing in grayscale and committing what they previewed), leaving the
+  other planes byte-identical; with an alpha channel selected they paint the
+  channel — white selects, black deselects — as one undo step each. Rows
+  rename by double-click, and a right-click menu (mirrored under Image >
+  Channels) duplicates, deletes, inverts, opens Channel Options… for the
+  name and rubylith, or loads the channel as a selection. Selections move
+  both ways: Select > Save Selection… writes one into a new or existing
+  channel, Select > Load Selection… reads a channel, a layer's transparency,
+  a layer's mask or a colour plane back out, and **⌘-clicking** a layer
+  thumbnail, a mask thumbnail or a channel row does it in one gesture
+  (Shift adds, Option subtracts, Shift+Option intersects — the selection
+  tools' own convention). Image > Apply Image… blends one source onto the
+  current target — onto the layer the three planes blend as one colour, so
+  the whole mode set applies; onto a single plane or a channel the four HSL
+  modes (Hue, Saturation, Color, Luminosity), which need an RGB triple to
+  mean anything, are left out, as they are in Image > Calculations…, whose
+  result is always one plane. Calculations blends two source planes into a
+  new channel or a selection, and Select >
+  Add Luminosity Masks appends the photographer's nine tone masks
+  ("Lights 1".."Midtones 3") built from the composite's Rec. 709 luma.
+  Opening an iPhone photo (HEIC or a "Most Compatible" JPEG) brings its
+  **auxiliary mattes** in as channels — Depth, Portrait Matte, Skin, Hair,
+  Teeth, Glasses, Sky — resampled to the canvas and ready to load as a
+  selection; a file carrying none adds none, and a Live Photo takes the Live
+  Photo path instead and contributes none. Channels ride along with every
+  canvas-geometry op (crop crops them, Canvas Size pads them, rotate/flip
+  permute them, Image Size resamples them — a growth that would push the
+  channel list past what `.rz` can store is refused there, with an alert
+  naming how many channels that canvas holds, rather than at save time) and
+  are saved in `.rz`
 - **Adjustment layers**: non-destructive color adjustments that live in the
   layer stack and recolor everything below them at composite time, their
   parameters editable forever. Layer > New Adjustment Layer offers nine ops
@@ -63,7 +105,7 @@ decoding, encoding, and manipulation.
   pane per effect, copied/pasted/cleared from the same menu, badged "fx" in
   the layers panel (double-click a plain raster layer's row to open the
   sheet), scaled with Free Transform and Image Size, baked by Merge Down and
-  Flatten, and saved losslessly in `.rz` (format version 4; older files
+  Flatten, and saved losslessly in `.rz` (format version 5; older files
   still load). A document-level global light (angle, altitude) drives every
   effect with Use Global Light on. The Free Transform preview shows the
   layer without its effects until commit
@@ -316,9 +358,10 @@ model defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 53 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 65 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
-image as PNG, and `sample_color` reads single pixels off the flattened
+image as PNG — `render`'s `channel` shows ONE plane as a grayscale PNG
+instead — and `sample_color` reads single pixels off the flattened
 composite — the eyedropper), layer operations, blend modes, layer masks (add
 revealing, hiding or from the selection; enable, apply, or delete), clipping
 masks (`set_layer_clipped` confines a layer to the alpha of the first
@@ -341,7 +384,10 @@ with size/color/opacity and the full tip — hardness, flow, spacing, angle,
 roundness, the same stamped pipeline as the options bar's tip, shared with
 `clone_stamp` and `dodge_burn` — a `blend_mode` compositing brush and clone
 paint through the layer blend-mode set, and a
-`target` choosing the layer's pixels or its mask), shape layers
+`target` choosing the layer's pixels, its mask, one of its colour planes or
+an alpha channel — `apply_filter`, `fill` and `gradient` take the same
+`target` minus `mask`, filters and fills on a layer mask not being part of
+this build), shape layers
 (`add_shape_layer` / `edit_shape_layer`, the parametric rect / ellipse /
 line layers the shape tools drag out and reopen, with an optional
 `transform`), text — `add_text_layer` and `edit_text_layer` for re-editable
@@ -362,7 +408,19 @@ plus `modify_selection`'s invert, feather, grow, shrink, border, and
 smooth — shared with the UI and
 honored by every paint tool), `clear_selection` to clear the window's
 current selection on a layer (partial coverage clears proportionally),
-bucket fill, gradients,
+alpha channels (`list_channels`, `add_channel` from the selection, a layer's
+transparency or mask, a colour plane or nothing at all, plus
+`duplicate_channel` / `delete_channel` / `rename_channel` /
+`set_channel_options` / `invert_channel`; `get_document` reports the list)
+and the selections that
+flow through them (`save_selection` into a new or existing channel,
+`load_selection` back out — an all-zero source deselects rather than
+erroring), channel arithmetic (`apply_image` and `calculations` over the
+separable blend modes — the four HSL modes need an RGB triple, so only
+`apply_image` onto a whole layer takes them — plus `add_luminosity_masks`
+for the nine tone masks),
+bucket fill and gradients (either on the layer or, through the same
+`target`, straight into a colour plane or an alpha channel),
 undo/redo, and exporting. Agent edits run on the main thread through the same edit path
 as the UI: each tool call is one undo step, marks the document edited, and
 updates the open window live. With [goose](https://github.com/aaif-goose/goose):

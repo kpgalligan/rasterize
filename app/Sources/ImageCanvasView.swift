@@ -285,17 +285,28 @@ final class ImageCanvasView: NSView {
     /// matches once the text wraps to fill it.
     var textStyle = TextStyle(family: "Helvetica Neue", size: 48)
 
-    /// True while brush and eraser edit the active layer's MASK instead of
-    /// its pixels (the layers panel's paint target). A mask is coverage, not
-    /// color: the stroke paints white (brush, reveals) or black (eraser,
-    /// hides), it previews as a translucent ghost rather than through the
-    /// projection, and the whole overlay commits on mouse-up via
-    /// onCommitMaskOverlay. Kept current by EditorViewController.
-    var paintsMask = false {
+    /// The editor's edit target, mirrored down — the layer's pixels, its
+    /// mask, one of its colour planes or a document channel. Kept current by
+    /// EditorViewController; the canvas reads it for the coverage stroke
+    /// pipeline (`paintsMask`) and for the two things it must draw honestly:
+    /// the active-layer boundary (only the LAYER-clipped targets have one)
+    /// and the rubylith washes (a sheet previewing an op on the target plane
+    /// paints over them).
+    var paintTarget: PaintTarget = .layer {
         didSet {
-            if paintsMask != oldValue { needsDisplay = true }
+            if paintTarget != oldValue { needsDisplay = true }
         }
     }
+
+    /// True while brush and eraser edit the active layer's MASK, one of its
+    /// colour PLANES, or one of the document's alpha CHANNELS instead of its
+    /// pixels — every COVERAGE target (the layers and channels panels' edit
+    /// target). Coverage is not color: the stroke paints white (brush,
+    /// reveals) or black (eraser, hides), it previews as a translucent ghost
+    /// rather than through the projection, and the whole overlay commits on
+    /// mouse-up via onCommitMaskOverlay. Derived from `paintTarget`, so the
+    /// stroke pipeline and the drawing can never disagree about the target.
+    var paintsMask: Bool { paintTarget.isCoverage }
 
     // Brush/eraser stroke pipeline. The overlay accumulates the stroke's
     // geometry; every tick hands the WHOLE overlay to the receiver, which
@@ -433,6 +444,14 @@ final class ImageCanvasView: NSView {
     // like the selection it stands in for. `quickMaskImage` is the tint's
     // alpha source (grayscale 255 − coverage), rebuilt whenever the
     // coverage on display changes.
+    /// A colour plane or an alpha channel on display (ChannelDisplay.swift):
+    /// its base replaces the projection and its overlays wash over it. Pure
+    /// VIEW state pushed in by EditorViewController+Channels; nil = the
+    /// normal composite.
+    var channelDisplay: ChannelDisplay? {
+        didSet { needsDisplay = true }
+    }
+
     private(set) var quickMaskActive = false
     private var quickMaskBuffer: [UInt8] = []
     private var quickMaskWidth = 0
@@ -549,6 +568,16 @@ final class ImageCanvasView: NSView {
         let context = NSGraphicsContext.current!.cgContext
         if let preview = transformPreview {
             drawTransformPreview(preview, in: context)
+        } else if cropOverlay == nil, channelDisplay?.replacesComposite == true {
+            // A plane, a channel or the mask on display draws instead of the
+            // projection — and with every eye off, nothing draws at all and
+            // the checkerboard is what is left. Never during a crop, whose
+            // straighten preview rotates the real image. previewImage still
+            // wins inside drawBase, so a sheet previewing an op ON this
+            // plane shows through.
+            channelDisplay?.drawBase(
+                in: context, bounds: bounds, preview: previewImage,
+                quality: imageInterpolation)
         } else if let cgImage = previewImage ?? image {
             if let crop = cropOverlay, crop.angle != 0 {
                 // Straighten preview: the image rotates about the crop
@@ -566,10 +595,6 @@ final class ImageCanvasView: NSView {
             }
         }
 
-        // A mask stroke in progress: the projection has not moved, so the
-        // overlay itself is ghosted on top until the stroke commits.
-        drawMaskStrokeGhost(in: context)
-
         // Quick Mask mode: the rubylith tint over the whole image. During
         // a stroke the tint is rebuilt per tick (emitStrokeUpdate), so this
         // is always the buffer-plus-stroke on display.
@@ -577,13 +602,41 @@ final class ImageCanvasView: NSView {
             drawQuickMaskOverlay(in: context)
         }
 
+        // Channel rubyliths: one wash per visible alpha channel (and the
+        // layer mask), in row order, over whatever the base turned out to be
+        // — but never over a sheet's preview OF that same plane, which the
+        // canvas is drawing full-frame in grayscale (ChannelDisplay), and
+        // never during a crop, which the whole channel display stands down
+        // for: the straighten preview rotates the picture while a wash would
+        // stay axis-aligned on top of it, showing the channel where it will
+        // NOT land (commitCropSession rotates every channel through the very
+        // same matrix). The washes return when the crop commits or cancels,
+        // exactly as the base does.
+        if cropOverlay == nil {
+            channelDisplay?.drawOverlays(
+                in: context, bounds: bounds,
+                previewingPlane: previewImage != nil && paintTarget.targetsPlaneOrChannel)
+        }
+
+        // A coverage stroke in progress: the projection has not moved, so the
+        // overlay itself is ghosted on top until the stroke commits — ABOVE
+        // the washes, since a wash drawn over it hid the very stroke that is
+        // about to change that wash (drawMaskStrokeGhost picks the colour).
+        drawMaskStrokeGhost(in: context)
+
         // Paint can only land inside the active layer's extent; when that is
         // smaller than the canvas, show the boundary so strokes and text
-        // outside it don't silently vanish. Quick Mask strokes land on the
-        // canvas-sized buffer instead, so the boundary would mislead there.
+        // outside it don't silently vanish. Gated on the TARGET, not on what
+        // is being displayed: a layer, its mask and its colour planes are all
+        // clipped to that extent, while a Quick Mask stroke and a channel
+        // stroke land on a canvas-sized buffer the layer says nothing about,
+        // so the boundary would mislead there. Nothing else can reach a
+        // channel: clone and dodge strokes are refused by `onStrokeBegin` and
+        // a text session by `refuseChannelTargetEdit`, so there is no edit
+        // left for the guide to place.
         if tool == .brush || tool == .eraser || tool == .clone || tool == .dodge
             || tool == .text, !isTransforming,
-           !quickMaskActive,
+           !quickMaskActive, !paintTarget.isChannel,
            let layerRect = activeLayerRect,
            layerRect != CGRect(origin: .zero, size: bounds.size) {
             drawActiveLayerBounds(layerRect)
@@ -592,6 +645,10 @@ final class ImageCanvasView: NSView {
         // A transform ignores the selection entirely, and its dimming wash
         // and marquee would fight the box: the selection survives the
         // session, it just stops drawing for it.
+        // A plane or channel on display is NOT such a case: the selection is
+        // live there and still clips every stroke, fill and gradient, so
+        // hiding it would confine an edit with nothing on screen to say why.
+        // (Quick Mask is different — it consumed the selection on entry.)
         if let selection = selection, !isTransforming {
             drawSelection(selection)
         }
@@ -680,9 +737,18 @@ final class ImageCanvasView: NSView {
 
     /// Un-flips the context so the CGImage is not drawn upside down, then
     /// draws it over the full image rect.
+    /// How the image on the canvas is resampled, in one place: nearest
+    /// neighbour at 100% and above, so a zoomed-in pixel reads as a square,
+    /// smooth below. A plane or channel base draws by the same rule
+    /// (`ChannelDisplay.drawBase` takes it), or the picture would turn crisp
+    /// and its own colour plane blurry at the same zoom.
+    var imageInterpolation: CGInterpolationQuality {
+        magnification >= 1.0 ? .none : .high
+    }
+
     private func drawFlipped(_ cgImage: CGImage, in context: CGContext) {
         context.saveGState()
-        context.interpolationQuality = magnification >= 1.0 ? .none : .high
+        context.interpolationQuality = imageInterpolation
         context.translateBy(x: 0, y: bounds.height)
         context.scaleBy(x: 1, y: -1)
         context.draw(cgImage, in: CGRect(origin: .zero, size: bounds.size))
@@ -697,17 +763,31 @@ final class ImageCanvasView: NSView {
     /// when the stroke commits on mouse-up.
     private func drawMaskStrokeGhost(in context: CGContext) {
         guard strokeActive, strokeOnMask, let overlay = overlayContext?.makeImage() else { return }
+        // The ghost's colour depends on what is underneath. Over the PICTURE
+        // (a mask stroke with no wash on, the default) red at half alpha is
+        // just "you painted here". But when the canvas is already showing the
+        // very coverage being painted — a channel's rubylith, or that plane
+        // or channel drawn as the grayscale base — red is the wash's own
+        // colour, and a red stroke there reads as MORE mask exactly where the
+        // brush is ADDING coverage. So the ghost is then drawn as the
+        // coverage it paints: white for the brush, black for the eraser, the
+        // vocabulary this whole feature uses. It sits over the wash rather
+        // than under it, and commits into it at mouse-up.
+        let onCoverage = channelDisplay?.shows(paintTarget) == true
+        let color: NSColor = onCoverage ? (tool == .eraser ? .black : .white) : .systemRed
         context.saveGState()
         context.translateBy(x: 0, y: bounds.height)
         context.scaleBy(x: 1, y: -1)
         let rect = CGRect(origin: .zero, size: bounds.size)
-        context.setAlpha(0.5)
-        // Draw the stroke, then flood its alpha with red: sourceIn keeps the
-        // fill only where the overlay covered something.
+        // A coverage ghost has to read over a 50% wash, so it is drawn more
+        // opaque than the ghost over a plain picture.
+        context.setAlpha(onCoverage ? 0.85 : 0.5)
+        // Draw the stroke, then flood its alpha with the colour: sourceIn
+        // keeps the fill only where the overlay covered something.
         context.beginTransparencyLayer(auxiliaryInfo: nil)
         context.draw(overlay, in: rect)
         context.setBlendMode(.sourceIn)
-        context.setFillColor(NSColor.systemRed.cgColor)
+        context.setFillColor(color.cgColor)
         context.fill(rect)
         context.endTransparencyLayer()
         context.restoreGState()
@@ -1005,14 +1085,11 @@ final class ImageCanvasView: NSView {
     }
 
     /// Reads a gesture's combine mode: an explicit modifier wins, otherwise
-    /// the options bar's mode applies.
+    /// the options bar's mode applies. The convention itself lives on
+    /// `SelectionCombineMode` (EditorViewController+SelectionIO), shared with
+    /// the two panels' ⌘-clicks.
     private func combineMode(for event: NSEvent) -> SelectionCombineMode {
-        switch (event.modifierFlags.contains(.shift), event.modifierFlags.contains(.option)) {
-        case (true, true): return .intersect
-        case (true, false): return .add
-        case (false, true): return .subtract
-        case (false, false): return selectionCombineBase
-        }
+        SelectionCombineMode.from(event.modifierFlags, base: selectionCombineBase)
     }
 
     /// Discards the lasso in progress (Escape, tool switch).

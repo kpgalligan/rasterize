@@ -12,7 +12,9 @@ use image::{GrayImage, RgbaImage};
 use crate::adjust::Adjustment;
 use crate::doc::{BlendMode, MaskKind, RzDocument, MAX_PIXELS};
 use crate::doc_transform::Affine;
-use crate::ffi_util::{boxed, doc_get, doc_op, fallible_op, filter_from_c, read_cstr};
+use crate::ffi_util::{
+    boxed, doc_get, doc_op, fallible_op, filter_from_c, mask_slice, read_cstr, thumb_dims,
+};
 use crate::ops::CompositeMode;
 use crate::rzdc::MAX_RZDC_META_LEN;
 use crate::RzImage;
@@ -279,14 +281,7 @@ pub unsafe extern "C" fn rz_doc_layer_thumbnail(
             if lw == 0 || lh == 0 {
                 return None;
             }
-            let side = max_side.max(1);
-            let (tw, th) = if lw >= lh {
-                let th = (f64::from(lh) * f64::from(side) / f64::from(lw)).round() as u32;
-                (side, th.max(1))
-            } else {
-                let tw = (f64::from(lw) * f64::from(side) / f64::from(lh)).round() as u32;
-                (tw.max(1), side)
-            };
+            let (tw, th) = thumb_dims(lw, lh, max_side);
             let pixels = crate::ops::resize(&layer.pixels, tw, th, FilterType::Triangle)?;
             Some(Box::into_raw(Box::new(RzImage { pixels })))
         })
@@ -924,21 +919,6 @@ pub unsafe extern "C" fn rz_doc_magic_wand(
             true
         }
         _ => false,
-    }
-}
-
-/// Reads an optional caller buffer pointer (a canvas-sized selection mask, a
-/// canvas-sized paint overlay) into a slice of exactly `len` bytes. `len` is
-/// always derived from the document, never from the caller.
-///
-/// # Safety
-/// `mask` must be NULL or valid for `len` bytes for the duration of the
-/// caller.
-unsafe fn mask_slice<'a>(mask: *const u8, len: usize) -> Option<&'a [u8]> {
-    if mask.is_null() {
-        None
-    } else {
-        Some(unsafe { std::slice::from_raw_parts(mask, len) })
     }
 }
 

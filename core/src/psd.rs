@@ -161,5 +161,9 @@ pub(crate) fn open_psd(bytes: &[u8], path: &str) -> Result<RzDocument, String> {
         height: ch,
         layers,
         global_light: GlobalLight::default(),
+        // PSD alpha channels are not imported (the crate exposes only the
+        // composite and per-layer raster data), so an imported document
+        // arrives with no channels.
+        channels: Vec::new(),
     })
 }

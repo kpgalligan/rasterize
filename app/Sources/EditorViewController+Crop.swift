@@ -5,7 +5,8 @@ import AppKit
 // double-click. The box starts as the whole canvas; the commit is
 // rz_doc_crop — which only moves the canvas window, so a plain crop is
 // non-destructive — preceded, when straightening, by the same per-layer
-// affine rotate Free Transform uses, about the box's center.
+// affine rotate Free Transform uses, about the box's center, applied to
+// every layer and to every alpha channel.
 //
 // Session geometry lives in CropTool.swift; the canvas draws the overlay
 // and routes the gesture here. Mirrored for the agent by the `crop` MCP
@@ -117,9 +118,10 @@ extension EditorViewController {
 
     // MARK: - Commit
 
-    /// Return / double-click: straighten (per-layer rotate about the box's
-    /// center) then crop, as ONE undo step. A full-canvas box at angle 0 is
-    /// a no-op and just keeps the session.
+    /// Return / double-click: straighten (a rotate about the box's center,
+    /// over every layer and every alpha channel) then crop, as ONE undo
+    /// step. A full-canvas box at angle 0 is a no-op and just keeps the
+    /// session.
     func commitCropSession() {
         guard let session = cropSession, let document = document, let doc = document.doc
         else { return }
@@ -165,6 +167,12 @@ extension EditorViewController {
                 for idx in 0..<count {
                     current = current?.transformingLayer(idx, matrix, sampler: sampler)
                 }
+                // The alpha channels are saved selections OF this picture, so
+                // they ride the same matrix inside the same edit — otherwise
+                // every one of them silently stops lining up with what it was
+                // saved from. A document with no channels answers nil, hence
+                // the fallthrough.
+                current = current?.transformingChannels(matrix, sampler: sampler) ?? current
                 for idx in describedLayers {
                     current = current?.withLayerMeta(idx, nil) ?? current
                 }

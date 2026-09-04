@@ -39,6 +39,14 @@ extension AgentServer {
                 + "clears the selection.",
         ]
         let blendNames = RzBlendMode.allBlendModes.map { $0.1 }
+        // The modes a SINGLE 8-bit plane can carry: the four HSL modes are
+        // defined over an RGB triple, so `rz_blend_planes` refuses them and
+        // calculations — whose result is always one plane — must not offer
+        // them as schema-valid values (the sheet's popup filters the same
+        // list through ChannelMathControls.fillBlendModes).
+        let planeBlendNames = RzBlendMode.allBlendModes
+            .filter { !RzBlendMode.degeneratesOnGray($0.0) }
+            .map { $0.1 }
         // The tip options every stroke tool shares beyond hardness — the
         // same knobs the options bar's paint tools carry.
         let flowProperty: [String: Any] = [
@@ -65,8 +73,30 @@ extension AgentServer {
         let strokeBlendProperty: [String: Any] = [
             "type": "string", "enum": blendNames,
             "description": "Blend mode the stroke's paint composites with (default Normal) "
-                + "— the layer blend-mode names. Not valid with target: \"mask\".",
+                + "— the layer blend-mode names. Not valid with a coverage target — a "
+                + "mask, a colour plane or a channel.",
         ]
+        // The widened paint target: a colour plane or an alpha channel is
+        // coverage exactly like a mask. Shared by brush_stroke,
+        // eraser_stroke and apply_filter, which differ only in the prose
+        // above it, so the vocabulary is written once.
+        let targetVocabulary =
+            "\"layer\" (default) the layer's own pixels, \"mask\" the layer's mask, "
+            + "\"red\"/\"green\"/\"blue\"/\"alpha\" ONE colour plane of that layer's "
+            + "pixels, or \"channel:<name>\" one of the document's alpha channels "
+            + "(list_channels names them)."
+        // The one exception to "every other plane byte-identical", and it
+        // destroys data: the plane WRITER clears a pixel's colour bytes when
+        // its new alpha is 0 — the core's straight-alpha rule, stated for
+        // rz_doc_with_layer_plane in the C header — so inverting alpha twice
+        // does not bring the colours back. It rides with the tools that WRITE
+        // a whole plane (apply_filter, fill, gradient); the stroke ops
+        // deliberately do the opposite ("a stroke is incremental" —
+        // painting_layer_plane never clears colour), so they must not carry it.
+        let alphaWriteNote =
+            " Writing \"alpha\" is the one exception to that: every pixel whose new "
+            + "alpha is 0 loses its colour bytes as well, so re-running the edit "
+            + "does not bring them back."
         let cloneBlendProperty: [String: Any] = [
             "type": "string", "enum": blendNames,
             "description": "Blend mode the cloned paint composites with (default Normal) "
@@ -144,7 +174,11 @@ extension AgentServer {
                     + "block's, the shape box's, the still's; fractional after a transform). "
                     + "An ADJUSTMENT layer reports "
                     + "is_adjustment true plus an adjustment object (op, params) — those are "
-                    + "the layers edit_adjustment_layer can change. Layer index 0 is the bottom "
+                    + "the layers edit_adjustment_layer can change. A document that carries "
+                    + "ALPHA CHANNELS (saved selections, never part of the picture) also "
+                    + "reports a channels array of {index, name, overlay_color, "
+                    + "overlay_opacity, color_indicates} — list_channels returns the same "
+                    + "list. Layer index 0 is the bottom "
                     + "layer; offsets are measured from the canvas top-left corner, y "
                     + "increasing down.",
                 ["document_id": docID]),
@@ -157,6 +191,15 @@ extension AgentServer {
                     "max_side": [
                         "type": "integer",
                         "description": "Longest output side in px (64-4096, default 1024).",
+                    ],
+                    "channel": [
+                        "type": "string",
+                        "description": "Renders ONE plane as a grayscale PNG instead of the "
+                            + "colour image: \"red\", \"green\", \"blue\", \"alpha\", "
+                            + "\"luma\", or an alpha channel's name (list_channels shows "
+                            + "them). With layer it is that layer's plane, canvas-sized "
+                            + "with 0 outside the layer's rect; otherwise the flattened "
+                            + "composite's.",
                     ],
                 ]),
             tool(
@@ -578,6 +621,16 @@ extension AgentServer {
                     "degrees": ["type": "number"], "level": ["type": "number"],
                     "levels": ["type": "integer"], "block": ["type": "integer"],
                     "seed": ["type": "integer"],
+                    "target": [
+                        "type": "string",
+                        "description": "What the filter runs on: \"layer\" (default) the "
+                            + "layer's own pixels, \"red\"/\"green\"/\"blue\"/\"alpha\" ONE "
+                            + "colour plane of them, or \"channel:<name>\" one of the "
+                            + "document's alpha channels (list_channels names them). A "
+                            + "plane is 8-bit gray: the filter runs on it and the result's "
+                            + "gray goes back in, leaving every other plane byte-identical."
+                            + alphaWriteNote,
+                    ],
                     "document_id": docID,
                 ], required: ["filter"]),
             tool(
@@ -622,14 +675,15 @@ extension AgentServer {
                     "layer": index,
                     "target": [
                         "type": "string",
-                        "enum": ["layer", "mask"],
-                        "description": "What the stroke paints: \"layer\" (default) the "
-                            + "layer's own pixels, \"mask\" the layer's mask, where the "
-                            + "stroke REVEALS what it covers. A mask is coverage, not color, "
-                            + "so a mask stroke is forced to WHITE whatever color you pass, "
-                            + "and opacity becomes partial coverage. The layer must already "
-                            + "have a mask (add_layer_mask). On an ADJUSTMENT layer every "
-                            + "stroke paints the mask, whatever this says.",
+                        "description": "What the stroke paints: " + targetVocabulary
+                            + " On a mask the stroke REVEALS what it covers. Coverage is "
+                            + "not color, so every target but \"layer\" forces the stroke "
+                            + "to WHITE whatever color you pass, opacity becomes partial "
+                            + "coverage, and blend_mode is not valid. \"mask\" needs a "
+                            + "layer that already has one (add_layer_mask). On an "
+                            + "ADJUSTMENT layer a layer or colour-plane stroke paints the "
+                            + "mask instead, whatever this says — a channel target is "
+                            + "document state and is never rerouted.",
                     ],
                     "document_id": docID,
                 ], required: ["points"]),
@@ -667,15 +721,15 @@ extension AgentServer {
                     "layer": index,
                     "target": [
                         "type": "string",
-                        "enum": ["layer", "mask"],
-                        "description": "What the stroke erases: \"layer\" (default) makes the "
-                            + "layer's own pixels transparent, \"mask\" paints the layer's "
-                            + "mask so it HIDES what the stroke covers while the pixels stay "
-                            + "intact (undo it by brushing the mask with target: \"mask\"). "
-                            + "A mask is coverage, not color, so a mask stroke is forced to "
-                            + "BLACK, and opacity becomes partial coverage. The layer must "
-                            + "already have a mask (add_layer_mask). On an ADJUSTMENT layer "
-                            + "every stroke paints the mask, whatever this says.",
+                        "description": "What the stroke erases: " + targetVocabulary
+                            + " \"layer\" makes the layer's own pixels transparent; every "
+                            + "other target is coverage, painted BLACK, so the mask HIDES "
+                            + "what the stroke covers (the pixels stay intact — undo it by "
+                            + "brushing with brush_stroke and the same target), a colour "
+                            + "plane goes toward 0, and a channel deselects there. opacity "
+                            + "becomes partial coverage. \"mask\" needs a layer that "
+                            + "already has one (add_layer_mask). On an ADJUSTMENT layer a "
+                            + "layer or colour-plane stroke paints the mask instead.",
                     ],
                     "document_id": docID,
                 ], required: ["points"]),
@@ -1222,6 +1276,14 @@ extension AgentServer {
                     "tolerance": ["type": "integer", "minimum": 0, "maximum": 255],
                     "contiguous": ["type": "boolean"],
                     "layer": index,
+                    "target": [
+                        "type": "string",
+                        "description": "What the fill lands on: " + targetVocabulary
+                            + " (\"mask\" is not one of them here.) A plane or channel "
+                            + "target holds COVERAGE, not color, so the color enters as "
+                            + "its gray (its luma) and its alpha is the strength."
+                            + alphaWriteNote,
+                    ],
                     "document_id": docID,
                 ], required: ["x", "y"]),
             tool(
@@ -1243,6 +1305,14 @@ extension AgentServer {
                     ],
                     "shape": ["type": "string", "enum": ["linear", "radial"]],
                     "layer": index,
+                    "target": [
+                        "type": "string",
+                        "description": "What the ramp lands on: " + targetVocabulary
+                            + " (\"mask\" is not one of them here.) On a plane or a "
+                            + "channel both colors enter as their grays — coverage, not "
+                            + "color — with their alpha as the strength."
+                            + alphaWriteNote,
+                    ],
                     "document_id": docID,
                 ], required: ["x0", "y0", "x1", "y1", "start_color"]),
             tool(
@@ -1257,6 +1327,274 @@ extension AgentServer {
                     "layer": index,
                     "document_id": docID,
                 ]),
+            // Channels — saved selections, per-plane arithmetic (the
+            // Channels panel, Select > Save/Load Selection, Image > Apply
+            // Image… / Calculations…).
+            tool(
+                "list_channels",
+                "Lists the document's ALPHA CHANNELS: named canvas-sized coverage planes "
+                    + "(0 = out, 255 = in, in between = a soft edge) that are saved "
+                    + "selections. A channel is never part of the picture — its overlay "
+                    + "colour, opacity and color_indicates only say how the app draws it as "
+                    + "a rubylith. Use the index or the name wherever a tool takes "
+                    + "`channel`.",
+                ["document_id": docID]),
+            tool(
+                "add_channel",
+                "Adds an alpha channel — the Channels panel's New Channel, and Save "
+                    + "Selection as Channel. from: \"empty\" (default) an all-zero channel; "
+                    + "\"selection\" the current selection's coverage (errors when nothing "
+                    + "is selected); \"layer_alpha\" a layer's transparency; \"layer_mask\" "
+                    + "a layer's mask; \"plane\" one colour plane of the flattened "
+                    + "composite. One undo step.",
+                [
+                    "name": [
+                        "type": "string",
+                        "description": "Channel name (default the next \"Alpha N\").",
+                    ],
+                    "from": [
+                        "type": "string",
+                        "enum": ["empty", "selection", "layer_alpha", "layer_mask", "plane"],
+                    ],
+                    "layer": index,
+                    "plane": [
+                        "type": "string",
+                        "enum": ["red", "green", "blue", "alpha", "luma"],
+                        "description": "Which plane, for from: \"plane\" (default luma).",
+                    ],
+                    "overlay_color": [
+                        "type": "string",
+                        "description": "Rubylith colour, #RRGGBB (default #ff0000). Display "
+                            + "only.",
+                    ],
+                    "overlay_opacity": [
+                        "type": "number", "minimum": 0, "maximum": 1,
+                        "description": "Rubylith opacity 0-1 (default 0.5). Display only.",
+                    ],
+                    "document_id": docID,
+                ]),
+            tool(
+                "delete_channel",
+                "Deletes an alpha channel — the channels row menu's Delete Channel. One "
+                    + "undo step.",
+                [
+                    "channel": [
+                        "type": "string",
+                        "description": "Channel name or index (list_channels shows both).",
+                    ],
+                    "document_id": docID,
+                ], required: ["channel"]),
+            tool(
+                "duplicate_channel",
+                "Copies an alpha channel — the channels row menu's Duplicate Channel. The "
+                    + "copy is named \"<name> copy\" and lands immediately after the "
+                    + "original, so the indices below it shift down by one. One undo step.",
+                [
+                    "channel": [
+                        "type": "string",
+                        "description": "Channel name or index (list_channels shows both).",
+                    ],
+                    "document_id": docID,
+                ], required: ["channel"]),
+            tool(
+                "rename_channel",
+                "Renames an alpha channel — the channels row's double-click rename. Names "
+                    + "need not be unique; the first match wins wherever a name is used.",
+                [
+                    "channel": [
+                        "type": "string",
+                        "description": "Channel name or index.",
+                    ],
+                    "name": ["type": "string", "description": "The new name."],
+                    "document_id": docID,
+                ], required: ["channel", "name"]),
+            tool(
+                "set_channel_options",
+                "Changes an alpha channel's name and rubylith — Channel Options…. The "
+                    + "rubylith is DISPLAY state: it never changes a byte of the channel's "
+                    + "coverage. color_indicates \"masked\" (the default, and Quick Mask's "
+                    + "polarity) washes where the channel is BLACK; \"selected\" washes "
+                    + "where it is white. Omitted properties stay as they are; one undo "
+                    + "step.",
+                [
+                    "channel": [
+                        "type": "string",
+                        "description": "Channel name or index.",
+                    ],
+                    "name": ["type": "string"],
+                    "overlay_color": [
+                        "type": "string", "description": "Rubylith colour, #RRGGBB.",
+                    ],
+                    "overlay_opacity": ["type": "number", "minimum": 0, "maximum": 1],
+                    "color_indicates": ["type": "string", "enum": ["masked", "selected"]],
+                    "document_id": docID,
+                ], required: ["channel"]),
+            tool(
+                "invert_channel",
+                "Inverts an alpha channel's coverage (255 − v per pixel) — the channels row "
+                    + "menu's Invert Channel. What it selected it now excludes. One undo "
+                    + "step.",
+                [
+                    "channel": [
+                        "type": "string",
+                        "description": "Channel name or index.",
+                    ],
+                    "document_id": docID,
+                ], required: ["channel"]),
+            tool(
+                "load_selection",
+                "Loads a plane as the selection — Select > Load Selection…, and ⌘-clicking "
+                    + "a channel row or a layer thumbnail in the app. Sources: an alpha "
+                    + "channel (default), a layer's transparency, a layer's mask, or one "
+                    + "colour plane of the flattened composite. A selection is not an edit: "
+                    + "no undo step. An all-zero source is not an error — it clears the "
+                    + "selection and reports selection_empty.",
+                [
+                    "from": [
+                        "type": "string",
+                        "enum": ["channel", "layer_alpha", "layer_mask", "plane"],
+                    ],
+                    "channel": [
+                        "type": "string",
+                        "description": "Channel name or index, for from: \"channel\".",
+                    ],
+                    "layer": index,
+                    "plane": [
+                        "type": "string",
+                        "enum": ["red", "green", "blue", "alpha", "luma"],
+                        "description": "Which plane, for from: \"plane\" (default luma).",
+                    ],
+                    "mode": selectionMode,
+                    "invert": [
+                        "type": "boolean",
+                        "description": "Load the complement instead (default false).",
+                    ],
+                    "document_id": docID,
+                ]),
+            tool(
+                "save_selection",
+                "Writes the current selection into an alpha channel — Select > Save "
+                    + "Selection…. With `name` (or neither) it creates a new channel; with "
+                    + "`channel` it combines into that existing one, where `mode` says how. "
+                    + "Errors when nothing is selected. One undo step.",
+                [
+                    "name": [
+                        "type": "string",
+                        "description": "New channel's name (default the next \"Alpha N\"). "
+                            + "Ignored when `channel` is given.",
+                    ],
+                    "channel": [
+                        "type": "string",
+                        "description": "Existing channel name or index to combine into.",
+                    ],
+                    // NOT the shared `selectionMode`: this tool writes the
+                    // selection INTO a channel, so the mode combines the two
+                    // the other way round and an empty result leaves an empty
+                    // channel rather than deselecting.
+                    "mode": [
+                        "type": "string",
+                        "enum": ["replace", "add", "subtract", "intersect"],
+                        "description": "How the selection combines into the existing "
+                            + "`channel` (default replace, which overwrites it). add unions, "
+                            + "subtract removes the selection from the channel's coverage, "
+                            + "intersect keeps the overlap. Ignored without `channel`. The "
+                            + "current selection is never changed.",
+                    ],
+                    "document_id": docID,
+                ]),
+            tool(
+                "apply_image",
+                "Image > Apply Image…: blends ONE source plane onto the target — a layer's "
+                    + "pixels (as one colour, plane for plane), one colour plane of them, or "
+                    + "an alpha channel — at an opacity. The source "
+                    + "is a layer or the flattened composite (\"merged\"), read as its whole "
+                    + "colour image, one plane, or a channel; source_plane \"rgb\" against a "
+                    + "single-plane target uses the source's luma. Writes layer pixels "
+                    + "destructively for a layer or plane target, so a re-editable text, "
+                    + "shape or Live Photo layer drops its description. One undo step.",
+                [
+                    "source": [
+                        "type": "string",
+                        "description": "\"merged\" (default) or a layer index.",
+                    ],
+                    "source_plane": [
+                        "type": "string",
+                        "description": "\"rgb\" (default), \"red\", \"green\", \"blue\", "
+                            + "\"luma\", \"alpha\", or an alpha channel's name.",
+                    ],
+                    "invert": [
+                        "type": "boolean",
+                        "description": "Invert the source plane first (default false).",
+                    ],
+                    "blend_mode": [
+                        "type": "string", "enum": blendNames,
+                        "description": "Any mode onto \"layer\", which blends the three "
+                            + "planes as ONE colour. Onto a single plane or a channel the "
+                            + "four HSL modes (Hue, Saturation, Color, Luminosity) are "
+                            + "refused: they are defined over an RGB triple and say nothing "
+                            + "about one 8-bit plane.",
+                    ],
+                    "opacity": ["type": "number", "minimum": 0, "maximum": 1],
+                    "target": [
+                        "type": "string",
+                        "description": "\"layer\" (default), \"red\"/\"green\"/\"blue\"/"
+                            + "\"alpha\", or \"channel:<name>\".",
+                    ],
+                    "layer": index,
+                    "document_id": docID,
+                ]),
+            tool(
+                "calculations",
+                "Image > Calculations…: blends TWO source planes into a new plane, which "
+                    + "becomes a new alpha channel (default) or the selection. Source 1 is "
+                    + "the blend layer and source 2 the base it is applied to (Photoshop's "
+                    + "convention). Each source is a layer or \"merged\", one of its planes "
+                    + "or a channel, optionally inverted. A new channel is one undo step; a "
+                    + "selection is not an edit at all.",
+                [
+                    "source1": [
+                        "type": "string",
+                        "description": "\"merged\" (default) or a layer index.",
+                    ],
+                    "source1_plane": [
+                        "type": "string",
+                        "description": "\"rgb\" (default), a colour plane, or a channel name.",
+                    ],
+                    "invert1": ["type": "boolean"],
+                    "source2": [
+                        "type": "string",
+                        "description": "\"merged\" (default) or a layer index.",
+                    ],
+                    "source2_plane": [
+                        "type": "string",
+                        "description": "\"rgb\" (default), a colour plane, or a channel name.",
+                    ],
+                    "invert2": ["type": "boolean"],
+                    "blend_mode": [
+                        "type": "string", "enum": planeBlendNames,
+                        "description": "The result is ONE plane, so the four HSL modes (Hue, "
+                            + "Saturation, Color, Luminosity) are not offered — they are "
+                            + "defined over an RGB triple. Every other mode applies. (Onto a "
+                            + "whole LAYER, apply_image does take them.)",
+                    ],
+                    "opacity": ["type": "number", "minimum": 0, "maximum": 1],
+                    "result": ["type": "string", "enum": ["new_channel", "selection"]],
+                    "name": [
+                        "type": "string",
+                        "description": "New channel's name (default the next \"Alpha N\").",
+                    ],
+                    "document_id": docID,
+                ]),
+            tool(
+                "add_luminosity_masks",
+                "Select > Add Luminosity Masks: appends nine channels built from the "
+                    + "composite's Rec. 709 luma L — \"Lights 1\"..\"Lights 3\" (L, L², L³), "
+                    + "\"Darks 1\"..\"Darks 3\" ((1−L), (1−L)², (1−L)³) and \"Midtones "
+                    + "1\"..\"Midtones 3\" (the complement of each squared pair, peaking at "
+                    + "mid grey) — the photographer's tone-selection set. Load one with "
+                    + "load_selection. Refused when nine more channels would not fit. One "
+                    + "undo step.",
+                ["document_id": docID]),
             tool(
                 "rotate",
                 "Rotates the whole document clockwise. Re-editable text, shape and Live "
@@ -1278,7 +1616,8 @@ extension AgentServer {
                 "crop",
                 "Crops the document to a rectangle (canvas coordinates, origin top-left). "
                     + "A nonzero angle straightens first — the Crop tool's straighten "
-                    + "slider: every layer is rotated by −angle about the rect's center, "
+                    + "slider: every layer — and every alpha channel, so saved selections "
+                    + "keep lining up — is rotated by −angle about the rect's center, "
                     + "then the canvas is cropped, as one undo step. Straightening "
                     + "resamples every layer's pixels, so re-editable text, shape and Live "
                     + "Photo layers rasterize — their descriptions drop, and the result "
@@ -1300,7 +1639,11 @@ extension AgentServer {
                 "image_size",
                 "Scales the whole document to a new size (max 100 megapixels). Re-editable "
                     + "text, shape and Live Photo layers stay re-editable: the scale composes "
-                    + "into their descriptions, and text and shapes re-render crisply.",
+                    + "into their descriptions, and text and shapes re-render crisply. Alpha "
+                    + "channels are canvas-sized and are resampled too, so a document "
+                    + "carrying many of them is refused past the format's total "
+                    + "channel-pixel budget (900 million): the error names how many the new "
+                    + "canvas would hold, and delete_channel is the way out.",
                 [
                     "width": ["type": "integer"], "height": ["type": "integer"],
                     "filter": [
@@ -1314,7 +1657,10 @@ extension AgentServer {
                 "canvas_size",
                 "Resizes the canvas WITHOUT scaling the pixels; the anchor pins the existing "
                     + "content (like Photoshop's Canvas Size). Layers keep their pixels and "
-                    + "can extend outside the canvas.",
+                    + "can extend outside the canvas; alpha channels are padded with 0. "
+                    + "GROWING the canvas grows every channel with it, so the same total "
+                    + "channel-pixel budget image_size names can refuse it — delete channels "
+                    + "and retry.",
                 [
                     "width": ["type": "integer"], "height": ["type": "integer"],
                     "anchor": [

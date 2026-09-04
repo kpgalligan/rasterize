@@ -231,6 +231,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(
             item("Smooth Selection…", #selector(EditorViewController.smoothSelection(_:))))
         menu.addItem(.separator())
+        // Selections ⇄ alpha channels, and the nine luminosity masks the
+        // composite's luma builds.
+        menu.addItem(
+            item("Save Selection…", #selector(EditorViewController.saveSelectionSheet(_:))))
+        menu.addItem(
+            item("Load Selection…", #selector(EditorViewController.loadSelectionSheet(_:))))
+        menu.addItem(.separator())
+        menu.addItem(
+            item("Add Luminosity Masks", #selector(EditorViewController.addLuminosityMasks(_:))))
+        menu.addItem(.separator())
         // Deliberately NO key equivalent: the bare Q toggles the mode from
         // the canvas's keyDown alongside the tool keys, so it can never
         // steal the letter from text editing (the Edit > Clear ⌫ hazard).
@@ -256,6 +266,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Image Size…", #selector(EditorViewController.resizeImage(_:)), "i", [.command, .option]))
         menu.addItem(
             item("Canvas Size…", #selector(EditorViewController.showCanvasSize(_:)), "c", [.command, .option]))
+        menu.addItem(.separator())
+        // Channel arithmetic and the channel list itself live under Image,
+        // not Layer: channels are DOCUMENT state, next to Image Size and
+        // Canvas Size.
+        menu.addItem(item("Apply Image…", #selector(EditorViewController.applyImageSheet(_:))))
+        menu.addItem(
+            item("Calculations…", #selector(EditorViewController.calculationsSheet(_:))))
+        menu.addItem(submenuItem(channelsMenu()))
+        return menu
+    }
+
+    private func channelsMenu() -> NSMenu {
+        let menu = NSMenu(title: "Channels")
+        menu.addItem(item("New Channel", #selector(EditorViewController.newChannel(_:))))
+        menu.addItem(
+            item("Duplicate Channel", #selector(EditorViewController.duplicateChannel(_:))))
+        menu.addItem(item("Delete Channel", #selector(EditorViewController.deleteChannel(_:))))
+        menu.addItem(
+            item("Channel Options…", #selector(EditorViewController.channelOptions(_:))))
+        menu.addItem(item("Invert Channel", #selector(EditorViewController.invertChannel(_:))))
+        menu.addItem(.separator())
+        menu.addItem(
+            item(
+                "Load Channel as Selection",
+                #selector(EditorViewController.loadChannelAsSelection(_:))))
         return menu
     }
 
@@ -437,6 +472,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item(
                 "Hide Layers", #selector(EditorViewController.toggleLayersPanel(_:)), "l",
                 [.command, .option]))
+        menu.addItem(
+            item(
+                "Channels", #selector(EditorViewController.showChannels(_:)), "c",
+                [.command, .control]))
         menu.addItem(
             item(
                 "Assistant", #selector(EditorViewController.showAssistant(_:)), "a",
