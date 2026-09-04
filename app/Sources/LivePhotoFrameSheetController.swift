@@ -119,8 +119,11 @@ final class LivePhotoFrameSheetController: NSViewController {
         let payload = self.payload
         let idx = layerIndex
         renderer.request {
+            // The re-rendered frame lands as the document's own numbers
+            // (the renderer draws into that space), so the preview is
+            // tagged with it too.
             baseDoc.rerenderingDescribedLayer(idx, .livePhoto(payload), anchor: anchor)?
-                .flattened()?.makeCGImage()
+                .flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 

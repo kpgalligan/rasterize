@@ -126,6 +126,12 @@ final class AgentServer {
         // Rendering
         "render": render,
         "sample_color": sampleColor,
+        // Colour management and metadata (AgentServer+Color.swift)
+        "get_color_profile": { $0.getColorProfile },
+        "assign_profile": { $0.assignProfile },
+        "convert_profile": { $0.convertProfile },
+        "set_resolution": { $0.setResolution },
+        "get_metadata": { $0.getMetadata },
         // Layer operations
         "set_active_layer": setActiveLayer,
         "new_layer": newLayer,
@@ -393,6 +399,13 @@ final class AgentServer {
         var result = summary(document)
         result["layers"] = layers
         result["global_light"] = Self.globalLightFields(doc)
+        // Colour management: the document's profile, its print resolution
+        // and which metadata packets it carries (AgentServer+Color.swift).
+        result["color_profile"] = Self.colorProfileFields(doc, document)
+        result["resolution"] = Self.resolutionFields(doc)
+        var meta = Self.metadataFields(doc)
+        meta.merge(Self.notCapturedField(document)) { _, new in new }
+        if !meta.isEmpty { result["metadata"] = meta }
         // The document's ALPHA CHANNELS — saved selections, never part of
         // the picture (AgentServer+ChannelTargets.swift).
         let channels = Self.channelFields(doc)
@@ -423,6 +436,10 @@ final class AgentServer {
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
         let source: RasterImage?
         var what: String
+        // The space the SOURCE pixels are in: a colour plane rendered as
+        // grey is coverage and is sRGB by construction; everything else is
+        // the document's.
+        var space = doc.colorSpace
         if let channel = stringArg(a, "channel") {
             // ONE plane as grayscale instead of the colour image, described
             // by what the argument actually resolved to — an alpha channel
@@ -431,6 +448,7 @@ final class AgentServer {
                 doc, channel: channel, layer: intArg(a, "layer"))
             source = resolved.image
             what = resolved.what
+            space = ColorProfile.sRGB
         } else if let layer = intArg(a, "layer") {
             guard layer >= 0, layer < doc.layerCount else {
                 throw ToolError(message: "Layer \(layer) is out of range (0..\(doc.layerCount - 1))")
@@ -455,16 +473,23 @@ final class AgentServer {
             }
             image = scaled
         }
-        guard let cgImage = image.makeCGImage(),
+        // This render's reader is a vision model whose decode is naive sRGB,
+        // so a wide-gamut document is CONVERTED rather than merely tagged
+        // (Bitmap.sRGBCopy, which returns an already-sRGB image untouched so
+        // the common case keeps its exact bytes).
+        let converted = !CFEqual(space, ColorProfile.sRGB)
+        guard let tagged = image.makeCGImage(in: space),
+            let cgImage = Bitmap.sRGBCopy(of: tagged),
             let png = NSBitmapImageRep(cgImage: cgImage)
                 .representation(using: .png, properties: [:])
         else {
             throw ToolError(message: "PNG encoding failed")
         }
         what += " of \(document.displayName ?? "Untitled")"
-        let text =
+        var text =
             "\(what): full size \(fullWidth)×\(fullHeight) px, rendered at "
             + "\(image.width)×\(image.height) px"
+        if converted { text += ", sRGB (document profile: \(doc.profileName))" }
         return try callResult(
             content: [
                 ["type": "image", "data": png.base64EncodedString(), "mimeType": "image/png"],
@@ -493,11 +518,31 @@ final class AgentServer {
         else {
             throw ToolError(message: "Could not sample the composite")
         }
-        return try jsonResult([
+        // The numbers are the DOCUMENT's, in its own space. A hex string
+        // carries no space and every colour ARGUMENT in this surface is
+        // sRGB (`parseColor`), so `hex` is a reading, not something to pass
+        // back: `paint_hex` is the CLOSEST sRGB spelling (ColorProfile
+        // .paintBytes), identical to `hex` on an sRGB document. A pixel
+        // outside the sRGB gamut has no sRGB spelling at all, and that is
+        // reported rather than left silent: otherwise "sample this and
+        // paint it over there" quietly paints a different colour.
+        let paint = ColorProfile.paintBytes(rgba, in: doc.nsColorSpace)
+        var result: [String: Any] = [
             "x": x, "y": y,
             "r": Int(rgba.r), "g": Int(rgba.g), "b": Int(rgba.b), "a": Int(rgba.a),
             "hex": RasterImage.hexString(rgba),
-        ])
+            "paint_hex": RasterImage.hexString(
+                (r: paint.bytes[0], g: paint.bytes[1], b: paint.bytes[2], a: paint.bytes[3])),
+            "paint_hex_exact": paint.exact,
+            "space": doc.profileName,
+        ]
+        if !paint.exact {
+            result["note"] =
+                "This pixel is outside the sRGB gamut, so no sRGB hex names it: "
+                + "painting paint_hex back gives the closest sRGB colour, which is "
+                + "duller than what was sampled."
+        }
+        return try jsonResult(result)
     }
 
     // MARK: - Layer operations
@@ -1379,10 +1424,9 @@ final class AgentServer {
         ) { current in
             data.withUnsafeMutableBufferPointer { buffer -> RasterDocument? in
                 guard let base = buffer.baseAddress,
-                    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
                     let context = CGContext(
                         data: base, width: width, height: height, bitsPerComponent: 8,
-                        bytesPerRow: width * 4, space: colorSpace,
+                        bytesPerRow: width * 4, space: doc.drawingSpace,
                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
                 else { return nil }
                 context.translateBy(x: 0, y: CGFloat(height))
@@ -1521,7 +1565,7 @@ final class AgentServer {
                 if SoftBrush.isStamped(tip: tip, size: size),
                    let dab = SoftBrush.dab(
                        color: color.withAlphaComponent(tip.flow), diameter: size,
-                       hardness: tip.hardness) {
+                       hardness: tip.hardness, space: document.drawingSpace) {
                     let alpha = (color.usingColorSpace(.sRGB) ?? color).alphaComponent
                     context.saveGState()
                     context.setAlpha(alpha)
@@ -1783,7 +1827,7 @@ final class AgentServer {
         // (AgentServer+ChannelTargets), mirroring the Fill tool's redirect in
         // EditorViewController+PlanePaint.
         let planeTarget = try paintTarget(a, document, allowMask: false)
-        let arguments = try fillArguments(a)
+        let arguments = try fillArguments(a, document)
         let mask = selectionMask(document)
         if planeTarget != .layer {
             return try fillPlane(
@@ -1805,7 +1849,7 @@ final class AgentServer {
         // As in fill: a plane or channel target lays the ramp down THAT plane
         // (AgentServer+ChannelTargets), mirroring the Gradient tool.
         let planeTarget = try paintTarget(a, document, allowMask: false)
-        let arguments = try gradientArguments(a)
+        let arguments = try gradientArguments(a, document)
         let mask = selectionMask(document)
         if planeTarget != .layer {
             return try gradientPlane(
@@ -1840,19 +1884,24 @@ final class AgentServer {
             ["ok": true, "layer": index], layer: index, rasterized: rasterized)
     }
 
-    /// sRGB straight-alpha bytes of a parsed color. Internal, not private:
-    /// the plane fill/gradient mirrors in AgentServer+ChannelTargets parse
-    /// the same colours.
-    func colorRGBA(_ color: NSColor) throws -> [UInt8] {
-        guard let c = color.usingColorSpace(.sRGB) else {
+    /// The DOCUMENT's straight-alpha bytes of a parsed color — the agent's
+    /// spelling of `EditorViewController.colorBytes`, sharing its one
+    /// conversion (`ColorProfile.bytes`). `fill` and `gradient` hand these
+    /// bytes straight to the core instead of drawing through a
+    /// document-space context, so an AUTHORED `#RRGGBB` has to convert here
+    /// to land the same colour `brush_stroke` and `add_shape_layer` paint.
+    /// EVERY hex over the wire is authored: a hex string carries no space,
+    /// so a colour read back out of the document travels as
+    /// `sample_color`'s `paint_hex`, the sRGB spelling this converts back
+    /// into the pixel it came from. Internal, not private: the plane
+    /// fill/gradient mirrors in AgentServer+ChannelTargets reduce these
+    /// same document bytes to coverage gray, exactly as the Fill tool's
+    /// redirect does (EditorViewController+PlanePaint).
+    func colorRGBA(_ color: NSColor, in document: ImageDocument) throws -> [UInt8] {
+        guard let bytes = ColorProfile.bytes(color, in: document.nsColorSpace) else {
             throw ToolError(message: "Could not convert the color")
         }
-        return [
-            UInt8((c.redComponent * 255).rounded()),
-            UInt8((c.greenComponent * 255).rounded()),
-            UInt8((c.blueComponent * 255).rounded()),
-            UInt8((c.alphaComponent * 255).rounded()),
-        ]
+        return bytes
     }
 
     // Whole-document geometry goes through applyingDocumentGeometry
@@ -1967,7 +2016,7 @@ final class AgentServer {
             }
             return try jsonResult(["ok": true, "path": url.path, "format": "rz"])
         }
-        guard let image = document.projection ?? document.doc?.flattened() else {
+        guard let doc = document.doc, let image = document.projection ?? doc.flattened() else {
             throw ToolError(message: "Could not flatten the document")
         }
         let format = ExportFormat.allCases.first {
@@ -1979,12 +2028,24 @@ final class AgentServer {
             throw ToolError(message: "Cannot infer the format; pass format as one of: \(names)")
         }
         let quality = intArg(a, "jpeg_quality") ?? document.jpegExportQuality
+        let embed = boolArg(a, "embed_profile") ?? document.embedColorProfile
+        let strip = boolArg(a, "strip_metadata") ?? document.stripMetadata
+        let report: RasterSaveReport
         do {
-            try image.save(to: url, format: format.rzFormat, jpegQuality: quality)
+            // The document-level save, so the profile, the EXIF/XMP/IPTC
+            // packets and the print resolution ride along; the warm
+            // projection is the composite, so nothing re-flattens.
+            report = try doc.saveImage(
+                image, to: url, format: format.rzFormat, jpegQuality: quality,
+                embedProfile: embed, stripMetadata: strip)
         } catch {
             throw ToolError(message: error.localizedDescription)
         }
-        return try jsonResult(["ok": true, "path": url.path, "format": format.displayName])
+        var result: [String: Any] = ["ok": true, "path": url.path, "format": format.displayName]
+        // What the chosen format could and could not carry, so a model never
+        // has to guess whether the profile survived (AgentServer+Color.swift).
+        result.merge(Self.savedFields(doc, document, report: report)) { _, new in new }
+        return try jsonResult(result)
     }
 
     // MARK: - Argument helpers

@@ -1,6 +1,6 @@
 import AppKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = buildMainMenu()
         // Gradient end colors (and brush colors) may carry alpha.
@@ -62,12 +62,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - New from Clipboard
 
     /// Opens the frontmost pasteboard image as a new untitled document
-    /// (Preview's ⌘N behavior). RasterImage.fromPasteboard normalizes the
-    /// bitmap to PNG and routes it through the Rust core so the document
-    /// behaves exactly like an opened file.
+    /// (Preview's ⌘N behavior). `RasterImage.fromPasteboard` decodes the
+    /// bitmap into its own colour space and reports the profile those
+    /// numbers belong to, so the document is tagged and then adopted into
+    /// the working space exactly as an opened file is.
     @objc func newFromClipboard(_ sender: Any?) {
-        guard let raster = RasterImage.fromPasteboard(),
-              let document = ImageDocument.makeUntitled(with: raster)
+        guard let pasted = RasterImage.fromPasteboard(),
+              let document = ImageDocument.makeUntitled(
+                with: pasted.image, profile: pasted.profile)
         else {
             NSSound.beep()
             return
@@ -77,9 +79,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         document.showWindows()
     }
 
+    // MARK: - Working space
+
+    /// Image > Mode > Working Space ▸ — the profile FUTURE opens are
+    /// converted into. The sender's tag indexes `WorkingSpace.allCases`,
+    /// the layer-style menu's idiom, so the menu needs no parallel list to
+    /// stay in step with the enum.
+    ///
+    /// It lives HERE and not on `EditorViewController` — where the rest of
+    /// Image > Mode lives — because it is an app-wide preference that by
+    /// design touches no document: it has to be settable at the Welcome
+    /// window, before the first open, which is exactly the moment a
+    /// document-scoped responder does not exist. Being the only responder
+    /// that implements it also keeps it a single implementation, whether or
+    /// not a document window is key.
+    @objc func setWorkingSpace(_ sender: Any?) {
+        let spaces = WorkingSpace.allCases
+        let tag = (sender as? NSMenuItem)?.tag ?? -1
+        guard spaces.indices.contains(tag) else {
+            NSSound.beep()
+            return
+        }
+        ColorSettings.workingSpace = spaces[tag]
+    }
+
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(newFromClipboard(_:)) {
             return NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
+        }
+        if item.action == #selector(setWorkingSpace(_:)) {
+            // Radio marks against the stored preference, so the menu shows
+            // which space new opens use — with or without a document.
+            let spaces = WorkingSpace.allCases
+            item.state = spaces.indices.contains(item.tag)
+                && spaces[item.tag] == ColorSettings.workingSpace ? .on : .off
+            return true
         }
         if item.action == #selector(toggleAgentServer(_:)) {
             let server = AgentServer.shared
@@ -173,6 +207,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Revert to Saved", #selector(NSDocument.revertToSaved(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Export…", #selector(ImageDocument.exportDocument(_:)), "e"))
+        menu.addItem(.separator())
+        // Both selectors are NSDocument's own and reach the document through
+        // the responder chain; ImageDocument.validateUserInterfaceItem gates
+        // them on there being an image.
+        menu.addItem(
+            item(
+                "Page Setup…", #selector(NSDocument.runPageLayout(_:)), "p",
+                [.command, .shift]))
+        menu.addItem(item("Print…", #selector(NSDocument.printDocument(_:)), "p"))
         return menu
     }
 
@@ -267,6 +310,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(
             item("Canvas Size…", #selector(EditorViewController.showCanvasSize(_:)), "c", [.command, .option]))
         menu.addItem(.separator())
+        // Colour is document state too, so Mode sits with Image Size and
+        // Canvas Size rather than under a preferences window.
+        menu.addItem(submenuItem(modeMenu()))
+        menu.addItem(.separator())
         // Channel arithmetic and the channel list itself live under Image,
         // not Layer: channels are DOCUMENT state, next to Image Size and
         // Canvas Size.
@@ -274,6 +321,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(
             item("Calculations…", #selector(EditorViewController.calculationsSheet(_:))))
         menu.addItem(submenuItem(channelsMenu()))
+        return menu
+    }
+
+    /// Image > Mode: the document's colour profile (relabel vs. convert)
+    /// and, one level down, the app-wide working space new opens are
+    /// converted into. Neither profile command earns a key equivalent —
+    /// they are deliberate, occasional acts. Enablement and the working
+    /// space's check marks come from
+    /// EditorViewController.validateUserInterfaceItem.
+    private func modeMenu() -> NSMenu {
+        let menu = NSMenu(title: "Mode")
+        menu.addItem(
+            item("Assign Profile…", #selector(EditorViewController.assignProfile(_:))))
+        menu.addItem(
+            item("Convert to Profile…", #selector(EditorViewController.convertToProfile(_:))))
+        menu.addItem(.separator())
+        menu.addItem(submenuItem(workingSpaceMenu()))
+        return menu
+    }
+
+    /// Image > Mode > Working Space: one check-marked radio item per
+    /// WorkingSpace, its tag indexing `WorkingSpace.allCases` (the
+    /// layerStyleMenu tag idiom). It affects FUTURE opens only.
+    private func workingSpaceMenu() -> NSMenu {
+        let menu = NSMenu(title: "Working Space")
+        for (tag, space) in WorkingSpace.allCases.enumerated() {
+            let entry = item(space.displayName, #selector(setWorkingSpace(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
         return menu
     }
 

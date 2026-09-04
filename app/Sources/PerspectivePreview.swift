@@ -71,8 +71,17 @@ enum PerspectivePreview {
         let ciRect = CGRect(
             x: target.minX - box.minX, y: box.maxY - target.maxY,
             width: target.width, height: target.height)
+        // Rendered back into the SOURCE's own space. A `CIContext`'s default
+        // output is its working space — sRGB — so leaving the destination
+        // implicit would clip a wide-gamut layer on the way out of the warp
+        // while the affine branch of the very same drag, a plain CTM draw,
+        // showed it unclipped. The context's half-float working format keeps
+        // the out-of-sRGB components alive between the two conversions, so
+        // this costs an sRGB layer nothing and rescues a P3 one.
         guard let output = filter.outputImage,
-              let warped = ciContext.createCGImage(output, from: ciRect)
+              let warped = ciContext.createCGImage(
+                output, from: ciRect, format: .RGBA8,
+                colorSpace: ColorProfile.drawingSpace(matching: source.colorSpace))
         else { return }
 
         // The usual flipped-image draw into the target's canvas rect.
@@ -89,7 +98,9 @@ enum PerspectivePreview {
     /// shows, black hides) — the pre-warp twin of the affine path's
     /// `clip(to:mask:)`. Both images are constant for a whole session, so
     /// the bake runs once per session and is answered from the identity
-    /// cache on every later tick.
+    /// cache on every later tick — and the bake's colour space is read off
+    /// `layer`, which is half of that key, so a re-tagged layer arrives as a
+    /// different image and re-bakes.
     private static func masked(_ layer: CGImage, by mask: CGImage) -> CGImage? {
         if let cached = maskBake, cached.layer === layer, cached.mask === mask {
             return cached.baked
@@ -99,7 +110,13 @@ enum PerspectivePreview {
               let context = CGContext(
                 data: nil, width: w, height: h,
                 bitsPerComponent: 8, bytesPerRow: 0,
-                space: CGColorSpaceCreateDeviceRGB(),
+                // The layer's OWN space, so the bake changes no colour: a
+                // device-RGB context behaves as sRGB here and would clip a
+                // wide-gamut layer, which the affine branch of the very same
+                // drag (a plain CTM draw) does not — the two halves of one
+                // gesture would disagree. `nil` only for an untagged image,
+                // which sRGB is the standing assumption for.
+                space: ColorProfile.drawingSpace(matching: layer.colorSpace),
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
         let rect = CGRect(x: 0, y: 0, width: w, height: h)

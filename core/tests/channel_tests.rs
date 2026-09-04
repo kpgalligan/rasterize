@@ -1,7 +1,7 @@
 //! Alpha channels and colour planes, exercised through the public C FFI
 //! (the header's "Channels" section): the channel list and its two caps, the
 //! plane readers and the plane writer, coverage painting, plane arithmetic,
-//! the luminosity masks, RZDC version 5 and the geometry ops.
+//! the luminosity masks, RZDC version 6 and the geometry ops.
 //!
 //! Oracles are analytic and written here, independently of the
 //! implementation: the W3C reference blend from `tests/common` for the
@@ -1411,8 +1411,8 @@ fn rzdc_v5_round_trips_channels_byte_for_byte() {
     assert_eq!(&bytes[..4], b"RZDC");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        5,
-        "channels bumped the format to 5"
+        6,
+        "channels bumped the format to 5, colour and metadata to 6"
     );
 
     let mut err: *mut c_char = ptr::null_mut();
@@ -1455,23 +1455,41 @@ fn rzdc_v5_round_trips_channels_byte_for_byte() {
 }
 
 #[test]
-fn version_4_files_load_with_no_channels_and_version_6_is_refused() {
+fn version_4_files_load_with_no_channels_and_version_7_is_refused() {
     let dir = TempDir::new().unwrap();
-    // A channel-less document written today is a v4 file plus the four bytes
-    // of a zero channel count, so a v4 fixture is that file minus its tail.
+    // A plain document written today ends with the 12-byte version-6
+    // document tail (two 72 ppi floats and four "no blob" bytes) preceded by
+    // the four bytes of a zero channel count, so a v5 fixture is that file
+    // minus 12 bytes and a v4 fixture minus 16.
     let doc = doc_from(&dir, "v4.png", &opaque_pattern(5, 3));
-    let path = dir.path().join("v5-empty.rzdc");
+    let path = dir.path().join("v6-empty.rzdc");
     let c = cpath(&path);
     let mut err: *mut c_char = ptr::null_mut();
     assert!(unsafe { rz_doc_save_native(doc, c.as_ptr(), &mut err) });
-    let v5 = std::fs::read(&path).unwrap();
+    let v6 = std::fs::read(&path).unwrap();
+    let tail = &v6[v6.len() - 12..];
     assert_eq!(
-        &v5[v5.len() - 4..],
+        f32::from_le_bytes(tail[0..4].try_into().unwrap()),
+        72.0,
+        "the tail opens with the default horizontal resolution"
+    );
+    assert_eq!(
+        f32::from_le_bytes(tail[4..8].try_into().unwrap()),
+        72.0,
+        "then the vertical one"
+    );
+    assert_eq!(
+        &tail[8..],
+        &[0u8, 0, 0, 0],
+        "then four absent blobs — the built-in sRGB profile is elided"
+    );
+    assert_eq!(
+        &v6[v6.len() - 16..v6.len() - 12],
         &0u32.to_le_bytes(),
-        "an empty channel list is a u32 zero at the very end"
+        "an empty channel list is a u32 zero just before the tail"
     );
 
-    let mut v4 = v5[..v5.len() - 4].to_vec();
+    let mut v4 = v6[..v6.len() - 16].to_vec();
     v4[4..8].copy_from_slice(&4u32.to_le_bytes());
     let v4_path = dir.path().join("v4.rzdc");
     std::fs::write(&v4_path, &v4).unwrap();
@@ -1491,18 +1509,34 @@ fn version_4_files_load_with_no_channels_and_version_6_is_refused() {
         "and everything else is intact"
     );
 
-    // A future version is refused by number.
-    let mut v6 = v5.clone();
-    v6[4..8].copy_from_slice(&6u32.to_le_bytes());
-    let v6_path = dir.path().join("v6.rzdc");
-    std::fs::write(&v6_path, &v6).unwrap();
-    let c6 = cpath(&v6_path);
+    // A v5 file is the same bytes minus the document tail alone.
+    let mut v5 = v6[..v6.len() - 12].to_vec();
+    v5[4..8].copy_from_slice(&5u32.to_le_bytes());
+    let v5_path = dir.path().join("v5.rzdc");
+    std::fs::write(&v5_path, &v5).unwrap();
+    let c5 = cpath(&v5_path);
     let mut err: *mut c_char = ptr::null_mut();
-    assert!(unsafe { rz_doc_open(c6.as_ptr(), &mut err) }.is_null());
+    let back5 = unsafe { rz_doc_open(c5.as_ptr(), &mut err) };
+    assert!(
+        !back5.is_null(),
+        "a v5 file must still load: {}",
+        take_err_string(err)
+    );
+    assert_eq!(channel_count(back5), 0);
+
+    // A future version is refused by number.
+    let mut v7 = v6.clone();
+    v7[4..8].copy_from_slice(&7u32.to_le_bytes());
+    let v7_path = dir.path().join("v7.rzdc");
+    std::fs::write(&v7_path, &v7).unwrap();
+    let c7 = cpath(&v7_path);
+    let mut err: *mut c_char = ptr::null_mut();
+    assert!(unsafe { rz_doc_open(c7.as_ptr(), &mut err) }.is_null());
     let msg = take_err_string(err);
-    assert!(msg.contains("unsupported RZDC version 6"), "got: {msg}");
+    assert!(msg.contains("unsupported RZDC version 7"), "got: {msg}");
 
     unsafe {
+        rz_doc_free(back5);
         rz_doc_free(back);
         rz_doc_free(doc);
     }
@@ -1516,11 +1550,14 @@ fn crafted_channel_headers_are_refused_before_anything_is_decoded() {
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .unwrap();
 
-    // A minimal v5 file whose canvas and channel count are whatever we say.
+    // A minimal v6 file whose canvas and channel count are whatever we say,
+    // stopping AT the channel count: every refusal below fires before the
+    // document tail would be read, and the one well-formed fixture appends
+    // `tail` for itself.
     let craft = |width: u32, height: u32, channels: u32| {
         let mut b = Vec::new();
         b.extend_from_slice(b"RZDC");
-        b.extend_from_slice(&5u32.to_le_bytes());
+        b.extend_from_slice(&6u32.to_le_bytes());
         b.extend_from_slice(&width.to_le_bytes());
         b.extend_from_slice(&height.to_le_bytes());
         b.extend_from_slice(&1u32.to_le_bytes()); // layer count
@@ -1542,6 +1579,13 @@ fn crafted_channel_headers_are_refused_before_anything_is_decoded() {
         b.push(0); // no style
         b.extend_from_slice(&channels.to_le_bytes());
         b
+    };
+    // The 12-byte version-6 document tail: the default resolution and four
+    // absent blobs.
+    let tail = |b: &mut Vec<u8>| {
+        b.extend_from_slice(&72.0f32.to_le_bytes());
+        b.extend_from_slice(&72.0f32.to_le_bytes());
+        b.extend_from_slice(&[0, 0, 0, 0]);
     };
 
     let open = |name: &str, bytes: &[u8]| {
@@ -1572,8 +1616,11 @@ fn crafted_channel_headers_are_refused_before_anything_is_decoded() {
     let err = open("truncated.rzdc", &craft(2, 2, 1)).expect_err("truncated");
     assert!(err.contains("unexpected end of file"), "got: {err}");
 
-    // Zero channels parses fine, which proves the fixture itself is sound.
-    let doc = open("empty.rzdc", &craft(2, 2, 0)).expect("a well-formed v5 file");
+    // Zero channels plus the document tail parses fine, which proves the
+    // fixture itself is sound.
+    let mut whole = craft(2, 2, 0);
+    tail(&mut whole);
+    let doc = open("empty.rzdc", &whole).expect("a well-formed v6 file");
     assert_eq!(channel_count(doc), 0);
     unsafe { rz_doc_free(doc) };
 }

@@ -105,7 +105,7 @@ decoding, encoding, and manipulation.
   pane per effect, copied/pasted/cleared from the same menu, badged "fx" in
   the layers panel (double-click a plain raster layer's row to open the
   sheet), scaled with Free Transform and Image Size, baked by Merge Down and
-  Flatten, and saved losslessly in `.rz` (format version 5; older files
+  Flatten, and saved losslessly in `.rz` (format version 6; older files
   still load). A document-level global light (angle, altitude) drives every
   effect with Use Global Light on. The Free Transform preview shows the
   layer without its effects until commit
@@ -114,6 +114,49 @@ decoding, encoding, and manipulation.
   photos display upright
 - Export a copy to PNG, JPEG (with quality control), TIFF, BMP, GIF, WebP;
   failed saves never truncate or delete an existing destination file
+- **Colour management**: a file's embedded ICC profile is read on open and
+  the document is converted into the colour working space (Image > Mode >
+  Working Space — sRGB by default, or Display P3; it affects future opens
+  only). A file with no profile is assumed sRGB, which is what every reader
+  does — so with the working space set to Display P3 an untagged file is
+  converted too, and opening one and saving it straight back will not
+  reproduce the input bytes; under the default sRGB working space that never
+  happens. The canvas, the layer and channel thumbnails and every preview are
+  tagged with the document's own profile, so a Display P3 photo finally
+  looks right on a wide-gamut display. **Assign Profile…** relabels the
+  document — the pixel numbers do not change, so the picture changes
+  appearance, unless the new profile describes the space the document was
+  already in — while **Convert to Profile…** transforms every layer's pixels
+  so each layer keeps its appearance; both live under Image > Mode. The
+  profile is embedded on export (PNG, JPEG, TIFF and WebP can carry one), and
+  the EXIF / XMP / IPTC packets a JPEG or PNG arrived with are re-spliced into
+  JPEG, and EXIF and XMP into PNG (a PNG has nowhere to put an 8BIM run), in
+  both cases with the orientation reset to 1 — the camera rotation is
+  already baked into the pixels, so a preserved 6 would double-rotate it in
+  every viewer. The reset covers **both** copies a file carries: the EXIF tag
+  and the XMP packet's `tiff:Orientation`, which XMP's own reconciliation
+  rules make the authority for Bridge and Camera Raw. The resolution is
+  written into both as well, and an EXIF block that cannot be brought to the
+  document's is dropped — and reported dropped — rather than left
+  contradicting the density beside it. A file that states its resolution twice is read from its EXIF
+  tags, which the Exif specification makes the authority and which is what
+  ImageIO and ImageMagick answer for the same file, with the container's own
+  density (a JFIF header, a PNG `pHYs`) as the fallback. A non-sRGB export
+  also gets EXIF's ColorSpace tag set to "Uncalibrated", the value that means
+  "read the embedded profile" — a camera's "sRGB" left beside a Display P3
+  profile is how a wide-gamut export comes out oversaturated elsewhere. The Export panel's **Embed colour
+  profile** (on) and **Strip metadata** (off) checkboxes govern both, and a
+  format that cannot carry something says so rather than dropping it
+  silently — unless nothing is actually lost, as when an sRGB document is
+  written to a format with no profile slot and every reader assumes sRGB
+  anyway. **Image resolution** in pixels per inch travels with the
+  document (Image Size's Resolution field, with Resample off changing only
+  the print size, never a pixel), and **File > Print** (⌘P) prints the
+  flattened composite at that resolution, fitted to the page; **Page
+  Setup…** is ⇧⌘P. The colour management is Rasterize's own: ICC v2/v4 RGB
+  matrix/TRC profiles are parsed and transformed by the core, and the two
+  built-ins it writes (sRGB IEC61966-2.1 and Display P3) are real ICC blobs
+  any other application reads
 - Smooth zoom (pinch, ⌘+/⌘-, fit, actual size) and pan — plus a Zoom tool
   (Z: click steps in, ⌥-click out, drag a marquee to fill the window with
   it, or turn on scrubby zoom and drag left/right) and a Hand tool (H) that
@@ -331,7 +374,53 @@ nothing re-renders it — and Free Transform asks to rasterize it as it does
 for any raster; its next re-edit renders the description at its own size,
 as it always did. A Live Photo's files are referenced by path, not
 copied into the document: move or delete them and the layer keeps its
-pixels but can no longer change frame.
+pixels but can no longer change frame. EXIF, XMP and IPTC are captured and
+re-spliced for JPEG and PNG only — and IPTC for JPEG alone, since a PNG has
+nowhere to put an 8BIM run — while TIFF carries the ICC profile alone, WebP
+the profile and the EXIF packet, BMP and GIF carry neither, HEIC/HEIF
+contributes its profile and dpi but no packets, and PSD contributes neither;
+an export from a document opened from any of those says its capture data was
+never read in rather than implying the file had none. A TIFF written here states
+no print resolution — it carries the encoder's own 1/1 default, which some
+applications read as 1 dpi — and the export notice says so.
+Convert to Profile transforms
+layer pixels only: layer masks and alpha channels are coverage rather than
+colour and are left alone, and so are layer-style and text-layer colours —
+those are authored in sRGB like every other colour you type, and they convert
+into the document's space where they are used (a style's when it composites,
+a text layer's when it re-renders), so an effect's colour matches a fill of
+the same hex on any document and survives a convert unchanged. An adjustment
+layer's parameters are left alone too, but for a different reason: a curve
+point or a saturation amount is not a colour and there is nothing to convert
+it into. That is also why a convert keeps each LAYER looking the same without
+keeping every composite the same — a non-Normal blend mode, an adjustment
+layer and a style effect that blends are all computed from the numbers the
+convert changes, so on such a document the picture visibly moves (correctly,
+and as it does in Photoshop). The sheet and `convert_profile` say which case
+the document is in rather than promising it will look identical. LUT-based (A2B/B2A)
+profiles are kept and re-embedded but cannot be converted from, and a
+document tagged with one is painted in "the numbers are the numbers" mode:
+every authored colour lands as the sRGB number you typed, from the brush, a
+fill and a layer-style effect alike, so one hex is one colour throughout.
+Display, relabelling and re-embedding stay exact. Gray, CMYK and Lab
+profiles are refused outright, as are device-link, abstract and
+named-colour profiles, which describe a transform rather than a space to
+read pixels in. Missing EXIF resolution and
+orientation tags are patched only where they already exist, never inserted
+— inserting one would shift every out-of-line datum and corrupt a
+MakerNote. When an EXIF resolution cannot be patched in place (both axes
+sharing one stored value on a document whose two axes now differ, say), the
+whole EXIF block is dropped and reported dropped rather than written
+contradicting the density beside it: a packet is in authority for as long as
+it exists — `sips` and ImageMagick answer with its numbers and ignore the
+JFIF header even when its unit says "none" — so handing the density back its
+authority means not writing the packet. In the
+XMP packet only the `tiff:` orientation, resolution and resolution-unit
+properties are rewritten, and only where the packet already carries them
+under that conventional prefix. With the working space set to Display P3, an untagged file is
+converted on open (it is assumed sRGB first), so opening and immediately
+re-saving it does not reproduce the input bytes; under the default sRGB
+working space that never happens.
 
 ## Built-in assistant
 
@@ -358,7 +447,7 @@ model defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 65 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 70 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG — `render`'s `channel` shows ONE plane as a grayscale PNG
 instead — and `sample_color` reads single pixels off the flattened
@@ -420,7 +509,15 @@ separable blend modes — the four HSL modes need an RGB triple, so only
 `apply_image` onto a whole layer takes them — plus `add_luminosity_masks`
 for the nine tone masks),
 bucket fill and gradients (either on the layer or, through the same
-`target`, straight into a colour plane or an alpha channel),
+`target`, straight into a colour plane or an alpha channel), colour
+management and metadata (`get_color_profile` reports the document's profile,
+whether Rasterize can convert with it, what the open did, and the print
+size; `assign_profile` relabels and `convert_profile` transforms, each from
+a built-in or an `.icc` file on disk; `set_resolution` changes the ppi
+without resampling a pixel; `get_metadata` reports which EXIF/XMP/IPTC
+packets the document carries and how big they are; `get_document` reports
+all three, and `save_copy` takes `embed_profile` and `strip_metadata` and
+names what the chosen format actually wrote),
 undo/redo, and exporting. Agent edits run on the main thread through the same edit path
 as the UI: each tool call is one undo step, marks the document edited, and
 updates the open window live. With [goose](https://github.com/aaif-goose/goose):

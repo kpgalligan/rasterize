@@ -1,6 +1,6 @@
 # From Compositor to Photo Editor: a Gap Review
 
-**Status: in progress (updated 4 September 2026) — phases 1, 2 and 3 of the order in section 4 have shipped; section 0 records what landed, what was decided along the way, and where to restart.** A
+**Status: in progress (updated 4 September 2026) — phases 1 to 4 of the order in section 4 have shipped; section 0 records what landed, what was decided along the way, and where to restart.** A
 fresh-eyes review of the shipped feature set against what a working
 photographer actually reaches for in Photoshop, followed by a large, sized
 catalog of what to build. Companion to `next-features.md` (whose open
@@ -113,13 +113,136 @@ All of §2.3. Decisions worth knowing:
   yielding minor findings — so the stopping rule was severity, not a
   silent round.
 
+### Phase 4 — colour management and metadata (§3A rows 1–5): shipped
+
+The first five rows of §3A: ICC on open, canvas tagging, embedding on
+export, EXIF/XMP/IPTC preservation with the orientation reset, and ppi
+with print size and printing. RAW, HEIC/AVIF/JXL export, the histogram
+and info panels, linear-light compositing and 16 bit stayed out.
+Decisions worth knowing:
+
+- **The colour engine is ours, and `core/Cargo.toml` is untouched.**
+  `icc.rs` parses the ICC v2/v4 header and tag table, `icc_transform.rs`
+  holds the matrix/TRC model and the transform, `icc_builtin.rs` writes
+  the two built-ins (sRGB IEC61966-2.1 and Display P3) as real ICC v2
+  blobs — ColorSync and littleCMS both read them back. There is no curve
+  *inverter* anywhere: encoding binary-searches 255 forward-evaluated
+  thresholds, which is exactly-rounding for every curve kind and cannot
+  index out of bounds. `moxcms` is already in the lock file through
+  `image`, and the reasons for not promoting it (we must WRITE profiles
+  byte-exactly, the four-way parse outcome is ours, and "no input may
+  panic" is only guaranteeable for code we test) are in the phase plan.
+- **The PCS white comes from the three XYZ tags, full stop.** For a
+  matrix/TRC profile `rXYZ`/`gXYZ`/`bXYZ` are already D50-adapted;
+  `chad` merely records the adaptation and `wtpt` is advisory. Apple's
+  own `sRGB Profile.icc` proves it — D50 columns, no `chad`, a D65
+  `wtpt` — so both are parsed and used for nothing.
+- **Parsing has five outcomes**, and the unconvertible one is not an
+  error: a LUT-based (A2B/B2A) RGB profile is KEPT as the document
+  profile, so the pixels stay put, CoreGraphics still displays them
+  correctly and an export re-embeds the original bytes byte-for-byte —
+  only *our* transform is unavailable, and Assign is offered instead. A
+  Gray/CMYK/Lab profile is refused with a sentence saying why, and so is
+  one whose profile CLASS is a device link, an abstract transform or a
+  named-colour list: those carry RGB numbers while describing a
+  transform rather than a space, and CoreGraphics cannot convert out of
+  one, so tagging a document with it drew an empty image everywhere at
+  once (macOS ships such a profile, `WebSafeColors.icc`).
+- `RzDocument` gained `profile: Arc<IccProfile>` (non-optional,
+  defaulting to the built-in sRGB — a live document has no "untagged"
+  state), `metadata: Metadata` — three independently `Arc`-shared,
+  byte-exact `Option<Arc<[u8]>>` packets rather than the brief's single
+  `Option<Arc<Metadata>>`, so a document clone is three pointer bumps
+  and one packet can be replaced without copying the others — and a ppi
+  pair. `doc_color.rs` holds `assign_profile` / `convert_to_profile`
+  / `set_resolution` / `set_metadata` and the document-level
+  `save_image`, which takes the host's already-warm composite rather
+  than re-flattening on every ⌘S.
+- **One container walk, one ICC reader.** `metadata.rs` scans JPEG and
+  PNG only — those are the two containers we can also splice on the way
+  out, so we capture exactly what we can put back — while ICC bytes come
+  from `ImageDecoder::icc_profile()`, which already reassembles JPEG
+  APP2 chunks and inflates PNG `iCCP` and covers TIFF and WebP too.
+  `MetadataInjector` splices on the way out as a stream, so a large save
+  does not double peak memory.
+- **EXIF is patched in place and never grown**: Orientation → 1 (the
+  rotation is baked into the pixels at open, so a preserved 6 would
+  double-rotate everywhere), X/YResolution and ResolutionUnit → the
+  document's ppi, the pixel-dimension tags → the canvas, and IFD0's
+  next-IFD link → 0 so a stale pre-edit thumbnail cannot travel.
+  Inserting an absent tag would shift every out-of-line datum and
+  corrupt MakerNotes, so an absent tag stays absent and the container's
+  own density carries the ppi. A malformation drops the packet rather
+  than writing one we could not verify. The Photoshop APP13 run is
+  filtered on write — `0x03ED`, `0x040F`, `0x0422`, `0x0424` are
+  dropped because they would contradict what we just wrote; every other
+  8BIM block survives byte-exactly.
+- `.rz` is at **version 6**: a document tail of the ppi pair plus four
+  optional blobs, appended after the channel list so a v5 file is a
+  strict prefix. The ICC slot is elided when the profile is the built-in
+  sRGB, so a plain v6 file is a v5 file plus twelve bytes. Versions 1–5
+  still load (sRGB, no metadata, 72 ppi).
+- **The working space is a preference, and the open rule is one line**:
+  assign the profile the numbers actually belong to, then adopt the
+  working space exactly once, for every non-`.rz` open, on both the Rust
+  and the ImageIO decode paths. `.rz` is exempt — a native document
+  carries its own profile. The consequence to know: under a Display P3
+  working space an *untagged* file is converted on open, so opening and
+  re-saving it does not reproduce the input bytes. Under the default
+  sRGB working space that branch never fires.
+- **App side**: `ColorProfile` is the single place a document's pixels
+  get a `CGColorSpace` (coverage — masks, channels, brush falloff — and
+  UI chrome deliberately do not come there), and the built-in sRGB
+  resolves to the platform's *named* space so an sRGB document is
+  byte-for-byte where it was before. It answers two questions, not one:
+  the pixels' TAG and the space to DRAW into. They differ for exactly the
+  LUT profiles the core keeps — ColorSync can display and convert *from*
+  such a space but not *into* it, and a CGContext built on one silently
+  paints opaque black — so those documents are tagged with their own
+  profile and painted in sRGB numbers. An **authored** colour (the colour
+  well, a theme default, an MCP hex) converts into the document space
+  once; a **sampled** colour (the eyedropper, `sample_color`) converts
+  nowhere, so the sample → paint round trip is byte-exact.
+- Image > Mode gained Assign Profile…, Convert to Profile… and Working
+  Space; the export panel gained Embed colour profile / Strip metadata;
+  Image Size gained Resolution with a Resample checkbox and print size
+  in inches and centimetres; File gained Print (⌘P) and Page Setup
+  (⇧⌘P). MCP grew five tools — `get_color_profile`, `assign_profile`,
+  `convert_profile`, `set_resolution`, `get_metadata` — to **70**, and
+  `save_copy` took `embed_profile` / `strip_metadata`.
+- Known limits, all deliberate: EXIF/XMP/IPTC for JPEG and PNG only, and
+  IPTC for JPEG alone since a PNG has nowhere to put an 8BIM run
+  (TIFF carries ICC alone, WebP ICC and EXIF, BMP and GIF nothing); a
+  TIFF states no print resolution and carries the encoder's 1/1 default,
+  which some applications read as 1 dpi; HEIC contributes
+  its profile and dpi but no packets, and an export from any document the
+  walk skipped says the capture data was never read in (the core answers
+  which containers those are, so the host does not restate the policy);
+  a Live Photo frame is decoded into
+  the working space and labelled with it (there is no per-frame profile
+  to preserve); PSD contributes neither profile nor resolution;
+  adjustment-layer parameters are not converted by
+  Convert to Profile, and neither are layer-style or text colours — those
+  are AUTHORED sRGB and convert where they are used (a style's at
+  composite time, a text layer's when it re-renders), so an effect
+  matches a fill of the same hex and keeps its appearance across a
+  convert; ExtendedXMP is neither read nor written; painting
+  into a LUT-profile document authors its colours in sRGB numbers (see
+  above); and `sample_color`'s `paint_hex` is the *closest* sRGB spelling
+  of a pixel, exact only inside the sRGB gamut — outside it the result
+  says so rather than clamping silently.
+- Verified end to end over MCP against hand-written byte-stream parsers
+  and an independent littleCMS cross-check (sRGB→P3 and AdobeRGB→sRGB
+  agree code-for-code). Not exercised on screen: the Assign/Convert
+  sheets, the Working Space check marks, Image Size with Resample off,
+  ⌘P and ⇧⌘P, and a wide-gamut display — all worth one manual pass.
+
 ### Remaining order
 
-Section 4's steps 4–8 in order — 4 colour management and metadata (§3A,
-first five rows) is next, then the adjustment batch with histogram and
-info panels; healing brush and Content-Aware Fill; groups, lock,
-multi-select, guides and snapping; RAW develop and Actions — then the
-breadth of section 3. Kevin asked on 3 September for this to run
+Section 4's steps 5–8 in order — the adjustment batch with histogram and
+info panels is next, then healing brush and Content-Aware Fill; groups,
+lock, multi-select, guides and snapping; RAW develop and Actions — then
+the breadth of section 3. Kevin asked on 3 September for this to run
 through the whole list without stopping between phases: finish, commit,
 start the next.
 

@@ -27,10 +27,9 @@ extension AgentServer {
         return try performPixelEdit(document, actionName, pixelLayer: layer) { current in
             data.withUnsafeMutableBufferPointer { buffer -> RasterDocument? in
                 guard let base = buffer.baseAddress,
-                    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
                     let context = CGContext(
                         data: base, width: width, height: height, bitsPerComponent: 8,
-                        bytesPerRow: width * 4, space: colorSpace,
+                        bytesPerRow: width * 4, space: doc.drawingSpace,
                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
                 else { return nil }
                 context.translateBy(x: 0, y: CGFloat(height))
@@ -157,7 +156,11 @@ extension AgentServer {
         // The snapshot is latched before the edit, like the interactive
         // stroke's mouse-down latch: nothing can change what is being
         // cloned mid-stroke.
-        guard let snapshot = (document.projection ?? doc.flattened())?.makeCGImage() else {
+        // The snapshot and the overlay it is stamped into share the
+        // document's space, so a zero-offset clone is an identity copy.
+        guard let snapshot = (document.projection ?? doc.flattened())?
+            .makeCGImage(in: doc.colorSpace)
+        else {
             throw ToolError(message: "Could not snapshot the composite to clone from")
         }
         let offset = CGVector(dx: points[0].x - sourceX, dy: points[0].y - sourceY)
@@ -298,7 +301,8 @@ extension AgentServer {
                     if SoftBrush.isStamped(tip: tip, size: size),
                         let dab = SoftBrush.dab(
                             color: white.withAlphaComponent(tip.flow),
-                            diameter: size, hardness: tip.hardness) {
+                            diameter: size, hardness: tip.hardness,
+                            space: document.drawingSpace) {
                         let spacing = SoftBrush.spacing(
                             for: size, percent: tip.spacingPercent)
                         for center in SoftBrush.stampCenters(along: points, spacing: spacing) {

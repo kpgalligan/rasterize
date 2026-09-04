@@ -396,7 +396,11 @@ extension RasterDocument {
     /// what the user sees rather than the active layer, the same choice the
     /// magic wand makes about where to sample.
     func subjectMask(instance: Int? = nil) throws -> SubjectSelection.Subjects {
-        guard let composite = flattened()?.makeCGImage() else {
+        // Tagged with the document's own space: Vision reads the tag and
+        // normalizes internally, so handing it sRGB-tagged wide-gamut
+        // numbers would show the segmenter colours the picture never had.
+        // The result is a coverage mask, so nothing downstream changes.
+        guard let composite = flattened()?.makeCGImage(in: colorSpace) else {
             throw SubjectSelection.Failure.noComposite
         }
         return try SubjectSelection.mask(in: composite, instance: instance)

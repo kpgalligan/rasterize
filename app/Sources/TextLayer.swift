@@ -553,10 +553,16 @@ enum TextLayer {
     /// only the alignment changes, and single-line text renders identically
     /// for all three values.
     ///
+    /// `space` is the space the glyph colour lands in — the DOCUMENT's, so
+    /// an authored text colour is converted into the document's numbers
+    /// exactly once, by CoreGraphics, here.
+    ///
     /// MAIN THREAD ONLY (AppKit drawing). nil for an unresolved box, an
     /// empty string, a degenerate layout, a non-finite anchor, or a raster
     /// beyond the core's pixel cap.
-    static func render(_ payload: TextLayerPayload, anchor: CGPoint) -> DescribedRaster? {
+    static func render(
+        _ payload: TextLayerPayload, anchor: CGPoint, space: CGColorSpace
+    ) -> DescribedRaster? {
         guard anchor.x.isFinite, anchor.y.isFinite, abs(anchor.x) < 1e7, abs(anchor.y) < 1e7,
               let layout = measure(payload)
         else { return nil }
@@ -584,7 +590,7 @@ enum TextLayer {
         }
 
         let pixels = Bitmap.renderStraightRGBA(
-            width: rect.width, height: rect.height, appKit: true
+            width: rect.width, height: rect.height, appKit: true, space: space
         ) { context in
             // Source space → raster: the anchor's fraction, less the rect's
             // origin (relative to the anchor's whole part), after the map.

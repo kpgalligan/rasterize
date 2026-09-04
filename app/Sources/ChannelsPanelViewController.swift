@@ -527,10 +527,20 @@ extension ChannelsPanelViewController: NSTableViewDataSource, NSTableViewDelegat
         // the composite rows read the projection ALREADY FITTED by reload —
         // no row ever re-flattens the document, and no row extracts a plane
         // at canvas size to show it 44 pixels wide.
+        //
+        // One space for the whole call, the document's: the composite row IS
+        // the picture, and a plane row is that document's channel values
+        // replicated into R=G=B, which Photoshop likewise shows through the
+        // working space's transfer curve. The alpha-channel and mask rows are
+        // coverage rather than colour, but they arrive through this same call
+        // as neutral greys, and a neutral stays neutral under any profile we
+        // can carry — a differing transfer curve shifts a coverage thumbnail
+        // by the same shade it shifts the plane rows beside it, which is the
+        // consistency worth having in one well.
         if let image = doc.planeImage(
             for: channelRow, composite: thumbnailComposite, activeLayer: activeLayer,
             maxSide: Int(LayerCellView.thumbSide)),
-           let cgImage = image.makeCGImage()
+           let cgImage = image.makeCGImage(in: doc.colorSpace)
         {
             thumbnail = NSImage(
                 cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))

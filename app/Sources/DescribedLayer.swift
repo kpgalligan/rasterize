@@ -500,11 +500,20 @@ enum LayerDescription: Equatable {
     /// Renders through the kind's renderer at `anchor`; the renderer takes
     /// the fraction from the anchor, so a description's stored
     /// `origin_frac` never has to agree with the anchor it is rendered at.
-    func render(anchor: CGPoint) -> DescribedRaster? {
+    ///
+    /// `space` is the space the rendered pixels land in — the document the
+    /// layer belongs to, so its authored colours convert into the document's
+    /// numbers exactly once (`Bitmap`'s ingest rule). Every caller is an
+    /// `extension RasterDocument` op that has `self`, so nobody reaches for
+    /// a global.
+    func render(anchor: CGPoint, space: CGColorSpace) -> DescribedRaster? {
         switch self {
-        case let .text(payload): return TextLayer.render(payload, anchor: anchor)
-        case let .shape(payload): return ShapeLayer.render(payload, anchor: anchor)
-        case let .livePhoto(payload): return LivePhoto.render(payload, anchor: anchor)
+        case let .text(payload):
+            return TextLayer.render(payload, anchor: anchor, space: space)
+        case let .shape(payload):
+            return ShapeLayer.render(payload, anchor: anchor, space: space)
+        case let .livePhoto(payload):
+            return LivePhoto.render(payload, anchor: anchor, space: space)
         }
     }
 }
@@ -650,7 +659,7 @@ extension RasterDocument {
     func addingDescribedLayer(
         above below: Int, _ description: LayerDescription, anchor: CGPoint, name: String
     ) -> RasterDocument? {
-        guard let raster = description.render(anchor: anchor),
+        guard let raster = description.render(anchor: anchor, space: drawingSpace),
               let meta = description.withOriginFraction(
                 DescribedLayer.anchorFraction(anchor)).json()
         else { return nil }
@@ -677,7 +686,7 @@ extension RasterDocument {
         _ idx: Int, _ description: LayerDescription, anchor: CGPoint
     ) -> RasterDocument? {
         guard let info = layerInfo(idx),
-              let raster = description.render(anchor: anchor),
+              let raster = description.render(anchor: anchor, space: drawingSpace),
               let meta = description.withOriginFraction(
                 DescribedLayer.anchorFraction(anchor)).json()
         else { return nil }

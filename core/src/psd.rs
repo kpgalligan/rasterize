@@ -1,6 +1,6 @@
 //! Layered PSD import, plus the shared "8-bit RGB and grayscale only" gate
-//! that the flat open path (`RzImage::open`) applies too. Import quirks and
-//! fallbacks are documented on [`open_psd`].
+//! that the flat open path (`RzImage::open_bytes`) applies too. Import
+//! quirks and fallbacks are documented on [`open_psd`].
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
@@ -9,11 +9,13 @@ use image::RgbaImage;
 
 use crate::blend::BlendMode;
 use crate::doc::{Layer, RzDocument};
+use crate::icc::IccProfile;
+use crate::metadata::{Metadata, Resolution};
 use crate::style::GlobalLight;
 
 /// The psd crate silently mis-decodes anything but 8-bit RGB or grayscale
 /// (CMYK channels land in RGB slots, 16-bit data is read byte-interleaved),
-/// so both open paths — the flat `RzImage::open` composite and the layered
+/// so both open paths — the flat `RzImage::open_bytes` composite and the layered
 /// import — reject those up front with the same message.
 pub(crate) fn check_supported(psd: &psd::Psd, path: &str) -> Result<(), String> {
     if psd.depth() != psd::PsdDepth::Eight
@@ -163,7 +165,13 @@ pub(crate) fn open_psd(bytes: &[u8], path: &str) -> Result<RzDocument, String> {
         global_light: GlobalLight::default(),
         // PSD alpha channels are not imported (the crate exposes only the
         // composite and per-layer raster data), so an imported document
-        // arrives with no channels.
+        // arrives with no channels. Nor is the image-resources section, of
+        // which `psd` 0.3.5 exposes only Slices: the resolution (id 1005)
+        // and the ICC profile (id 1039) are unreachable, so an imported
+        // document takes the sRGB / no-metadata / 72 ppi defaults.
         channels: Vec::new(),
+        profile: IccProfile::srgb(),
+        metadata: Metadata::default(),
+        resolution: Resolution::default(),
     })
 }

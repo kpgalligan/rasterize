@@ -20,6 +20,8 @@ use crate::blend::{
 };
 use crate::doc_channel::{self, Channel};
 use crate::doc_plane::channel_lerp;
+use crate::icc::IccProfile;
+use crate::metadata::{Metadata, Resolution};
 use crate::ops::CompositeMode;
 use crate::style::{scaled_style, GlobalLight, LayerStyle};
 use crate::style_composite::{composite_styled_into, merge_extent, CompositeEnv};
@@ -126,6 +128,18 @@ pub struct RzDocument {
     /// Named canvas-sized coverage planes — saved selections. See
     /// `doc_channel`; they never composite.
     pub channels: Vec<Channel>,
+    /// The document's working colour space: the ICC profile its pixel
+    /// numbers belong to, embedded on export. Defaults to the built-in
+    /// sRGB and is never absent — an untagged file is assumed sRGB at open,
+    /// which is what every reader does anyway and what gives the display,
+    /// the export and the transform exactly one rule. See `doc_color`.
+    pub profile: Arc<IccProfile>,
+    /// EXIF / XMP / IPTC packets, verbatim and uninterpreted. See
+    /// `metadata`.
+    pub metadata: Metadata,
+    /// Print resolution in ppi; 72 x 72 by default. Pixels never change with
+    /// it — only the print size does. See `metadata::Resolution`.
+    pub resolution: Resolution,
 }
 
 /// Clamps opacity to [0, 1], mapping non-finite values to 1.
@@ -152,14 +166,17 @@ pub(crate) fn sane_opacity(opacity: f32) -> f32 {
 /// behave identically everywhere. A layer carrying a style is routed to
 /// `style_composite` (its effects rendered under `env`: the global light
 /// and the document canvas) — after the adjustment check, so adjustment
-/// layers ignore styles by construction.
+/// layers ignore styles by construction. (`env` also carries the conversion
+/// an authored style colour takes into the document's colour space — see
+/// `style_composite`, which applies it where a contribution's colour is
+/// read.)
 pub(crate) fn composite_layer_into(
     acc: &mut [[f32; 4]],
     acc_w: u32,
     acc_h: u32,
     origin: (i32, i32),
     layer: &Layer,
-    env: CompositeEnv,
+    env: CompositeEnv<'_>,
 ) {
     let opacity = sane_opacity(layer.opacity);
     if opacity <= 0.0 {
@@ -317,7 +334,7 @@ pub(crate) fn composite_clip_group_into(
     origin: (i32, i32),
     base: &Layer,
     group: &[Layer],
-    env: CompositeEnv,
+    env: CompositeEnv<'_>,
 ) {
     if group.is_empty() {
         composite_layer_into(acc, acc_w, acc_h, origin, base, env);
@@ -392,6 +409,12 @@ impl Geometry {
             Geometry::FlipV => imageops::flip_vertical(img),
         }
     }
+
+    /// True for the two quarter turns, which exchange the canvas's width and
+    /// height — and with them the document's two print resolutions.
+    pub(crate) fn swaps_axes(self) -> bool {
+        matches!(self, Geometry::Rotate90 | Geometry::Rotate270)
+    }
 }
 
 /// Quantizes a straight-alpha f32 accumulator to RGBA8.
@@ -417,6 +440,12 @@ impl RzDocument {
             layers: vec![Layer::new(pixels, "Background")],
             global_light: GlobalLight::default(),
             channels: Vec::new(),
+            // Bare pixels are assumed sRGB with no metadata and a 72 ppi
+            // print size; `RzDocument::open` overwrites all three from
+            // whatever the file said.
+            profile: IccProfile::srgb(),
+            metadata: Metadata::default(),
+            resolution: Resolution::default(),
         }
     }
 
@@ -438,7 +467,11 @@ impl RzDocument {
     pub fn flattened(&self) -> RgbaImage {
         let px = self.width as usize * self.height as usize;
         let mut acc = vec![[0.0f32; 4]; px];
-        let env = self.composite_env();
+        // Built once for the whole projection and borrowed by every styled
+        // layer (`style_composite`): the conversion an authored layer-style
+        // colour takes into this document's space.
+        let colors = self.style_colors();
+        let env = self.composite_env(colors.as_ref());
         let mut i = 0;
         while i < self.layers.len() {
             let layer = &self.layers[i];
@@ -644,7 +677,8 @@ impl RzDocument {
         if !upper.visible {
             return Some(doc);
         }
-        let env = self.composite_env();
+        let colors = self.style_colors();
+        let env = self.composite_env(colors.as_ref());
         let (lx0, ly0, lx1, ly1) = merge_extent(&lower, env);
         let (ux0, uy0, ux1, uy1) = merge_extent(&upper, env);
         let (x0, y0) = (lx0.min(ux0), ly0.min(uy0));
@@ -693,11 +727,20 @@ impl RzDocument {
     /// left that could describe those pixels. The document's global light
     /// is a preference, not layer state, and is kept; so are the alpha
     /// channels, which are canvas-sized document state and have nothing to
-    /// do with the layer stack being collapsed.
+    /// do with the layer stack being collapsed; and so, for the same reason,
+    /// are the colour profile (the flattened pixels are still in that
+    /// space), the metadata packets and the print resolution.
+    ///
+    /// Every one of those five is listed EXPLICITLY: this builds on
+    /// `..from_pixels`, so anything not named here is silently replaced by a
+    /// default.
     pub fn flattening(&self) -> Self {
         RzDocument {
             global_light: self.global_light,
             channels: self.channels.clone(),
+            profile: Arc::clone(&self.profile),
+            metadata: self.metadata.clone(),
+            resolution: self.resolution,
             ..RzDocument::from_pixels(self.flattened())
         }
     }
@@ -831,6 +874,11 @@ impl RzDocument {
             layers,
             global_light: self.global_light,
             channels: doc_channel::geometry_channels(&self.channels, geom),
+            profile: Arc::clone(&self.profile),
+            metadata: self.metadata.clone(),
+            // A 300 x 150 ppi document turned 90 degrees is 150 x 300; the
+            // other three geometries leave the axes where they were.
+            resolution: self.resolution.transposed_if(geom.swaps_axes()),
         }
     }
 
@@ -875,6 +923,9 @@ impl RzDocument {
             layers,
             global_light: self.global_light,
             channels: doc_channel::cropped_channels(&self.channels, x, y, w, h),
+            profile: Arc::clone(&self.profile),
+            metadata: self.metadata.clone(),
+            resolution: self.resolution,
         })
     }
 
@@ -914,6 +965,9 @@ impl RzDocument {
             layers,
             global_light: self.global_light,
             channels: doc_channel::padded_channels(&self.channels, w, h, origin),
+            profile: Arc::clone(&self.profile),
+            metadata: self.metadata.clone(),
+            resolution: self.resolution,
         })
     }
 
@@ -963,6 +1017,12 @@ impl RzDocument {
             layers,
             global_light: self.global_light,
             channels: doc_channel::resized_channels(&self.channels, w, h, filter),
+            profile: Arc::clone(&self.profile),
+            metadata: self.metadata.clone(),
+            // Photoshop's "Resample: on" case — the pixels change and so
+            // does the print size, but the ppi holds. `set_resolution` is
+            // the op that moves ppi, and it never touches a pixel.
+            resolution: self.resolution,
         })
     }
 }
@@ -1132,7 +1192,20 @@ impl RzDocument {
 impl RzDocument {
     /// Opens a document, sniffing the container: "RZDC" is the native format,
     /// "8BPS" a Photoshop document (layered import), anything else decodes
-    /// via the `RzImage::open` rules to a single "Background" layer.
+    /// via the `RzImage::open_bytes` rules to a single "Background" layer.
+    ///
+    /// A FLAT open also lifts the file's sidecar onto the document: its
+    /// embedded ICC profile (from the decoder, which reassembles JPEG APP2
+    /// chunks and inflates PNG `iCCP` for every format it reads), its EXIF,
+    /// XMP and IPTC packets and its print resolution (from `metadata`'s
+    /// JPEG/PNG container walk). A `.rz` carries all of that itself; a PSD
+    /// captures none of it — `psd` 0.3.5 exposes only the Slices image
+    /// resource, so the resolution (id 1005) and the ICC profile (id 1039)
+    /// are unreachable.
+    ///
+    /// This REPORTS what the file said and adopts no working space: an
+    /// embedded profile that differs from the host's preference is converted
+    /// by `adopt_working_space`, once, by the caller.
     pub fn open(path: &str) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("failed to read {path}: {e}"))?;
         if bytes.len() >= 4 && &bytes[..4] == b"RZDC" {
@@ -1141,8 +1214,23 @@ impl RzDocument {
         } else if bytes.len() >= 4 && &bytes[..4] == b"8BPS" {
             crate::psd::open_psd(&bytes, path)
         } else {
-            drop(bytes);
-            Ok(RzDocument::from_pixels(RzImage::open(path)?.pixels))
+            let (image, sidecar) = RzImage::open_bytes(&bytes, path)?;
+            let mut doc = RzDocument::from_pixels(image.pixels);
+            // A profile that is not an RGB ICC profile — or one whose
+            // declared size is past the blob cap, which a zlib-compressed
+            // PNG `iCCP` can inflate to — is dropped, not an error: the
+            // pixels are still fine, and the document keeps the sRGB
+            // assumption every reader makes. `IccProfile::parse` is where
+            // both refusals live, so this path can never build a document
+            // the native writer would refuse to save.
+            if let Some(profile) = sidecar.icc.as_deref().and_then(IccProfile::parse) {
+                doc.profile = Arc::new(profile);
+            }
+            doc.metadata = sidecar.metadata;
+            if let Some(resolution) = sidecar.resolution {
+                doc.resolution = resolution;
+            }
+            Ok(doc)
         }
     }
 }

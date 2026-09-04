@@ -38,6 +38,36 @@ final class ImageDocument: NSDocument {
     /// Quality used for JPEG writes (Save/Save As and the last export choice).
     var jpegExportQuality: Int = 90
 
+    /// Embed the document's ICC profile on export — Save/Save As, Export
+    /// and the agent's save_copy alike. Per-document and not persisted, the
+    /// same shape as `jpegExportQuality`; a format that cannot carry a
+    /// profile ignores it (the save reports what was actually written).
+    var embedColorProfile = true
+
+    /// Drop EXIF / XMP / IPTC on export. Off — the default — re-splices the
+    /// packets the file arrived with, EXIF orientation reset to 1: the
+    /// camera rotation was baked into the pixels at open, so a preserved 6
+    /// would double-rotate the picture in every viewer.
+    var stripMetadata = false
+
+    /// What the OPEN did to this document's colour: nothing, a conversion
+    /// into the working space, or "kept, but not convertible from". It
+    /// describes THE OPEN and is deliberately never updated by a later
+    /// Assign or Convert — the document's profile name is the truth about
+    /// the document, this is the truth about how it got here. A `.rz` never
+    /// adopts, so it always reads `.unchanged`.
+    private(set) var profileAdoption: RasterAdoptOutcome = .unchanged
+
+    /// True when this document's source file was decoded by the PLATFORM
+    /// (HEIC, a Live Photo still) rather than by the core, so its EXIF, XMP
+    /// and IPTC were never read: the core's container walk covers JPEG and
+    /// PNG only. It describes the OPEN, like `profileAdoption`, and matters
+    /// on the way out — an export from such a document carries no capture
+    /// data, and only this flag can tell that from a file that never had
+    /// any. A clipboard or `.rz` document leaves it false: neither has a
+    /// source container whose packets went unread.
+    private(set) var metadataNotCaptured = false
+
     /// The native layered format (registered in Info.plist as .rz).
     static let nativeTypeIdentifier = "com.kgalligan.rasterize-document"
 
@@ -76,10 +106,22 @@ final class ImageDocument: NSDocument {
 
     /// Creates an untitled, dirty document around in-memory pixels
     /// (File > New from Clipboard). Saving prompts for a location.
-    static func makeUntitled(with image: RasterImage) -> ImageDocument? {
-        guard let doc = RasterDocument.from(image: image) else { return nil }
+    ///
+    /// `profile` is the ICC bytes those pixel NUMBERS belong to, and this
+    /// path follows the same colour rule as every other document-creating
+    /// one (see `openDocument`): assign the profile the numbers came in,
+    /// then adopt the working space exactly once. Without it a pasted
+    /// Display P3 screenshot — the default on every current Mac — became a
+    /// document holding P3 numbers labelled sRGB: over-saturated on screen,
+    /// and every export propagated the wrong tag.
+    static func makeUntitled(with image: RasterImage, profile: Data? = nil) -> ImageDocument? {
+        guard var doc = RasterDocument.from(image: image) else { return nil }
+        if let profile = profile, let tagged = doc.assigningProfile(profile) {
+            doc = tagged
+        }
         let document = ImageDocument()
         document.doc = doc
+        document.adoptWorkingSpace()
         document.activeLayerIndex = 0
         document.refreshProjection()
         document.fileType = "public.png"
@@ -129,9 +171,31 @@ final class ImageDocument: NSDocument {
     // MARK: - Reading and writing
 
     override func read(from url: URL, ofType typeName: String) throws {
-        doc = try Self.openDocument(at: url)
+        let opened = try Self.openDocument(at: url)
+        doc = opened.doc
+        metadataNotCaptured = opened.metadataNotCaptured
+        if typeName != Self.nativeTypeIdentifier {
+            // A .rz carries its own profile; converting it to the working
+            // space would silently rewrite the user's document on every open.
+            adoptWorkingSpace()
+        }
         activeLayerIndex = max(doc.layerCount - 1, 0) // topmost
         refreshProjection()
+    }
+
+    /// Brings a freshly opened flat document into the colour working space,
+    /// ONCE — the single conversion any opened file gets, whichever decoder
+    /// produced its pixels. It runs before the document is shown, so it is
+    /// part of the open and never an undo step.
+    ///
+    /// Internal, not private: `makeUntitled` is the fourth document-creating
+    /// path and takes the same one conversion.
+    func adoptWorkingSpace() {
+        guard let current = doc else { return }
+        let (adopted, outcome) = current.adoptingWorkingSpace(
+            ColorSettings.workingSpace.profileData)
+        profileAdoption = outcome
+        if let adopted = adopted { doc = adopted }
     }
 
     /// The app's open path, most specific first:
@@ -143,15 +207,40 @@ final class ImageDocument: NSDocument {
     ///    layered PSD, and the flat formats (single "Background" layer).
     /// 3. Formats the core has no decoder for (HEIC, HEIF) fall back to the
     ///    platform's, as one flat layer.
+    /// 4. COLOUR, on every one of those paths: the document is assigned the
+    ///    profile its pixel NUMBERS actually belong to — the file's embedded
+    ///    ICC bytes, the space the platform decoded into, or the built-in
+    ///    sRGB for an untagged file — and nothing is converted here.
+    ///    `read(from:ofType:)` then runs `adoptWorkingSpace()` exactly once,
+    ///    which is the one and only conversion an open performs. The
+    ///    CLIPBOARD is the fourth document-creating path and follows the
+    ///    same two steps in `makeUntitled(with:profile:)`; pasting into an
+    ///    open document instead converts the pixels into that document's
+    ///    space, since a layer has no profile of its own.
+    ///
+    /// 5. METADATA comes from the core's own container walk and from
+    ///    nowhere else. Paths 1 and 3 hand the core finished pixels, so a
+    ///    HEIC's or a Live Photo still's EXIF, XMP and IPTC are never seen;
+    ///    and the walk itself covers JPEG and PNG only, so a TIFF, WebP,
+    ///    GIF, BMP or PSD on path 2 arrives without any either. A document
+    ///    holding no packet is otherwise indistinguishable from a file that
+    ///    had none, so `Opened.metadataNotCaptured` keeps the difference —
+    ///    the core answers it for path 2 — and an export can say the capture
+    ///    data never arrived instead of implying there was none.
     ///
     /// A file that none of the three can read reports the CORE's error, which
     /// names the file and the reason.
-    private static func openDocument(at url: URL) throws -> RasterDocument {
+    private static func openDocument(at url: URL) throws -> Opened {
+        let working = ColorSettings.workingSpace
         if let source = LivePhoto.locate(url), let payload = LivePhoto.inspect(source),
            let livePhoto = RasterDocument.from(
-            livePhoto: payload, name: LivePhoto.layerName(for: source))
+            livePhoto: payload, name: LivePhoto.layerName(for: source),
+            space: working.cgSpace, profile: working.profileData)
         {
-            return livePhoto
+            // A video frame has no profile of its own, so it is decoded into
+            // the working space and labelled with it; the adoption above
+            // then finds them equal and does nothing.
+            return Opened(doc: livePhoto, metadataNotCaptured: true)
         }
         // iPhone auxiliary images — depth, the portrait matte, the semantic
         // segmentation mattes — become named alpha channels on BOTH open
@@ -159,13 +248,47 @@ final class ImageDocument: NSDocument {
         // auxiliary images, and a JPEG is decoded by the core.
         do {
             let opened = try RasterDocument.open(url: url)
-            return AuxiliaryMattes.attaching(to: opened, from: url) ?? opened
+            return Opened(
+                doc: AuxiliaryMattes.attaching(to: opened, from: url) ?? opened,
+                // The CORE decides, not this side: it walks the container for
+                // a JPEG and a PNG and reads its own .rz, and hands over
+                // pixels alone for a TIFF, WebP, GIF, BMP or PSD — all of
+                // which really can carry capture data. Asking it keeps that
+                // policy in one place instead of restating it here.
+                metadataNotCaptured: !RasterDocument.metadataWalked(at: url))
         } catch {
-            guard let image = RasterImage.decoded(from: url),
-                  let decoded = RasterDocument.from(image: image)
+            guard let decoded = RasterImage.decoded(from: url),
+                  let built = RasterDocument.from(image: decoded.image)
             else { throw error }
-            return AuxiliaryMattes.attaching(to: decoded, from: url) ?? decoded
+            var doc = built
+            // The platform decoded into the source's OWN space, so these are
+            // that profile's numbers; label them and let the adoption convert.
+            if let profile = decoded.profile, let tagged = doc.assigningProfile(profile) {
+                doc = tagged
+            }
+            if let dpi = decoded.dpi, let sized = doc.settingResolution(x: dpi.0, y: dpi.1) {
+                doc = sized
+            }
+            // ImageIO gives us pixels, a profile and a dpi — no packets. A
+            // HEIC really does carry EXIF, so this is a drop, not an absence.
+            return Opened(
+                doc: AuxiliaryMattes.attaching(to: doc, from: url) ?? doc,
+                metadataNotCaptured: true)
         }
+    }
+
+    /// What an open produced: the document, and whether the file's capture
+    /// data was left behind. Two ways that happens, and both set the flag:
+    /// the platform decoders (ImageIO for a HEIC, AVFoundation for a Live
+    /// Photo frame) hand over finished pixels and nothing else, and the
+    /// core's own walk covers JPEG and PNG only, so a TIFF, WebP, GIF, BMP
+    /// or PSD it decodes arrives without the EXIF, XMP or IPTC it may well
+    /// have carried. The core answers the second half
+    /// (`RasterDocument.metadataWalked`) rather than this side restating its
+    /// container policy.
+    private struct Opened {
+        let doc: RasterDocument
+        let metadataNotCaptured: Bool
     }
 
     override func revert(toContentsOf url: URL, ofType typeName: String) throws {
@@ -190,7 +313,15 @@ final class ImageDocument: NSDocument {
         guard let flattened = projection ?? doc.flattened() else {
             throw RasterCoreError(message: "Could not flatten the document.")
         }
-        try flattened.save(to: url, format: format.rzFormat, jpegQuality: jpegExportQuality)
+        // The document-level save so the ICC profile, the EXIF/XMP/IPTC
+        // packets and the print resolution ride along; the warm projection
+        // goes in as the composite so ⌘S never re-flattens the layer stack.
+        // What a format could not carry is reported, not fatal, and ⌘S says
+        // nothing about it — the Export panel is where that conversation
+        // belongs.
+        _ = try doc.saveImage(
+            flattened, to: url, format: format.rzFormat, jpegQuality: jpegExportQuality,
+            embedProfile: embedColorProfile, stripMetadata: stripMetadata)
     }
 
     // MARK: - Window controllers
@@ -453,8 +584,14 @@ final class ImageDocument: NSDocument {
 
     /// Pastes the frontmost pasteboard image as a new layer above the active
     /// one and selects it.
+    ///
+    /// The pixels are decoded into THIS document's drawing space, so a P3
+    /// image pasted into an sRGB document arrives as sRGB numbers and
+    /// matches the region it was copied from. A layer carries no profile of
+    /// its own — a document has exactly one — so this is the one conversion
+    /// those pixels get, and CoreGraphics performs it.
     func pasteAsNewLayer() {
-        guard let pasted = RasterImage.fromPasteboard() else {
+        guard let pasted = RasterImage.fromPasteboard(in: drawingSpace) else {
             NSSound.beep()
             return
         }
@@ -473,7 +610,9 @@ final class ImageDocument: NSDocument {
     /// on the canvas. The commits run through applyEdit, which also dirties
     /// the document, so close paths then show the standard unsaved-changes
     /// prompt.
-    private func commitPendingCanvasSessions() {
+    /// Internal, not private: the print operation (ImageDocument+Print.swift)
+    /// is the same kind of read of the composite and does the same first.
+    func commitPendingCanvasSessions() {
         for controller in windowControllers {
             (controller.contentViewController as? EditorViewController)?
                 .commitPendingSessions()
@@ -557,7 +696,12 @@ final class ImageDocument: NSDocument {
     /// Exports the flattened projection.
     @IBAction func exportDocument(_ sender: Any?) {
         commitPendingCanvasSessions()
-        guard let image = projection ?? doc?.flattened(), let window = windowForSheet else {
+        // The document AND its composite are captured together, before the
+        // panel opens: an agent edit landing while the panel is up must not
+        // pair one snapshot's pixels with another's profile and packets.
+        guard let source = doc, let image = projection ?? source.flattened(),
+              let window = windowForSheet
+        else {
             NSSound.beep()
             return
         }
@@ -566,6 +710,8 @@ final class ImageDocument: NSDocument {
         let accessory = ExportAccessoryController()
         accessory.selectedFormat = initialFormat
         accessory.quality = jpegExportQuality
+        accessory.embedProfile = embedColorProfile
+        accessory.stripMetadata = stripMetadata
 
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
@@ -580,15 +726,58 @@ final class ImageDocument: NSDocument {
 
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let self = self, let url = panel.url else { return }
+            let format = accessory.selectedFormat
             self.jpegExportQuality = accessory.quality
+            self.embedColorProfile = accessory.embedProfile
+            self.stripMetadata = accessory.stripMetadata
             do {
-                try image.save(
-                    to: url,
-                    format: accessory.selectedFormat.rzFormat,
-                    jpegQuality: accessory.quality)
+                let report = try source.saveImage(
+                    image, to: url, format: format.rzFormat, jpegQuality: accessory.quality,
+                    embedProfile: accessory.embedProfile,
+                    stripMetadata: accessory.stripMetadata)
+                // Not an error: a format that cannot carry a profile or a
+                // packet still wrote the picture. Say so once, so the loss
+                // is never silent.
+                if let message = ExportCapabilities.droppedMessage(
+                    source, report: report, format: format,
+                    embedProfile: accessory.embedProfile,
+                    stripMetadata: accessory.stripMetadata,
+                    metadataNotCaptured: self.metadataNotCaptured)
+                {
+                    self.presentExportNotice(message)
+                }
             } catch {
                 self.presentError(error)
             }
+        }
+    }
+
+    /// The informational half of an export: what the chosen format could
+    /// not carry. Never a failure — the file was written.
+    private func presentExportNotice(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Exported"
+        alert.informativeText = message
+        if let window = windowForSheet {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    // MARK: - Printing
+
+    /// NSDocument's own print selectors are delivered to the DOCUMENT, not
+    /// to the editor, so they never reach `EditorViewController`'s
+    /// validation switch: File > Print and Page Setup would stay enabled on
+    /// a document with no image without this.
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        switch item.action {
+        case #selector(printDocument(_:)), #selector(runPageLayout(_:)):
+            return doc != nil
+        default:
+            return super.validateUserInterfaceItem(item)
         }
     }
 }

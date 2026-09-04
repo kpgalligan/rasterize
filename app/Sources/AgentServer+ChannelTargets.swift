@@ -302,9 +302,11 @@ extension AgentServer {
     // MARK: - Fill and gradient on a plane
 
     /// `fill`'s arguments, parsed once: the seed, the colour as straight
-    /// RGBA bytes, and the region-grow options. Shared by the layer path in
+    /// RGBA bytes IN THE DOCUMENT'S SPACE (`colorRGBA`, which is where that
+    /// rule lives), and the region-grow options. Shared by the layer path in
     /// the frozen AgentServer and the plane path below, so the two spellings
-    /// of `fill` can never drift.
+    /// of `fill` can never drift — and the document is a parameter for
+    /// exactly that reason: the colour cannot be read without it.
     struct FillArguments {
         let x: Int
         let y: Int
@@ -313,12 +315,13 @@ extension AgentServer {
         let contiguous: Bool
     }
 
-    func fillArguments(_ a: [String: Any]) throws -> FillArguments {
+    func fillArguments(_ a: [String: Any], _ document: ImageDocument) throws -> FillArguments {
         guard let x = intArg(a, "x"), let y = intArg(a, "y") else {
             throw ToolError(message: "fill requires x and y (the seed point)")
         }
         return FillArguments(
-            x: x, y: y, rgba: try colorRGBA(parseColor(a, "color", fallback: .black)),
+            x: x, y: y,
+            rgba: try colorRGBA(parseColor(a, "color", fallback: .black), in: document),
             tolerance: intArg(a, "tolerance") ?? 32, contiguous: boolArg(a, "contiguous") ?? true)
     }
 
@@ -331,16 +334,18 @@ extension AgentServer {
         let kind: RzGradientKind
     }
 
-    func gradientArguments(_ a: [String: Any]) throws -> GradientArguments {
+    func gradientArguments(
+        _ a: [String: Any], _ document: ImageDocument
+    ) throws -> GradientArguments {
         guard let x0 = doubleArg(a, "x0"), let y0 = doubleArg(a, "y0"),
             let x1 = doubleArg(a, "x1"), let y1 = doubleArg(a, "y1")
         else {
             throw ToolError(message: "gradient requires x0, y0, x1, y1")
         }
-        let start = try colorRGBA(parseColor(a, "start_color", fallback: .black))
+        let start = try colorRGBA(parseColor(a, "start_color", fallback: .black), in: document)
         let end: [UInt8]
         if stringArg(a, "end_color") != nil {
-            end = try colorRGBA(parseColor(a, "end_color", fallback: .clear))
+            end = try colorRGBA(parseColor(a, "end_color", fallback: .clear), in: document)
         } else {
             end = [0, 0, 0, 0] // fade to transparent
         }

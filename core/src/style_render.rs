@@ -98,6 +98,7 @@ use image::GrayImage;
 use crate::blend::BlendMode;
 use crate::doc::{Layer, MAX_PIXELS};
 use crate::doc_select::{feather_mask, grow_mask, shrink_mask};
+use crate::icc_transform::Transform;
 use crate::style::{Effect, EffectKind, GlobalLight, LayerStyle};
 use crate::style_gradient::{gradient_color, GradientSampler};
 use crate::{
@@ -274,6 +275,34 @@ pub(crate) enum PlaneColor {
 }
 
 impl PlaneColor {
+    /// This colour converted through `t` — the AUTHORED sRGB colour a style
+    /// stores turned into the document's own numbers, once, at composite
+    /// time (`style_composite::composite_contribution`, the one place a
+    /// contribution's colour is read).
+    ///
+    /// Deliberately NOT applied when the plane is rendered: the cache holds
+    /// the colours the user authored, so an Assign or Convert to Profile
+    /// leaves every cached plane valid and a style's APPEARANCE survives a
+    /// profile change without the style JSON being rewritten.
+    ///
+    /// A `Solid` came from [`unit_color`], so `* 255` recovers the authored
+    /// byte exactly.
+    pub(crate) fn converted(&self, t: &Transform) -> PlaneColor {
+        match self {
+            PlaneColor::Solid(rgb) => {
+                let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                PlaneColor::Solid(unit_color(t.color([
+                    byte(rgb[0]),
+                    byte(rgb[1]),
+                    byte(rgb[2]),
+                ])))
+            }
+            PlaneColor::Gradient(sampler) => {
+                PlaneColor::Gradient(sampler.mapping_colors(|c| t.color(c)))
+            }
+        }
+    }
+
     /// The colour at layer pixel `(lx, ly)`.
     pub(crate) fn at(&self, lx: i64, ly: i64) -> [f32; 3] {
         match self {

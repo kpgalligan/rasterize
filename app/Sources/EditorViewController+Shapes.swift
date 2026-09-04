@@ -136,7 +136,8 @@ extension EditorViewController {
         // Hide the layer's raster under the session, or the old shape
         // ghosts behind every adjustment — the text session's rule. An
         // already-hidden layer has nothing to hide (nil is correct).
-        canvas.previewImage = doc.withLayerVisible(idx, false)?.flattened()?.makeCGImage()
+        canvas.previewImage = doc.withLayerVisible(idx, false)?.flattened()?
+            .makeCGImage(in: doc.colorSpace)
         pushShapeEditOverlay()
     }
 

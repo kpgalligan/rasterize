@@ -14,6 +14,7 @@ use image::{Rgba, RgbaImage};
 use rasterize_core::doc::RzDocument;
 use rasterize_core::ffi::*;
 use rasterize_core::ffi_channel::*;
+use rasterize_core::ffi_color::*;
 use rasterize_core::ffi_doc::*;
 use rasterize_core::ffi_style::*;
 use rasterize_core::RzImage;
@@ -1302,7 +1303,9 @@ fn rzdc_corrupt_truncated_and_lenient_fields() {
     unsafe { rz_doc_free(doc) };
     let bytes = std::fs::read(&path).unwrap();
 
-    // Truncations at various depths: header, layer table, PNG payload.
+    // Truncations at various depths: header, layer table, PNG payload, and
+    // twice inside the 12-byte version-6 document tail (which is the last 12
+    // bytes: two resolution floats and four blob-present flags).
     for cut in [
         0usize,
         3,
@@ -1312,6 +1315,8 @@ fn rzdc_corrupt_truncated_and_lenient_fields() {
         20,
         bytes.len() / 3,
         bytes.len() / 2,
+        bytes.len() - 10,
+        bytes.len() - 6,
         bytes.len() - 1,
     ] {
         let tpath = dir.path().join(format!("cut-{cut}.rzdc"));
@@ -1722,6 +1727,23 @@ fn psd_layered_import() {
 /// `tests/common` (channel_tests carries the full set).
 const PLANE_RED: c_int = 0;
 
+/// Colour-management constants, mirrored from the header the same way
+/// (color_tests and metadata_tests carry the ones they need).
+const PROFILE_SRGB: c_int = 0;
+const METADATA_EXIF: c_int = 0;
+const ICC_NOT_ICC: c_int = 0;
+const ADOPT_UNCHANGED: c_int = 0;
+
+/// One of the profiles this build writes, read out through the two-call
+/// length-then-fill shape every blob getter uses.
+fn builtin_profile(which: c_int) -> Vec<u8> {
+    let len = rz_builtin_profile_len(which);
+    assert!(len > 0, "a built-in profile is never empty");
+    let mut out = vec![0u8; len];
+    assert!(unsafe { rz_builtin_profile(which, out.as_mut_ptr(), len) });
+    out
+}
+
 #[test]
 fn null_safety_sweep() {
     let null_doc: *const RzDocument = ptr::null();
@@ -2003,6 +2025,89 @@ fn null_safety_sweep() {
             false,
             false
         ));
+
+        // Colour management and metadata.
+        let mut blob = [0u8; 8];
+        assert_eq!(rz_doc_icc_profile_len(null_doc), 0);
+        assert!(!rz_doc_icc_profile(null_doc, blob.as_mut_ptr(), 8));
+        assert!(rz_doc_profile_name(null_doc).is_null());
+        assert!(!rz_doc_profile_is_convertible(null_doc));
+        assert_eq!(rz_doc_metadata_len(null_doc, METADATA_EXIF), 0);
+        assert!(!rz_doc_metadata(
+            null_doc,
+            METADATA_EXIF,
+            blob.as_mut_ptr(),
+            8
+        ));
+        assert_eq!(rz_doc_resolution_x(null_doc), 0.0);
+        assert_eq!(rz_doc_resolution_y(null_doc), 0.0);
+        let srgb = builtin_profile(PROFILE_SRGB);
+        assert!(rz_doc_assign_profile(null_doc, srgb.as_ptr(), srgb.len()).is_null());
+        assert!(rz_doc_convert_to_profile(null_doc, srgb.as_ptr(), srgb.len()).is_null());
+        let mut outcome: c_int = 99;
+        assert!(
+            rz_doc_adopt_working_space(null_doc, srgb.as_ptr(), srgb.len(), &mut outcome).is_null()
+        );
+        assert_eq!(
+            outcome, ADOPT_UNCHANGED,
+            "the outcome is written even when no document comes back"
+        );
+        assert!(
+            rz_doc_adopt_working_space(null_doc, srgb.as_ptr(), srgb.len(), ptr::null_mut())
+                .is_null(),
+            "a NULL outcome pointer is tolerated"
+        );
+        assert!(rz_doc_set_metadata(null_doc, METADATA_EXIF, blob.as_ptr(), 8).is_null());
+        assert!(rz_doc_set_resolution(null_doc, 300.0, 300.0).is_null());
+        let png_path = CString::new("/tmp/never-created.png").unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        assert!(!rz_doc_save_image(
+            null_doc,
+            ptr::null(),
+            png_path.as_ptr(),
+            0,
+            90,
+            true,
+            false,
+            ptr::null_mut(),
+            &mut err
+        ));
+        assert!(!take_err_string(err).is_empty());
+        assert!(!rz_doc_save_image(
+            null_doc,
+            ptr::null(),
+            png_path.as_ptr(),
+            0,
+            90,
+            true,
+            false,
+            ptr::null_mut(),
+            ptr::null_mut()
+        ));
+        // Inspecting nothing is "not an ICC profile", with no name.
+        let mut name: *mut c_char = ptr::null_mut();
+        assert_eq!(rz_icc_inspect(ptr::null(), 0, &mut name), ICC_NOT_ICC);
+        assert!(name.is_null());
+        assert_eq!(rz_icc_inspect(ptr::null(), 0, ptr::null_mut()), ICC_NOT_ICC);
+        // Whether a path's container is walked: NULL is not.
+        assert!(!rz_path_metadata_walked(ptr::null()));
+        assert_eq!(rz_builtin_profile_len(9999), 0);
+        assert!(!rz_builtin_profile(9999, blob.as_mut_ptr(), 8));
+        assert!(!rz_builtin_profile(PROFILE_SRGB, ptr::null_mut(), 0));
+        // Nothing describes the same space as nothing.
+        assert!(!rz_icc_describes_same_space(
+            ptr::null(),
+            0,
+            blob.as_ptr(),
+            blob.len()
+        ));
+        assert!(!rz_icc_describes_same_space(
+            blob.as_ptr(),
+            blob.len(),
+            ptr::null(),
+            0
+        ));
+        assert!(!rz_icc_describes_same_space(ptr::null(), 0, ptr::null(), 0));
     }
 
     // NULL name / NULL image arguments on a valid doc.
@@ -2043,6 +2148,111 @@ fn null_safety_sweep() {
         let mut err: *mut c_char = ptr::null_mut();
         assert!(!rz_doc_save_native(doc, ptr::null(), &mut err));
         assert!(!take_err_string(err).is_empty());
+
+        // Colour management and metadata, on a valid document.
+        assert!(!rz_doc_icc_profile(doc, ptr::null_mut(), 0));
+        assert!(!rz_doc_metadata(doc, METADATA_EXIF, ptr::null_mut(), 0));
+        assert!(
+            rz_doc_assign_profile(doc, ptr::null(), 0).is_null(),
+            "NULL bytes is a refusal, not a clear: a document always has a profile"
+        );
+        let mut err: *mut c_char = ptr::null_mut();
+        assert!(
+            !rz_doc_save_image(
+                doc,
+                ptr::null(),
+                ptr::null(),
+                0,
+                90,
+                true,
+                false,
+                ptr::null_mut(),
+                &mut err
+            ),
+            "a NULL path is an error"
+        );
+        assert!(!take_err_string(err).is_empty());
+    }
+
+    // A NULL `flat` is the flatten-here case, not an error.
+    let out = dir.path().join("flatten-here.png");
+    let c = cpath(&out);
+    let mut err: *mut c_char = ptr::null_mut();
+    let mut carried: u32 = 0;
+    assert!(
+        unsafe {
+            rz_doc_save_image(
+                doc,
+                ptr::null(),
+                c.as_ptr(),
+                0,
+                90,
+                true,
+                false,
+                &mut carried,
+                &mut err,
+            )
+        },
+        "{}",
+        take_err_string(err)
+    );
+    assert!(out.exists());
+    unsafe { rz_doc_free(doc) };
+}
+
+/// Mirrors `channel_tests::bogus_plane_values_are_refused_rather_than_materialized`
+/// for the three enums this phase adds and for `RzFormat`, which had no
+/// out-of-range line anywhere in the sweep before. Each list is the enum's
+/// own: 3 is a bogus `RzMetadataKind` but a perfectly good `RZ_FORMAT_BMP`.
+#[test]
+fn bogus_colour_enum_values_are_refused_rather_than_materialized() {
+    let dir = TempDir::new().unwrap();
+    let doc = doc_from(&dir, "bogus.png", &solid(2, 2, [1, 2, 3, 255]));
+    let mut out = [0u8; 8];
+    let path = dir.path().join("bogus-out.png");
+    let c = cpath(&path);
+
+    for kind in [-1, 3, 6, 99, c_int::MIN, c_int::MAX] {
+        unsafe {
+            assert_eq!(rz_doc_metadata_len(doc, kind), 0, "kind {kind}");
+            assert!(
+                !rz_doc_metadata(doc, kind, out.as_mut_ptr(), 8),
+                "kind {kind}"
+            );
+            assert!(
+                rz_doc_set_metadata(doc, kind, out.as_ptr(), 8).is_null(),
+                "kind {kind}"
+            );
+        }
+    }
+    for which in [-1, 2, 3, 6, 99, c_int::MIN, c_int::MAX] {
+        assert_eq!(rz_builtin_profile_len(which), 0, "profile {which}");
+        assert!(
+            !unsafe { rz_builtin_profile(which, out.as_mut_ptr(), 8) },
+            "profile {which}"
+        );
+    }
+    for format in [-1, 6, 99, c_int::MIN, c_int::MAX] {
+        assert_eq!(rz_format_carries(format), 0, "format {format}");
+        let mut err: *mut c_char = ptr::null_mut();
+        assert!(
+            !unsafe {
+                rz_doc_save_image(
+                    doc,
+                    ptr::null(),
+                    c.as_ptr(),
+                    format,
+                    90,
+                    true,
+                    false,
+                    ptr::null_mut(),
+                    &mut err,
+                )
+            },
+            "format {format}"
+        );
+        assert!(take_err_string(err).contains("unknown format value"));
+        assert!(!path.exists(), "a refused format writes no file");
     }
     unsafe { rz_doc_free(doc) };
 }

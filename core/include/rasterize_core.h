@@ -211,8 +211,9 @@ void rz_doc_free(RzDocument *doc);
  * more than 900000000 channel pixels in total (the budget the "Channels"
  * section below states, and the one rz_max_channels_at answers), or a layer
  * or channel PNG over 512 MiB is an error; layer and channel names longer
- * than 64 KiB are truncated on a UTF-8 character boundary. Layout
- * (little-endian): "RZDC", u32 version=5,
+ * than 64 KiB are truncated on a UTF-8 character boundary, and each of the
+ * four version-6 document blobs is capped at 16 MiB. Layout
+ * (little-endian): "RZDC", u32 version=6,
  * u32 canvas width, u32 canvas height, u32 layer count, then (version 4)
  * f32 global-light angle and f32 altitude in degrees; then per layer
  * bottom-to-top: u32 name byte length + UTF-8 name, i32 offset x, i32
@@ -232,12 +233,23 @@ void rz_doc_free(RzDocument *doc);
  * overlay red, u8 green, u8 blue, f32 overlay opacity, u8 color-indicates-
  * selected, and u32 PNG byte length + a PNG-encoded 8-bit GRAYSCALE (L8)
  * plane of exactly the canvas size (a channel is always canvas-sized, so its
- * dimensions are not stored twice). Version-1, -2, -3 and -4 files still
+ * dimensions are not stored twice). After the channel list comes the
+ * version-6 DOCUMENT TAIL (see "Colour management and metadata" below):
+ * f32 horizontal and f32 vertical print resolution in pixels per inch, then
+ * four optional blobs in this order — the ICC colour profile, the EXIF
+ * packet, the XMP packet and the IPTC packet — each written as u8 present
+ * and, when present, u32 byte length + that many RAW bytes. The blobs are
+ * stored verbatim and never interpreted; the ICC slot is written ABSENT
+ * when the document's profile is the built-in sRGB, and an absent slot
+ * reads back as that profile, so a blob-less version-6 file is a version-5
+ * file plus exactly 12 bytes. Version-1, -2, -3, -4 and -5 files still
  * load, missing fields taking their defaults: no mask and no metadata on any
  * layer (v1), clipped false (v1 and v2), no style on any layer and a
- * (120°, 30°) global light (v1–v3), and no channels (v1–v4). A style is read
- * leniently: a style from a newer build keeps the effects this build
- * knows. */
+ * (120°, 30°) global light (v1–v3), no channels (v1–v4), and a 72 × 72 ppi
+ * resolution, the built-in sRGB profile and no metadata packets (v1–v5). A
+ * style is read leniently: a style from a newer build keeps the effects this
+ * build knows; the resolution is sanitized rather than refused, exactly like
+ * the global light. */
 bool rz_doc_save_native(const RzDocument *doc, const char *path,
                         char **err_out);
 
@@ -1206,6 +1218,321 @@ RzDocument *rz_doc_set_global_light(const RzDocument *doc, float angle,
 /* The global light's components in degrees; 0.0 on NULL doc. */
 float rz_doc_global_light_angle(const RzDocument *doc);
 float rz_doc_global_light_altitude(const RzDocument *doc);
+
+/* ---- Colour management and metadata -------------------------------------
+ *
+ * A document carries three more pieces of state: an ICC COLOUR PROFILE (the
+ * space its pixel numbers belong to), the EXIF / XMP / IPTC PACKETS the file
+ * it came from carried, and a print RESOLUTION in pixels per inch. Every
+ * document op keeps all three; the profile, the packets and the resolution
+ * are what bumped the RZDC format to version 6. The one op that does not
+ * keep the resolution VERBATIM keeps it correct instead: a quarter turn
+ * swaps the two ppi axes, because a 300 x 150 ppi picture turned 90 degrees
+ * is a 150 x 300 ppi one. That holds for rz_doc_rotate90 and
+ * rz_doc_rotate270, and for the camera rotation rz_doc_open bakes into the
+ * pixels — the same turn, so the same swap.
+ *
+ * THE PROFILE IS NEVER ABSENT. A document with no embedded profile is
+ * assumed sRGB — which is what every reader does anyway, and what lets the
+ * display, the export and the transform share exactly one rule. So is a
+ * document whose file carried a profile that is not RGB, or one larger than
+ * the 16 MiB a document can carry (a PNG iCCP is zlib-compressed, so an
+ * inflated profile is bounded by nothing else): the profile is dropped
+ * rather than producing a document rz_doc_save_native would refuse to
+ * write. A profile is also stored at its own DECLARED size, so trailing
+ * padding is neither kept nor re-embedded. The library
+ * writes its own conformant ICC v2.1.0 blobs for sRGB IEC61966-2.1 and
+ * Display P3 (rz_builtin_profile), so an exported file always carries a
+ * profile another application can read.
+ *
+ * WHAT THE LIBRARY CAN CONVERT WITH. ICC v2 and v4 RGB matrix/TRC profiles —
+ * sRGB, Display P3, Adobe RGB (1998), ProPhoto, Rec. 2020 and the RGB
+ * profiles a camera embeds. For such a profile the PCS white is ALWAYS D50
+ * and the rXYZ/gXYZ/bXYZ tags are already D50-adapted; wtpt and chad are
+ * advisory and are used for nothing (macOS's own sRGB Profile.icc has
+ * D50-adapted columns, no chad at all and a wtpt holding the unadapted D65,
+ * so a reader that trusts wtpt gets sRGB wrong). rz_icc_inspect classifies
+ * raw bytes five ways, and each way means something different:
+ *
+ *   RZ_ICC_NOT_ICC            not a profile          — refused, never stored
+ *   RZ_ICC_NOT_RGB            Gray / CMYK / Lab      — refused, never stored
+ *   RZ_ICC_NOT_IMAGE_PROFILE  RGB numbers, but a     — refused, never stored:
+ *                             device-link, abstract    it describes a
+ *                             or named-colour class    transform or a colour
+ *                                                      list, not the space a
+ *                                                      picture's numbers live
+ *                                                      in (macOS's own
+ *                                                      WebSafeColors.icc),
+ *                                                      and CoreGraphics
+ *                                                      cannot convert out of
+ *                                                      one
+ *   RZ_ICC_RGB_UNCONVERTIBLE  RGB, but LUT-based     — KEPT as the document's
+ *                                                      profile: pixels are
+ *                                                      untouched, display is
+ *                                                      correct and an export
+ *                                                      re-embeds the original
+ *                                                      bytes; only convert
+ *                                                      refuses
+ *   RZ_ICC_RGB_MATRIX         RGB matrix/TRC         — full function
+ *
+ * ASSIGN IS NOT CONVERT. rz_doc_assign_profile REINTERPRETS — the pixels are
+ * untouched and the profile is replaced, so the numbers stay and the
+ * appearance changes. rz_doc_convert_to_profile TRANSFORMS every layer's
+ * pixels, so the appearance stays and the numbers change. Convert touches
+ * layer pixels only: layer masks, alpha channels and layer metadata are
+ * coverage and descriptions, not colour. Nor does it touch the colours
+ * inside a LAYER STYLE or a text layer's metadata, and that is not a limit:
+ * those are AUTHORED sRGB values — the same convention every #rrggbb this
+ * library is handed follows — and they reach the document's space where they
+ * are USED. A style's colours convert at composite time, so a style keeps
+ * its appearance across a convert, the stored JSON is never rewritten and
+ * the rendered-plane cache never has to be thrown away; a text layer's
+ * convert when the host re-renders it. rz_doc_open never adopts a working
+ * space — it reports what the file said, and the host calls
+ * rz_doc_adopt_working_space exactly once.
+ *
+ * THE PACKETS ARE OPAQUE. EXIF, XMP and IPTC are stored verbatim and never
+ * interpreted, exactly like a layer's metadata one level up, and are read
+ * and re-spliced for JPEG AND PNG ONLY — the two containers this library can
+ * also write into. (TIFF carries the profile alone; WebP carries the profile
+ * and the EXIF packet; BMP and GIF carry nothing.) EXIF is the raw TIFF
+ * stream with NO "Exif\0\0" prefix; XMP is
+ * the UTF-8 packet with no identifier; IPTC is the whole 8BIM image-resource
+ * run that follows "Photoshop 3.0\0", CONCATENATED across every APP13 that
+ * carries one (Photoshop splits a run larger than one segment, and a reader
+ * is meant to join them). A file whose ppi is stated twice is read from its
+ * EXIF pair, which Exif/DCF makes the authority, with the container's own
+ * density (the JFIF APP0, a PNG pHYs) as the fallback. A HEIC opened by the host contributes
+ * its profile and dpi but no packets, and a PSD contributes none of the
+ * three.
+ *
+ * TWO REWRITES HAPPEN ON EXPORT, both mandatory. (1) The EXIF block's IFD0
+ * Orientation is set to 1, because the camera rotation was already baked
+ * into the pixels at open time and a preserved 6 would double-rotate in
+ * every viewer; its resolution and dimension tags are brought into line with
+ * the document, and its next-IFD link is zeroed so the stale pre-edit
+ * thumbnail is unreferenced. Every edit is in place — an ABSENT tag is never
+ * inserted, because growing an IFD shifts every out-of-line datum and
+ * silently corrupts MakerNotes — and a packet whose IFD0 or Exif sub-IFD
+ * does not verify is dropped whole, as is one whose value offsets reach into
+ * an entry table, where one rewrite would overwrite another. Nothing PAST them is read: the link to
+ * IFD1 is cut anyway, so a dangling one (what a tool that strips a thumbnail
+ * without rewriting the link leaves behind) costs the thumbnail rather than
+ * every tag in the packet. (2) The 8BIM run loses resources 0x03ED (ResolutionInfo),
+ * 0x040F (ICC), 0x0422 (Exif) and 0x0424 (XMP), which would contradict what
+ * the save just wrote; every other resource survives byte-exactly. Both
+ * happen on WRITE, so the stored packets stay byte-exact.
+ *
+ * A blob the format cannot carry, one too large for its segment, or an 8BIM
+ * run that filters down to nothing is DROPPED AND REPORTED, never an error:
+ * a save must not fail because a source file had a fat profile.
+ * rz_format_carries answers what a format is able to carry;
+ * rz_doc_save_image reports what was actually written. */
+
+typedef enum {
+  RZ_PROFILE_SRGB = 0,
+  RZ_PROFILE_DISPLAY_P3 = 1,
+} RzBuiltinProfile;
+
+typedef enum {
+  RZ_METADATA_EXIF = 0,
+  RZ_METADATA_XMP = 1,
+  RZ_METADATA_IPTC = 2,
+} RzMetadataKind;
+
+/* rz_icc_inspect classifications. */
+#define RZ_ICC_NOT_ICC           0
+#define RZ_ICC_NOT_RGB           1
+#define RZ_ICC_RGB_UNCONVERTIBLE 2
+#define RZ_ICC_RGB_MATRIX        3
+#define RZ_ICC_NOT_IMAGE_PROFILE 4
+
+/* rz_doc_adopt_working_space outcomes. */
+#define RZ_ADOPT_UNCHANGED          0
+#define RZ_ADOPT_CONVERTED          1
+#define RZ_ADOPT_KEPT_UNCONVERTIBLE 2
+
+/* rz_format_carries / rz_doc_save_image bits. */
+#define RZ_CARRIES_PROFILE     1u
+#define RZ_CARRIES_EXIF        2u
+#define RZ_CARRIES_XMP         4u
+#define RZ_CARRIES_IPTC        8u
+#define RZ_CARRIES_RESOLUTION 16u
+
+/* --- the built-in profiles this build writes --- */
+
+/* Byte length of a built-in profile; 0 for a value outside
+ * RzBuiltinProfile. The bytes are identical on every call and every run. */
+size_t rz_builtin_profile_len(RzBuiltinProfile which);
+
+/* Copies a built-in profile into `out`, which the caller declares to be
+ * `len` bytes. The length is recomputed from the library's own and must
+ * match exactly; false on a NULL buffer, a length that disagrees, or a value
+ * outside RzBuiltinProfile. */
+bool rz_builtin_profile(RzBuiltinProfile which, uint8_t *out, size_t len);
+
+/* --- inspecting raw bytes, without a document --- */
+
+/* Classifies `bytes` as one of the RZ_ICC_* values and, when `name_out` is
+ * non-NULL, writes the profile's display name there as a heap string freed
+ * with rz_string_free (NULL for RZ_ICC_NOT_ICC). Ask this before assigning
+ * to learn WHY a profile would be refused. */
+int rz_icc_inspect(const uint8_t *bytes, size_t len, char **name_out);
+
+/* True when opening `path` would preserve whatever EXIF, XMP and IPTC the
+ * file holds: a JPEG, a PNG or a native .rz. False for every other container
+ * — a TIFF, WebP, GIF, BMP or PSD arrives as pixels and drops its capture
+ * data, which such a file really can carry — for a file that cannot be read,
+ * and for a NULL path. Ask it beside rz_doc_open, so a host can say the
+ * capture data was never read in rather than implying the file had none. */
+bool rz_path_metadata_walked(const char *path);
+
+/* True when both buffers are matrix/TRC RGB profiles describing the SAME
+ * colour space — the question rz_doc_convert_to_profile refuses on, asked
+ * without a document so a host can disable a Convert command instead of
+ * discovering the refusal as a bare NULL. Byte equality is NOT the same
+ * question: the "sRGB IEC61966-2.1" blob most cameras and Photoshop embed is
+ * 3144 bytes against this library's 2568, and the two describe one space.
+ * False on a NULL pointer, on bytes that are not an RGB ICC profile, and on
+ * a profile this library cannot model — those are other refusals, which
+ * rz_icc_inspect names. */
+bool rz_icc_describes_same_space(const uint8_t *a, size_t a_len,
+                                 const uint8_t *b, size_t b_len);
+
+/* --- the document's profile --- */
+
+/* Byte length of the document's ICC profile; 0 on a NULL doc. Never 0 for a
+ * live document — a document always has a profile. */
+size_t rz_doc_icc_profile_len(const RzDocument *doc);
+
+/* Copies the document's profile into `out`, which the caller declares to be
+ * `len` bytes; false on a NULL doc, a NULL buffer, or a `len` that
+ * disagrees with the library's own length. */
+bool rz_doc_icc_profile(const RzDocument *doc, uint8_t *out, size_t len);
+
+/* Heap copy of the profile's display name (free with rz_string_free); NULL
+ * on a NULL doc. */
+char *rz_doc_profile_name(const RzDocument *doc);
+
+/* True when the document's profile is an RGB matrix/TRC one, i.e. when
+ * rz_doc_convert_to_profile can convert FROM it. False on a NULL doc and for
+ * a LUT-based profile, which is kept and re-embedded all the same. */
+bool rz_doc_profile_is_convertible(const RzDocument *doc);
+
+/* --- pure ops --- */
+
+/* Reinterprets the document in the profile `bytes` describe: pixels
+ * unchanged, profile replaced. NULL — a REFUSAL, not an error — on a NULL
+ * doc, bytes that are not an RGB ICC profile, a payload over 16 MiB (the
+ * RZDC writer's blob cap, enforced here so a document can never hold a
+ * profile the format would refuse), or bytes identical to the current
+ * profile. `bytes` NULL is NOT a clear: pass the sRGB built-in to reset. */
+RzDocument *rz_doc_assign_profile(const RzDocument *doc, const uint8_t *bytes,
+                                  size_t len);
+
+/* Transforms every layer's pixels into the profile `bytes` describe and
+ * replaces the profile. Refuses (NULL) everything rz_doc_assign_profile
+ * refuses, plus a profile on either side that is not matrix/TRC and a target
+ * equivalent to the document's current space. */
+RzDocument *rz_doc_convert_to_profile(const RzDocument *doc,
+                                      const uint8_t *bytes, size_t len);
+
+/* Brings a freshly opened document into the host's working space, ONCE:
+ * converts when the two differ, does nothing when they agree, and keeps the
+ * document's own profile when it is one this library cannot convert from.
+ * `outcome_out` (may be NULL) receives one of the RZ_ADOPT_* values and is
+ * written EVEN WHEN the return is NULL, so a "nothing changed" adoption
+ * still says which case it was. Skip this for a .rz document: it carries its
+ * own profile. */
+RzDocument *rz_doc_adopt_working_space(const RzDocument *doc,
+                                       const uint8_t *bytes, size_t len,
+                                       int *outcome_out);
+
+/* --- metadata packets --- */
+
+/* Byte length of one packet; 0 on a NULL doc, an absent packet, or a value
+ * outside RzMetadataKind. */
+size_t rz_doc_metadata_len(const RzDocument *doc, RzMetadataKind kind);
+
+/* Copies one packet into `out`, which the caller declares to be `len`
+ * bytes; false on a NULL doc, a NULL buffer, an absent packet, a value
+ * outside RzMetadataKind, or a `len` that disagrees with the library's own
+ * length. */
+bool rz_doc_metadata(const RzDocument *doc, RzMetadataKind kind, uint8_t *out,
+                     size_t len);
+
+/* Stores one packet verbatim, or CLEARS it when `bytes` is NULL — a zero
+ * `len` with a non-NULL pointer stores an EMPTY packet, which the format
+ * distinguishes from an absent one. NULL on a NULL doc, a value outside
+ * RzMetadataKind, a payload over 16 MiB, or a value the document already
+ * carries. */
+RzDocument *rz_doc_set_metadata(const RzDocument *doc, RzMetadataKind kind,
+                                const uint8_t *bytes, size_t len);
+
+/* --- resolution --- */
+
+/* The document's print resolution in ppi; 0.0 on a NULL doc. */
+float rz_doc_resolution_x(const RzDocument *doc);
+float rz_doc_resolution_y(const RzDocument *doc);
+
+/* Pure setter for the print resolution. NULL on a NULL doc, a non-finite or
+ * non-positive component, or no change after sanitizing (clamped to
+ * [1, 30000] and quantized to four decimals like the global light, so a
+ * reported value echoed back is "no change"). PIXELS NEVER CHANGE: only the
+ * print size does. */
+RzDocument *rz_doc_set_resolution(const RzDocument *doc, float ppi_x,
+                                  float ppi_y);
+
+/* --- saving a flat file WITH the profile and the packets --- */
+
+/* Which of the profile, the three packets and the resolution `format` is
+ * able to carry, as RZ_CARRIES_* bits; 0 for a value outside RzFormat.
+ *
+ *   PNG   profile (iCCP), exif (eXIf), xmp (iTXt), resolution (pHYs)
+ *   JPEG  profile (APP2 x n), exif (APP1), xmp (APP1), iptc (APP13),
+ *         resolution (JFIF density, per axis)
+ *   TIFF  profile
+ *   WebP  profile, exif
+ *   BMP, GIF   nothing
+ *
+ * The resolution column is the format's OWN density slot, and a save may
+ * report RZ_CARRIES_RESOLUTION beyond it: a WebP has no such slot but states
+ * the ppi inside the EXIF chunk it does write, so rz_doc_save_image reports
+ * what the file ends up saying rather than what this table alone allows.
+ *
+ * Two known TIFF limits. (1) A TIFF written here carries its profile
+ * correctly — the tag is there and ColorSync and littleCMS both read it —
+ * but rz_doc_open does not recover it, because the decoder this library uses
+ * never surfaces that tag, so a TIFF round-tripped through this application
+ * comes back assuming sRGB. (2) The encoder exposes no resolution hook, so
+ * every TIFF carries its crate's default of XResolution 1/1, YResolution 1/1
+ * and ResolutionUnit 1 ("none"); applications that read that pair literally
+ * show a 1 dpi image. The bit is clear because nothing in the file states
+ * THIS document's ppi — but the file is not silent about resolution, and a
+ * host's export notice should say so rather than imply the tags are
+ * absent. */
+uint32_t rz_format_carries(RzFormat format);
+
+/* Encodes the document to `path` as a flat image, embedding its colour
+ * profile (unless `embed_profile` is false) and its EXIF, XMP and IPTC
+ * packets (unless `strip_metadata` is true), format permitting, plus its
+ * print resolution wherever the format has somewhere to put one.
+ * `strip_metadata` governs the three INHERITED packets only — the
+ * document's own resolution and profile are its state, not something it
+ * inherited from a file.
+ *
+ * `flat` MAY BE NULL, in which case the document is flattened here; when it
+ * is non-NULL its pixels are what gets encoded and the document supplies
+ * only the profile, the packets and the resolution. `flat` is a
+ * caller-supplied composite of THIS document; passing an unrelated image is
+ * a caller bug, and the canvas dimensions are not re-checked.
+ *
+ * `carried_out` (may be NULL) receives the RZ_CARRIES_* bits actually
+ * written. Atomic like rz_image_save; errors as in rz_image_save. */
+bool rz_doc_save_image(const RzDocument *doc, const RzImage *flat,
+                       const char *path, RzFormat format, uint8_t jpeg_quality,
+                       bool embed_profile, bool strip_metadata,
+                       uint32_t *carried_out, char **err_out);
 
 /* ---- Embedded agent (MCP) server ----------------------------------------
  *

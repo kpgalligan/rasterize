@@ -59,6 +59,47 @@ final class ImageCanvasView: NSView {
         }
     }
 
+    /// The colour space to DRAW the document in, pushed in by the editor
+    /// beside `image` — `RasterDocument.drawingSpace`, which is the
+    /// document's own space for every profile that can be a rendering
+    /// destination and sRGB for the LUT profiles that cannot (drawing into
+    /// one of those produces opaque black). The stroke overlay is built in
+    /// it and the clone snapshot is `image` itself, so for every profile but
+    /// that one the two agree and a cloned pixel round-trips unchanged (on a
+    /// LUT-profile document the clone converts into sRGB with everything
+    /// else painted there); the stroke colour is normalized
+    /// into it at mouse-down, so an authored swatch converts exactly once
+    /// and a swatch sampled from the document converts not at all. A profile
+    /// change makes the cached overlay wrong, so it is thrown away here the
+    /// same way a size change throws it away above.
+    var documentColorSpace: CGColorSpace = ColorProfile.sRGB {
+        didSet {
+            guard !CFEqual(documentColorSpace, oldValue) else { return }
+            documentNSColorSpace = NSColorSpace(cgColorSpace: documentColorSpace) ?? .sRGB
+            // MID-STROKE the overlay is still accumulating this stroke's
+            // geometry, exactly as it is for the `image` setter above — an
+            // agent's assign_profile lands like any other live edit — so
+            // freeing it here would make every later drag event return early
+            // and silently drop the rest of the stroke, a mask or Quick Mask
+            // stroke whole. The stroke finishes in the space it started in
+            // (its colour was latched at mouse-down, into that space), and
+            // `clearOverlay` throws the stale buffer away at stroke end.
+            overlayColorSpaceIsStale = true
+            if !strokeActive { clearOverlay() }
+        }
+    }
+
+    /// True once a profile change has made the overlay's colour space wrong
+    /// — set by `documentColorSpace`, acted on by `clearOverlay`, which is
+    /// the one place every stroke path finishes with the buffer.
+    private var overlayColorSpaceIsStale = false
+
+    /// `documentColorSpace` as an NSColorSpace, kept beside it so a stroke
+    /// normalizes its colour into the DOCUMENT's space once per mouse-down
+    /// instead of into sRGB: an authored swatch converts here, a sampled one
+    /// is already there and converts nowhere.
+    private var documentNSColorSpace: NSColorSpace = .sRGB
+
     /// The Subject tool's press-and-hold: the segmentation it caches and
     /// the outline currently under the pointer. Logic lives in
     /// SubjectSelection.swift; this view only points it at events.
@@ -519,14 +560,13 @@ final class ImageCanvasView: NSView {
         let data = UnsafeMutableRawPointer.allocate(
             byteCount: byteCount, alignment: MemoryLayout<UInt8>.alignment)
         data.initializeMemory(as: UInt8.self, repeating: 0, count: byteCount)
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-              let context = CGContext(
+        guard let context = CGContext(
                 data: data,
                 width: width,
                 height: height,
                 bitsPerComponent: 8,
                 bytesPerRow: width * 4,
-                space: colorSpace,
+                space: documentColorSpace,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else {
             data.deallocate()
@@ -541,12 +581,25 @@ final class ImageCanvasView: NSView {
         return context
     }
 
+    /// Empties the overlay for reuse — or throws it away outright when a
+    /// profile change arrived while it was in use, since its bytes are then
+    /// in the space the document has left. Every path that finishes with the
+    /// buffer (both stroke ends, the `image` setter) comes through here, so
+    /// the deferred teardown needs no second site.
     private func clearOverlay() {
+        if overlayColorSpaceIsStale {
+            destroyOverlay()
+            return
+        }
         guard let context = overlayContext else { return }
         context.clear(CGRect(x: 0, y: 0, width: overlayWidth, height: overlayHeight))
     }
 
     private func destroyOverlay() {
+        // The next context is built in whatever space the document has now,
+        // so the staleness goes with the buffer — every teardown path,
+        // including the `image` setter's size change, clears it here.
+        overlayColorSpaceIsStale = false
         overlayContext = nil
         overlayData?.deallocate()
         overlayData = nil
@@ -1641,7 +1694,7 @@ final class ImageCanvasView: NSView {
         // exposure lives in the op, not the stroke).
         let coverageWhite = onCoverage || tool == .dodge
         let base: NSColor = coverageWhite ? (tool == .eraser ? .black : .white) : paintColor
-        let color = (base.usingColorSpace(.sRGB) ?? base)
+        let color = (base.usingColorSpace(documentNSColorSpace) ?? base)
             .withAlphaComponent(onCoverage ? brushOpacity : 1)
         context.setStrokeColor(color.cgColor)
         context.setFillColor(color.cgColor)
@@ -1689,7 +1742,7 @@ final class ImageCanvasView: NSView {
             if onCoverage { strokeCoverageScale = brushOpacity }
             strokeSoftDab = SoftBrush.dab(
                 color: color.withAlphaComponent(strokeTip.flow),
-                diameter: brushSize, hardness: brushHardness)
+                diameter: brushSize, hardness: brushHardness, space: documentColorSpace)
         }
         strokeActive = true
         strokeLastPoint = point

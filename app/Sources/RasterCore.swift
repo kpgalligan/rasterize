@@ -120,23 +120,6 @@ final class RasterImage {
     func edgeDetected() -> RasterImage? { wrap(rz_image_edge_detect(ptr)) }
     func embossed() -> RasterImage? { wrap(rz_image_emboss(ptr)) }
 
-    /// Opens the frontmost pasteboard image as a RasterImage. The bitmap is
-    /// normalized to PNG and routed through the Rust core via a temp file so
-    /// the result behaves exactly like an opened file.
-    static func fromPasteboard(_ pasteboard: NSPasteboard = .general) -> RasterImage? {
-        guard let pasted = NSImage(pasteboard: pasteboard),
-              let tiff = pasted.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:])
-        else { return nil }
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(
-                "rasterize-clipboard-\(ProcessInfo.processInfo.globallyUniqueString).png")
-        guard (try? png.write(to: tempURL)) != nil else { return nil }
-        defer { try? FileManager.default.removeItem(at: tempURL) }
-        return try? RasterImage.open(url: tempURL)
-    }
-
     /// Composites a full-frame premultiplied RGBA8 overlay (top row first, no
     /// row padding) onto this image. `data` must point to width*height*4
     /// bytes; the dimensions must match this image exactly.
@@ -176,7 +159,14 @@ final class RasterImage {
     // pixel data behind a handle never changes, so this stays coherent, and
     // deliberately nothing is cached — a strong cache would cycle through the
     // provider's retain, and undo-stack handles would pin full-size CGImages.
-    func makeCGImage() -> CGImage? {
+    //
+    // `space` is the colour space to TAG the pixels with; NOTHING is
+    // converted here (the buffer is read in place, and converting would mean
+    // a copy per frame). Document pixels pass `doc.colorSpace`; coverage
+    // planes, mask thumbnails and deliberately-sRGB exits pass
+    // `ColorProfile.sRGB`. There is deliberately no default: a default is
+    // exactly the trap that leaves a new call site silently sRGB.
+    func makeCGImage(in space: CGColorSpace) -> CGImage? {
         let w = width
         let h = height
         guard w > 0, h > 0, let pixels = rz_image_pixels_rgba(ptr) else { return nil }
@@ -192,14 +182,13 @@ final class RasterImage {
             Unmanaged<RasterImage>.fromOpaque(info).release()
             return nil
         }
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         return CGImage(
             width: w,
             height: h,
             bitsPerComponent: 8,
             bitsPerPixel: 32,
             bytesPerRow: w * 4,
-            space: colorSpace,
+            space: space,
             bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
             provider: provider,
             decode: nil,
@@ -316,6 +305,18 @@ extension RzBlendMode {
 final class RasterDocument {
     let ptr: OpaquePointer
 
+    /// `iccProfile`'s memo: the outer optional is "not read yet", the inner
+    /// one the read's own answer. Guarded by `iccLock` — a handle is read
+    /// from the main thread and from `PreviewRenderer`'s queue, and while
+    /// the CORE is happy with that (its ops are pure reads), a Swift
+    /// property written from both is a data race.
+    private var cachedICCProfile: Data??
+
+    /// Serializes the memo above. One shared lock rather than one per
+    /// document: it is held for a pointer copy, and the contended case is
+    /// two threads asking about the same document anyway.
+    private static let iccLock = NSLock()
+
     init(owning pointer: OpaquePointer) {
         self.ptr = pointer
     }
@@ -331,6 +332,15 @@ final class RasterDocument {
                 message: takeErrorMessage(err, fallback: "Could not open \(url.lastPathComponent)."))
         }
         return RasterDocument(owning: handle)
+    }
+
+    /// True when opening `url` would preserve whatever EXIF, XMP and IPTC
+    /// the file holds: a JPEG, a PNG or a native `.rz`. False for every
+    /// other container — a TIFF, WebP, GIF, BMP or PSD arrives as pixels and
+    /// drops its capture data, which such a file really can carry — and for
+    /// a file that cannot be read.
+    static func metadataWalked(at url: URL) -> Bool {
+        rz_path_metadata_walked(url.path)
     }
 
     /// Wraps an image as a single-"Background"-layer document.
@@ -1201,6 +1211,269 @@ final class RasterDocument {
                 message: takeErrorMessage(err, fallback: "Could not save \(url.lastPathComponent)."))
         }
     }
+
+    // MARK: - Colour management and metadata
+
+    /// A variable-length blob read STRAIGHT into a Data: ask the core its
+    /// length, allocate exactly that, fill it. The `len` the core takes back
+    /// is a capacity check, never the authority — the ONE shape every blob
+    /// getter below uses.
+    private static func readBlob(
+        _ length: () -> Int, _ fill: (UnsafeMutablePointer<UInt8>, Int) -> Bool
+    ) -> Data? {
+        let len = length()
+        guard len > 0 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: len)
+        let ok = bytes.withUnsafeMutableBufferPointer { buffer -> Bool in
+            guard let base = buffer.baseAddress else { return false }
+            return fill(base, len)
+        }
+        return ok ? Data(bytes) : nil
+    }
+
+    /// The document's ICC profile bytes — what a CGColorSpace is built from
+    /// and what an export embeds. A document ALWAYS has a profile, so nil
+    /// means only that the read failed.
+    ///
+    /// Read once and kept: a handle's pixels and profile never change (every
+    /// core op returns a NEW handle), while `colorSpace` is asked on every
+    /// redraw and once per layer and channel row, and each ask was copying
+    /// the whole profile out of the core and hashing it. Cheap for the usual
+    /// half-kilobyte profile, but a document can legitimately carry
+    /// megabytes of one. Safe unlocked on the same terms as `flattened()` —
+    /// one queue at a time touches a handle.
+    var iccProfile: Data? {
+        RasterDocument.iccLock.lock()
+        defer { RasterDocument.iccLock.unlock() }
+        if let cached = cachedICCProfile { return cached }
+        let read = RasterDocument.readBlob({ rz_doc_icc_profile_len(ptr) }) { base, len in
+            rz_doc_icc_profile(ptr, base, len)
+        }
+        cachedICCProfile = .some(read)
+        return read
+    }
+
+    /// The profile's display name, for the status bar and the sheets.
+    var profileName: String {
+        guard let name = rz_doc_profile_name(ptr) else { return "" }
+        defer { rz_string_free(name) }
+        return String(cString: name)
+    }
+
+    /// True when the core can convert this document to another space. False
+    /// for a LUT-based profile, which is kept and re-embedded all the same —
+    /// only Convert to Profile refuses.
+    var profileIsConvertible: Bool { rz_doc_profile_is_convertible(ptr) }
+
+    /// The print resolution in pixels per inch, per axis. Pixels never
+    /// change with it — only the print size does.
+    var resolution: (x: Double, y: Double) {
+        (Double(rz_doc_resolution_x(ptr)), Double(rz_doc_resolution_y(ptr)))
+    }
+
+    /// One preserved metadata packet, verbatim, or nil when the document
+    /// carries none of that kind.
+    func metadata(_ kind: RzMetadataKind) -> Data? {
+        RasterDocument.readBlob({ rz_doc_metadata_len(ptr, kind) }) { base, len in
+            rz_doc_metadata(ptr, kind, base, len)
+        }
+    }
+
+    /// REINTERPRETS the document in `bytes`: pixels unchanged, profile
+    /// replaced. nil — a refusal, not an error — for bytes that are not an
+    /// RGB ICC profile, a payload over 16 MiB, or the profile the document
+    /// already carries. Ask `RasterProfile.inspect` first to say why.
+    func assigningProfile(_ bytes: Data) -> RasterDocument? {
+        bytes.withUnsafeBytes { raw in
+            wrap(rz_doc_assign_profile(ptr, raw.bindMemory(to: UInt8.self).baseAddress, raw.count))
+        }
+    }
+
+    /// TRANSFORMS every layer's pixels into `bytes` and replaces the
+    /// profile, so the picture looks the same and its numbers change. nil
+    /// additionally when either profile is not a matrix/TRC one or the two
+    /// describe the same space.
+    func convertingToProfile(_ bytes: Data) -> RasterDocument? {
+        bytes.withUnsafeBytes { raw in
+            wrap(
+                rz_doc_convert_to_profile(
+                    ptr, raw.bindMemory(to: UInt8.self).baseAddress, raw.count))
+        }
+    }
+
+    /// Brings a freshly opened document into the working space, ONCE. The
+    /// outcome is reported even when no document comes back, so a host can
+    /// tell "already in the working space" from "kept, could not be
+    /// converted from". Skip this for a `.rz`: it carries its own profile.
+    func adoptingWorkingSpace(
+        _ bytes: Data
+    ) -> (document: RasterDocument?, outcome: RasterAdoptOutcome) {
+        var raw: Int32 = 0
+        let next = bytes.withUnsafeBytes { buffer in
+            wrap(
+                rz_doc_adopt_working_space(
+                    ptr, buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count, &raw))
+        }
+        return (next, RasterAdoptOutcome(rawValue: raw) ?? .unchanged)
+    }
+
+    /// Stores one metadata packet verbatim, or CLEARS it with nil. Refuses a
+    /// payload over 16 MiB and a value the document already carries.
+    func settingMetadata(_ kind: RzMetadataKind, _ bytes: Data?) -> RasterDocument? {
+        guard let bytes = bytes else { return wrap(rz_doc_set_metadata(ptr, kind, nil, 0)) }
+        return bytes.withUnsafeBytes { raw in
+            wrap(
+                rz_doc_set_metadata(
+                    ptr, kind, raw.bindMemory(to: UInt8.self).baseAddress, raw.count))
+        }
+    }
+
+    /// Sets the print resolution. nil on a non-finite or non-positive
+    /// component, or when nothing changes after sanitizing (clamped to
+    /// [1, 30000] and quantized to four decimals like the global light, so a
+    /// reported value echoed back registers no edit).
+    func settingResolution(x: Double, y: Double) -> RasterDocument? {
+        guard x.isFinite, y.isFinite else { return nil }
+        return wrap(rz_doc_set_resolution(ptr, Float(x), Float(y)))
+    }
+
+    /// Writes the document as a flat image with its colour profile and its
+    /// metadata packets, format permitting, and reports what was actually
+    /// carried.
+    ///
+    /// `flattened` is THIS document's warm composite (the host's
+    /// `projection`); nil makes the core flatten, which re-composites the
+    /// whole layer stack. Passing an unrelated image is a caller bug — the
+    /// canvas dimensions are not re-checked.
+    func saveImage(
+        _ flattened: RasterImage?, to url: URL, format: RzFormat, jpegQuality: Int,
+        embedProfile: Bool, stripMetadata: Bool
+    ) throws -> RasterSaveReport {
+        var err: UnsafeMutablePointer<CChar>? = nil
+        var carried: UInt32 = 0
+        let quality = UInt8(min(max(jpegQuality, 1), 100))
+        guard
+            rz_doc_save_image(
+                ptr, flattened?.ptr, url.path, format, quality, embedProfile, stripMetadata,
+                &carried, &err)
+        else {
+            throw RasterCoreError(
+                message: takeErrorMessage(err, fallback: "Could not save \(url.lastPathComponent)."))
+        }
+        return RasterSaveReport(carried: carried)
+    }
+}
+
+// MARK: - Colour profiles as values
+
+/// One of the two profiles this build writes for itself.
+enum RasterBuiltinProfile: Int32 {
+    case sRGB = 0
+    case displayP3 = 1
+
+    var rz: RzBuiltinProfile { self == .sRGB ? RZ_PROFILE_SRGB : RZ_PROFILE_DISPLAY_P3 }
+}
+
+/// What raw bytes turn out to be. Each case drives different copy and a
+/// different set of enabled commands, which is why the core answers five
+/// ways rather than "a profile or an error".
+enum RasterProfileKind: Int32 {
+    /// Not an ICC profile at all — refused, never stored.
+    case notICC = 0
+    /// An ICC profile whose space is not RGB (Gray, CMYK, Lab) — refused.
+    case notRGB = 1
+    /// An RGB profile the core cannot convert with (a LUT-based one). It IS
+    /// stored: pixels are untouched, display is correct and an export
+    /// re-embeds it; only Convert to Profile refuses.
+    case rgbUnconvertible = 2
+    /// An RGB matrix/TRC profile: full function.
+    case rgbMatrix = 3
+    /// RGB numbers in a profile whose CLASS is a device link, an abstract
+    /// transform or a named-colour list (macOS's own `WebSafeColors.icc`) —
+    /// refused. It describes a transform, not the space a picture's numbers
+    /// live in, and CoreGraphics cannot convert OUT of one, so a document
+    /// tagged with it drew as an empty image everywhere.
+    case notImageProfile = 4
+
+    /// True for the two the core will store on a document.
+    var isStorable: Bool { self == .rgbUnconvertible || self == .rgbMatrix }
+}
+
+/// What an open did to a document's colour. Describes THE OPEN and is not
+/// updated by a later Assign or Convert.
+enum RasterAdoptOutcome: Int32 {
+    case unchanged = 0
+    case converted = 1
+    case keptUnconvertible = 2
+}
+
+/// What raw profile bytes are, and what to call them.
+struct RasterProfileInfo {
+    let kind: RasterProfileKind
+    /// Empty only for `notICC`, which has no profile to name.
+    let name: String
+}
+
+/// Which of the profile, the packets and the resolution a save actually
+/// wrote — the core's answer, not a guess.
+struct RasterSaveReport {
+    let carried: UInt32
+
+    func carries(_ bit: UInt32) -> Bool { carried & bit != 0 }
+}
+
+/// The profile surface that needs no document: the built-in blobs, the
+/// five-way inspection a refusal is explained with, and the per-format
+/// capability table.
+enum RasterProfile {
+    /// The bytes of one of the two profiles this build writes. Identical on
+    /// every call and every run.
+    static func builtin(_ which: RasterBuiltinProfile) -> Data {
+        let len = rz_builtin_profile_len(which.rz)
+        guard len > 0 else { return Data() }
+        var bytes = [UInt8](repeating: 0, count: len)
+        let ok = bytes.withUnsafeMutableBufferPointer { buffer -> Bool in
+            guard let base = buffer.baseAddress else { return false }
+            return rz_builtin_profile(which.rz, base, len)
+        }
+        return ok ? Data(bytes) : Data()
+    }
+
+    /// Classifies raw bytes and names them. Ask this BEFORE assigning, so a
+    /// refusal can say why instead of just beeping.
+    static func inspect(_ bytes: Data) -> RasterProfileInfo {
+        var name: UnsafeMutablePointer<CChar>? = nil
+        let raw = bytes.withUnsafeBytes { buffer in
+            rz_icc_inspect(buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count, &name)
+        }
+        defer { if let name = name { rz_string_free(name) } }
+        return RasterProfileInfo(
+            kind: RasterProfileKind(rawValue: raw) ?? .notICC,
+            name: name.map { String(cString: $0) } ?? "")
+    }
+
+    /// True when two profiles describe the SAME colour space — the question
+    /// Convert refuses on, asked so a sheet can disable Apply instead of
+    /// letting the user discover the refusal as a beep.
+    ///
+    /// NOT byte equality, which is a different and much narrower question:
+    /// the "sRGB IEC61966-2.1" blob most cameras and Photoshop embed is
+    /// 3144 bytes against the built-in's 2568 and describes one space. False
+    /// when either side is not an RGB profile or is a LUT-based one —
+    /// separate refusals, which `inspect` names.
+    static func describesSameSpace(_ a: Data, _ b: Data) -> Bool {
+        a.withUnsafeBytes { first in
+            b.withUnsafeBytes { second in
+                rz_icc_describes_same_space(
+                    first.bindMemory(to: UInt8.self).baseAddress, first.count,
+                    second.bindMemory(to: UInt8.self).baseAddress, second.count)
+            }
+        }
+    }
+
+    /// Which `RZ_CARRIES_*` bits `format` is able to write, so the UI can
+    /// disable a checkbox for a reason rather than silently dropping data.
+    static func carried(by format: RzFormat) -> UInt32 { rz_format_carries(format) }
 }
 
 extension RasterImage {

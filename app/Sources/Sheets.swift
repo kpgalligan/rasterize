@@ -150,141 +150,6 @@ func sheetApplyButton(target: AnyObject, action: Selector) -> NSButton {
     StickerButton(title: "Apply", style: .primary, target: target, action: action)
 }
 
-// MARK: - ResizeSheetController
-
-final class ResizeSheetController: NSViewController, NSTextFieldDelegate {
-    private let document: ImageDocument
-    private let originalWidth: Int
-    private let originalHeight: Int
-
-    private let widthField = NSTextField(string: "")
-    private let heightField = NSTextField(string: "")
-    private let lockCheckbox = NSButton(
-        checkboxWithTitle: "Lock aspect ratio", target: nil, action: nil)
-    private let filterPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-
-    private static let filters: [(title: String, value: RzResizeFilter)] = [
-        ("Nearest", RZ_FILTER_NEAREST),
-        ("Bilinear", RZ_FILTER_BILINEAR),
-        ("Catmull-Rom", RZ_FILTER_CATMULL_ROM),
-        ("Lanczos3", RZ_FILTER_LANCZOS3),
-    ]
-
-    init(document: ImageDocument) {
-        self.document = document
-        self.originalWidth = document.doc?.width ?? 1
-        self.originalHeight = document.doc?.height ?? 1
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("ResizeSheetController does not support NSCoder")
-    }
-
-    override func loadView() {
-        for field in [widthField, heightField] {
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .none
-            formatter.allowsFloats = false
-            formatter.minimum = 1
-            formatter.maximum = 20000
-            field.formatter = formatter
-            field.delegate = self
-            field.widthAnchor.constraint(equalToConstant: 90).isActive = true
-            DSField.style(field)
-        }
-        widthField.integerValue = originalWidth
-        heightField.integerValue = originalHeight
-        lockCheckbox.state = .on
-
-        filterPopup.addItems(withTitles: Self.filters.map { $0.title })
-        filterPopup.selectItem(at: Self.filters.count - 1) // Lanczos3
-        filterPopup.font = DS.sans(13)
-
-        let currentLabel = fieldLabel("\(originalWidth) × \(originalHeight) px")
-        currentLabel.font = DS.mono(13)
-        currentLabel.textColor = DS.textMuted
-
-        let grid = NSGridView(views: [
-            [fieldLabel("Current size:"), currentLabel],
-            [fieldLabel("Width:"), widthField],
-            [fieldLabel("Height:"), heightField],
-            [NSGridCell.emptyContentView, lockCheckbox],
-            [fieldLabel("Filter:"), filterPopup],
-        ])
-        grid.rowSpacing = 10
-        grid.columnSpacing = 12
-        grid.column(at: 0).xPlacement = .trailing
-        grid.column(at: 0).width = 106
-
-        let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
-        let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
-        view = makeSheetView(
-            title: "Image size", content: grid,
-            buttonRow: makeButtonRow(
-                cancel: cancelButton, apply: applyButton,
-                leading: [sheetFootnote("max 100 MP")]))
-    }
-
-    func controlTextDidChange(_ obj: Notification) {
-        guard lockCheckbox.state == .on,
-              let field = obj.object as? NSTextField,
-              originalWidth > 0, originalHeight > 0
-        else { return }
-        let aspect = Double(originalHeight) / Double(originalWidth)
-        if field === widthField {
-            let w = widthField.integerValue
-            if w > 0 {
-                heightField.integerValue = max(1, Int((Double(w) * aspect).rounded()))
-            }
-        } else if field === heightField {
-            let h = heightField.integerValue
-            if h > 0 {
-                widthField.integerValue = max(1, Int((Double(h) / aspect).rounded()))
-            }
-        }
-    }
-
-    @objc private func applyClicked(_ sender: Any?) {
-        let w = widthField.integerValue
-        let h = heightField.integerValue
-        let index = max(0, min(filterPopup.indexOfSelectedItem, Self.filters.count - 1))
-        let filter = Self.filters[index].value
-        guard w >= 1, h >= 1 else {
-            NSSound.beep()
-            return
-        }
-        guard w * h <= RasterImage.maxResizePixels else {
-            let alert = NSAlert()
-            alert.messageText = "Size Too Large"
-            alert.informativeText =
-                "The resized image cannot exceed 100 megapixels (width × height ≤ 100,000,000)."
-            if let window = view.window {
-                alert.beginSheetModal(for: window)
-            } else {
-                alert.runModal()
-            }
-            return
-        }
-        // The core refuses a resize that would push the channel list past the
-        // .rz pixel budget; say which channels and which budget (ChannelBudget)
-        // instead of letting applyEdit beep.
-        if let reason = document.doc?.channelBudgetRefusal(width: w, height: h) {
-            presentChannelBudgetAlert(reason)
-            return
-        }
-        dismiss(self)
-        document.applyEdit("Image Size") {
-            $0.applyingDocumentGeometry(.resize(width: w, height: h, filter: filter))
-        }
-    }
-
-    @objc private func cancelClicked(_ sender: Any?) {
-        dismiss(self)
-    }
-}
-
 // MARK: - CanvasSizeSheetController
 
 /// The 3x3 anchor grid from Photoshop's Canvas Size dialog: the selected
@@ -590,7 +455,7 @@ final class AdjustSheetController: NSViewController {
                     brightness: brightness, contrast: contrast, saturation: saturation),
                 let previewDoc = baseDoc.withLayerPixels(idx, filtered)
             else { return nil }
-            return previewDoc.flattened()?.makeCGImage()
+            return previewDoc.flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 
@@ -709,7 +574,7 @@ final class BlurSheetController: NSViewController {
             guard let filtered = baseLayer.blurred(sigma: sigma),
                   let previewDoc = baseDoc.withLayerPixels(idx, filtered)
             else { return nil }
-            return previewDoc.flattened()?.makeCGImage()
+            return previewDoc.flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 
@@ -1067,7 +932,7 @@ final class SliderSheetController: NSViewController {
             guard let filtered = compute(baseLayer, values),
                   let previewDoc = baseDoc.withLayerPixels(idx, filtered)
             else { return nil }
-            return previewDoc.flattened()?.makeCGImage()
+            return previewDoc.flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 
@@ -1404,7 +1269,7 @@ final class AdjustmentLayerSheetController: NSViewController {
             case .edit(let idx, _):
                 previewDoc = baseDoc.withLayerMeta(idx, meta)
             }
-            return previewDoc?.flattened()?.makeCGImage()
+            return previewDoc?.flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 
@@ -1632,7 +1497,7 @@ final class CurvesAdjustmentSheetController: NSViewController {
             case .edit(let idx, _):
                 previewDoc = baseDoc.withLayerMeta(idx, meta)
             }
-            return previewDoc?.flattened()?.makeCGImage()
+            return previewDoc?.flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 

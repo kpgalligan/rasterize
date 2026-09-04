@@ -94,7 +94,8 @@ extension EditorViewController {
         // glyphs ghost behind every edit to the string. An already-hidden
         // layer has nothing to hide: the pure op returns nil and the session
         // runs over the unmodified canvas, which is correct.
-        canvas.previewImage = doc.withLayerVisible(idx, false)?.flattened()?.makeCGImage()
+        canvas.previewImage = doc.withLayerVisible(idx, false)?.flattened()?
+            .makeCGImage(in: doc.colorSpace)
         canvas.beginTextSession(
             at: anchor, width: width, string: payload.string, editingLayer: idx,
             selectAll: selectAll)

@@ -194,7 +194,7 @@ struct PlanePreview {
     func preview(_ op: (RasterImage) -> RasterImage?) -> CGImage? {
         guard let result = op(base) else { return nil }
         guard let placement = placement else {
-            return result.planeImage(RZ_PLANE_LUMA, maxSide: 0)?.makeCGImage()
+            return result.planeImage(RZ_PLANE_LUMA, maxSide: 0)?.makeCGImage(in: ColorProfile.sRGB)
         }
         // A layer-space result is expanded onto the canvas to be DRAWN: the
         // canvas can only show canvas pixels, and 0 outside the layer's rect

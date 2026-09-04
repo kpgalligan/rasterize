@@ -214,7 +214,9 @@ final class ApplyImageSheetController: NSViewController {
             let result = ChannelMath.applyImage(baseDoc, parameters) ?? baseDoc
             switch parameters.target {
             case .layer, .mask:
-                return result.flattened()?.makeCGImage()
+                // The composite is document pixels — the document's space.
+                // The two plane arms below stay grey: coverage, not colour.
+                return result.flattened()?.makeCGImage(in: result.colorSpace)
             case .plane(let plane):
                 guard let bytes = result.layerPlane(parameters.targetLayer, plane.rz) else {
                     return nil

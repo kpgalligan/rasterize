@@ -323,7 +323,11 @@ final class LayerStyleSheetController: NSViewController {
             let styled = (try? previous.withLayerStylePayload(idx, style)) ?? previous
             let lit = styled.withGlobalLight(light) ?? styled
             chain.last = lit
-            return lit.flattened()?.makeCGImage()
+            // The styled composite is document pixels: tagged with that
+            // document's own space so the preview and the canvas behind it
+            // agree. `lit` is derived from `baseDoc`, so it carries the
+            // same profile.
+            return lit.flattened()?.makeCGImage(in: lit.colorSpace)
         }
     }
 

@@ -245,10 +245,16 @@ enum ShapeLayer {
     /// only. The stroke width is a SOURCE-space width, so a scaling map
     /// scales it — exactly what the re-edit overlay previews.
     ///
+    /// `space` is the space the fill and stroke colours land in — the
+    /// DOCUMENT's, so an authored shape colour is converted into the
+    /// document's numbers exactly once, by CoreGraphics, here.
+    ///
     /// nil for a payload `decode` would refuse (degenerate size for the kind,
     /// nothing visible to paint — a stroke of width 0 counts as nothing), a
     /// non-finite anchor, or a raster beyond the core's pixel cap.
-    static func render(_ payload: ShapeLayerPayload, anchor: CGPoint) -> DescribedRaster? {
+    static func render(
+        _ payload: ShapeLayerPayload, anchor: CGPoint, space: CGColorSpace
+    ) -> DescribedRaster? {
         guard ShapeLayerPayload.kinds.contains(payload.kind),
               payload.w.isFinite, payload.w >= 0, payload.w <= 1e7,
               payload.h.isFinite, payload.h >= 0, payload.h <= 1e7,
@@ -273,7 +279,9 @@ enum ShapeLayer {
         guard let rect = payload.transform.rasterRect(of: sourceRect(payload), fraction: frac)
         else { return nil }
 
-        let pixels = Bitmap.renderStraightRGBA(width: rect.width, height: rect.height) { context in
+        let pixels = Bitmap.renderStraightRGBA(
+            width: rect.width, height: rect.height, space: space
+        ) { context in
             // Source space → raster: the anchor's fraction, less the rect's
             // origin (relative to the anchor's whole part), after the map.
             context.translateBy(

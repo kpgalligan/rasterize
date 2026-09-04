@@ -176,7 +176,13 @@ extension EditorViewController {
             // The canvas draws its own projection; only washes come from here.
             base = nil
         case .plane(let plane):
-            base = document.projection?.planeImage(plane.rz, maxSide: 0)?.makeCGImage()
+            // A colour plane is document channel values replicated into
+            // R=G=B, so it is tagged with the document's space — the same
+            // argument the live tick in `channelDisplayDidChange` passes.
+            // The two draw the same thing, and a disagreement would flicker
+            // the canvas between spaces mid-drag.
+            base = document.projection?.planeImage(plane.rz, maxSide: 0)?
+                .makeCGImage(in: doc.colorSpace)
         case .channel(let index):
             base = doc.channelPlane(index).flatMap {
                 CanvasSelection.grayImage($0, doc.width, doc.height)
@@ -265,8 +271,11 @@ extension EditorViewController {
             refreshChannelDisplay()
             return
         }
+        // The document's space, in lockstep with `refreshChannelDisplay`'s
+        // `.plane` arm: the live tick redraws the very image that arm built.
         canvas.channelDisplay = ChannelDisplay(
-            base: document?.projection?.planeImage(plane.rz, maxSide: 0)?.makeCGImage(),
+            base: document?.projection?.planeImage(plane.rz, maxSide: 0)?
+                .makeCGImage(in: document?.colorSpace ?? ColorProfile.sRGB),
             baseKind: .plane(plane), replacesComposite: true, overlays: display.overlays)
     }
 

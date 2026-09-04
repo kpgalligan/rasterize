@@ -449,7 +449,17 @@ enum LivePhoto {
     /// frame sheet can preview on PreviewRenderer's queue. nil once the
     /// source files are gone, for a non-finite anchor, or a raster beyond
     /// the core's pixel cap.
-    static func render(_ payload: LivePhotoPayload, anchor: CGPoint) -> DescribedRaster? {
+    ///
+    /// `space` is the space the frame's pixels land in. A frame comes out of
+    /// an AVFoundation video track: the still's ICC is not what the frame
+    /// carries and there is no per-frame profile to preserve, so the honest
+    /// label for a CG-converted frame is whatever space we converted into.
+    /// A re-render inside a document passes that document's space; the OPEN
+    /// path passes the working space and assigns it (see
+    /// `RasterDocument.from(livePhoto:name:space:profile:)`).
+    static func render(
+        _ payload: LivePhotoPayload, anchor: CGPoint, space: CGColorSpace
+    ) -> DescribedRaster? {
         guard anchor.x.isFinite, anchor.y.isFinite, abs(anchor.x) < 1e7, abs(anchor.y) < 1e7,
               payload.width > 0, payload.height > 0,
               let image = frameImage(payload), image.width > 0, image.height > 0
@@ -466,7 +476,9 @@ enum LivePhoto {
             x: (width - drawWidth) / 2, y: (height - drawHeight) / 2,
             width: drawWidth, height: drawHeight)
 
-        let pixels = Bitmap.renderStraightRGBA(width: rect.width, height: rect.height) { context in
+        let pixels = Bitmap.renderStraightRGBA(
+            width: rect.width, height: rect.height, space: space
+        ) { context in
             // Source space → raster: the anchor's fraction, less the rect's
             // origin (relative to the anchor's whole part), after the map.
             context.translateBy(
@@ -547,14 +559,28 @@ extension RasterDocument {
     /// a Live Photo, where the canvas takes the photo's own size (the still
     /// at the origin under the identity: a `width × height` raster at
     /// offset 0).
-    static func from(livePhoto payload: LivePhotoPayload, name: String) -> RasterDocument? {
-        guard let raster = LivePhoto.render(payload, anchor: .zero),
+    ///
+    /// The frame is decoded into `space` and the document is labelled with
+    /// `profile`, the ICC bytes of that same space: a video frame carries no
+    /// profile of its own to preserve, so the space we converted into IS the
+    /// truth about these numbers. Callers pass the WORKING space, which
+    /// makes the host's uniform `adoptWorkingSpace()` a natural no-op rather
+    /// than an exemption in the ladder — the frames are converted once, by
+    /// CoreGraphics, and never again.
+    static func from(
+        livePhoto payload: LivePhotoPayload, name: String, space: CGColorSpace, profile: Data
+    ) -> RasterDocument? {
+        guard let raster = LivePhoto.render(payload, anchor: .zero, space: space),
               let image = RasterImage.from(
                 rgba: raster.pixels, width: raster.width, height: raster.height),
               let doc = RasterDocument.from(image: image),
-              let named = doc.withLayerName(0, name)
+              let named = doc.withLayerName(0, name),
+              let described = named.withLivePhotoPayload(0, payload)
         else { return nil }
-        return named.withLivePhotoPayload(0, payload)
+        // assigningProfile refuses a profile the document already carries,
+        // which is exactly the sRGB working space against a fresh
+        // document's default — a refusal here means "already correct".
+        return described.assigningProfile(profile) ?? described
     }
 
     /// Inserts `payload`'s frame as a new layer above `idx` (anchored at

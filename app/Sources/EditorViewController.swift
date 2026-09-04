@@ -164,7 +164,11 @@ final class EditorViewController: NSViewController {
 
         if let document = document, let doc = document.doc {
             canvas.frame = NSRect(origin: .zero, size: doc.canvasSize)
-            canvas.image = document.projection?.makeCGImage()
+            // The space FIRST: the overlay a stroke paints into is built
+            // lazily from it, and a stale one would round-trip the document's
+            // pixels through the wrong space.
+            canvas.documentColorSpace = doc.drawingSpace
+            canvas.image = document.projection?.makeCGImage(in: doc.colorSpace)
         }
         canvas.onSelectionChange = { [weak self] _ in self?.updateStatus() }
         canvas.onStrokeBegin = { [weak self] in
@@ -848,17 +852,18 @@ final class EditorViewController: NSViewController {
 
     // MARK: - Wand, fill, gradient actions
 
-    /// sRGB bytes of a color (straight alpha). Internal, like the panels
-    /// above: EditorViewController+PlanePaint builds a plane fill's gray
-    /// with it.
+    /// The DOCUMENT's bytes of a color (straight alpha): an AUTHORED colour
+    /// converts into the document's space exactly once, here, and a colour
+    /// SAMPLED from the document is already in that space and passes through
+    /// untouched — which is what makes Fill, Gradient and Plane Paint agree
+    /// with the Brush, and the eyedropper round trip exact (ColorProfile).
+    /// Internal, like the panels above: EditorViewController+PlanePaint
+    /// builds a plane fill's gray with it.
     func colorBytes(_ color: NSColor) -> [UInt8] {
-        let c = color.usingColorSpace(.sRGB) ?? .black
-        return [
-            UInt8((c.redComponent * 255).rounded()),
-            UInt8((c.greenComponent * 255).rounded()),
-            UInt8((c.blueComponent * 255).rounded()),
-            UInt8((c.alphaComponent * 255).rounded()),
-        ]
+        // The conversion itself is `ColorProfile.bytes`, shared with the
+        // agent's `colorRGBA`, so the tools and their MCP mirrors cannot
+        // drift. Opaque black is the same refusal the old `?? .black` gave.
+        ColorProfile.bytes(color, in: document?.nsColorSpace ?? .sRGB) ?? [0, 0, 0, 255]
     }
 
     private func wandClicked(_ point: CGPoint, mode: SelectionCombineMode) {
@@ -944,9 +949,16 @@ final class EditorViewController: NSViewController {
         let sample = (
             r: UInt8(sum.r / count), g: UInt8(sum.g / count),
             b: UInt8(sum.b / count), a: UInt8(sum.a / count))
+        // The pixel's numbers are the DOCUMENT's, so the swatch is built in
+        // the document's space and converted nowhere: the hex readout reports
+        // what the pixel actually holds, and painting it back is a no-op.
         setPaintColor(NSColor(
-            srgbRed: CGFloat(sample.r) / 255, green: CGFloat(sample.g) / 255,
-            blue: CGFloat(sample.b) / 255, alpha: CGFloat(sample.a) / 255))
+            colorSpace: document.nsColorSpace,
+            components: [
+                CGFloat(sample.r) / 255, CGFloat(sample.g) / 255,
+                CGFloat(sample.b) / 255, CGFloat(sample.a) / 255,
+            ],
+            count: 4))
         lastSampleColor = paintColor
         lastSampleText = RasterImage.hexString(sample)
         if options.copyOnPick {
@@ -1069,7 +1081,8 @@ final class EditorViewController: NSViewController {
             sourceRect: rect,
             // A hidden layer still transforms; there are simply no pixels to
             // preview, only the box.
-            layerImage: info.visible ? doc.layerImage(idx)?.makeCGImage() : nil,
+            layerImage: info.visible
+                ? doc.layerImage(idx)?.makeCGImage(in: doc.colorSpace) : nil,
             // Layer pixels come back UNMASKED, so an enabled mask has to
             // clip the preview the way the projection would.
             maskImage: doc.layerMaskEnabled(idx)
@@ -1095,7 +1108,8 @@ final class EditorViewController: NSViewController {
     /// DeviceGray bitmap, which is the only form CGContext.clip(to:mask:)
     /// accepts. White shows and black hides, matching the core's coverage.
     private static func grayMaskImage(_ mask: RasterImage) -> CGImage? {
-        guard let source = mask.makeCGImage(), source.width > 0, source.height > 0,
+        guard let source = mask.makeCGImage(in: ColorProfile.sRGB),
+              source.width > 0, source.height > 0,
               let context = CGContext(
                 data: nil, width: source.width, height: source.height,
                 bitsPerComponent: 8, bytesPerRow: source.width,
@@ -1122,8 +1136,9 @@ final class EditorViewController: NSViewController {
             aboveDoc = aboveDoc?.withLayerVisible(layer, false)
         }
         return (
-            belowDoc?.flattened()?.makeCGImage(),
-            idx >= doc.layerCount - 1 ? nil : aboveDoc?.flattened()?.makeCGImage())
+            belowDoc?.flattened()?.makeCGImage(in: doc.colorSpace),
+            idx >= doc.layerCount - 1
+                ? nil : aboveDoc?.flattened()?.makeCGImage(in: doc.colorSpace))
     }
 
     /// Pushes the session's current matrix (and the box derived from it) to
@@ -1578,7 +1593,8 @@ final class EditorViewController: NSViewController {
         }
         let newSize = doc.canvasSize
         let dimensionsChanged = canvas.frame.size != newSize
-        canvas.image = document.projection?.makeCGImage()
+        canvas.documentColorSpace = doc.drawingSpace
+        canvas.image = document.projection?.makeCGImage(in: doc.colorSpace)
         canvas.previewImage = nil
         channelDisplayDidChange(note)
         canvas.setFrameSize(newSize)
@@ -1620,8 +1636,11 @@ final class EditorViewController: NSViewController {
             statusTool.text = "Drop a file, or ⌘O"
             return
         }
-        statusDims.text = "\(doc.width) × \(doc.height) px"
-        statusMode.text = "RGB · 8-bit"
+        // Folded into the two existing segments rather than adding a sixth:
+        // the redesign deliberately reduced the set.
+        statusDims.text =
+            "\(doc.width) × \(doc.height) px · \(PrintSize.resolutionText(doc.resolution))"
+        statusMode.text = "RGB · 8-bit · \(doc.profileName)"
         if canvas.quickMaskActive {
             // The selection segment's slot: the mode holds the selection as
             // its editable buffer, so this is what "selected" currently is.
@@ -1756,7 +1775,7 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        presentAsSheet(ResizeSheetController(document: document))
+        presentAsSheet(ImageSizeSheetController(document: document))
     }
 
     @objc func showCanvasSize(_ sender: Any?) {
@@ -2434,7 +2453,11 @@ final class EditorViewController: NSViewController {
                 x: Int(bounds.minX), y: Int(bounds.minY),
                 w: Int(bounds.width), h: Int(bounds.height))
         }
-        guard let cgImage = image?.makeCGImage() else {
+        // TAGGED with the document's profile and NOT converted: every
+        // pasteboard consumer on this platform is colour-managed, and
+        // converting would gamut-clip a P3 copy on its way to a P3 app.
+        guard let cgImage = image?.makeCGImage(in: document?.colorSpace ?? ColorProfile.sRGB)
+        else {
             NSSound.beep()
             return false
         }
@@ -2697,6 +2720,8 @@ extension EditorViewController: NSUserInterfaceValidations {
                 menuItem.title = layersPanelVisible ? "Hide Layers" : "Show Layers"
             }
             return true
+        case #selector(assignProfile(_:)), #selector(convertToProfile(_:)):
+            return validateColorItem(item)
         case #selector(showChannels(_:)), #selector(newChannel(_:)),
              #selector(duplicateChannel(_:)), #selector(deleteChannel(_:)),
              #selector(channelOptions(_:)), #selector(invertChannel(_:)),

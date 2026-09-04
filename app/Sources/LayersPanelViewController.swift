@@ -396,6 +396,10 @@ final class LayersPanelViewController: NSViewController {
     /// The mask's grayscale image scaled down for its thumbnail well. Masks
     /// come back at the LAYER's full size, so the scaling happens in the core
     /// rather than at draw time.
+    ///
+    /// Stays `ColorProfile.sRGB` while the layer thumbnail beside it takes the
+    /// document's space: a mask byte is coverage shown as grey, not a colour,
+    /// so there is nothing here for a profile to describe.
     private func maskThumbnail(_ doc: RasterDocument, _ idx: Int, maxSide: Int) -> NSImage? {
         guard let mask = doc.layerMaskImage(idx), mask.width > 0, mask.height > 0 else {
             return nil
@@ -407,7 +411,7 @@ final class LayersPanelViewController: NSViewController {
         let scaled =
             (w == mask.width && h == mask.height)
             ? mask : (mask.resized(w: w, h: h, filter: RZ_FILTER_BILINEAR) ?? mask)
-        guard let cgImage = scaled.makeCGImage() else { return nil }
+        guard let cgImage = scaled.makeCGImage(in: ColorProfile.sRGB) else { return nil }
         return NSImage(
             cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
@@ -532,7 +536,12 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
         let hasMask = doc.layerHasMask(idx)
         let side = Int(hasMask ? LayerCellView.pairedThumbSide : LayerCellView.thumbSide)
         var thumbnail: NSImage? = nil
-        if let thumb = doc.layerThumbnail(idx, maxSide: side), let cgImage = thumb.makeCGImage() {
+        // The layer's own pixels: tagged with the document's space, so a
+        // wide-gamut layer's thumbnail matches the canvas rather than showing
+        // the same numbers read as sRGB.
+        if let thumb = doc.layerThumbnail(idx, maxSide: side),
+           let cgImage = thumb.makeCGImage(in: doc.colorSpace)
+        {
             thumbnail = NSImage(
                 cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         }

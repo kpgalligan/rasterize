@@ -72,6 +72,23 @@ impl GradientSampler {
         }
     }
 
+    /// This sampler with every stop colour mapped through `f` — how an
+    /// AUTHORED gradient reaches the document's colour space at composite
+    /// time (`style_composite`). Only the stops change: the box, the angle
+    /// and the trigonometry are geometry, so the clone is a stop list.
+    ///
+    /// Mapping the STOPS rather than each sampled colour means the ramp is
+    /// interpolated in the document's space, which is the space everything
+    /// else about the effect is composited in, and costs one conversion per
+    /// stop instead of one per pixel.
+    pub(crate) fn mapping_colors(&self, f: impl Fn([u8; 3]) -> [u8; 3]) -> Self {
+        let mut out = self.clone();
+        for stop in &mut out.fill.stops {
+            stop.color = f(stop.color);
+        }
+        out
+    }
+
     /// The gradient parameter `t` in [0, 1] at `(x, y)` (a pixel centre in
     /// the box's coordinates). With centre `c`, angle `a` and `u`/`v` the
     /// coordinates rotated by `a`, the box's projection onto the gradient

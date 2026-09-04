@@ -299,6 +299,11 @@ extension RasterDocument {
     /// canvas pixel and re-runs the whole compositor. Pass nil only when
     /// there is no projection yet, in which case the composite rows answer
     /// nil and the panel draws an empty well. `maxSide` 0 means full size.
+    ///
+    /// Every row's bytes are THIS document's numbers — the composite row is
+    /// the picture, a plane row is that picture's channel replicated into
+    /// R=G=B — so a caller drawing the result tags it with the document's
+    /// space, not sRGB (`ChannelsPanelViewController`'s thumbnail well).
     func planeImage(
         for row: ChannelRow, composite: RasterImage?, activeLayer: Int, maxSide: Int
     ) -> RasterImage? {

@@ -10,6 +10,8 @@ use image::{ExtendedColorType, GrayImage, ImageEncoder};
 use crate::blend::BlendMode;
 use crate::doc::{sane_opacity, Layer, RzDocument, MAX_PIXELS};
 use crate::doc_channel::{Channel, MAX_CHANNELS};
+use crate::icc::IccProfile;
+use crate::metadata::{Metadata, Resolution};
 use crate::rz_image::save_atomically;
 use crate::style::{GlobalLight, LayerStyle};
 
@@ -24,11 +26,32 @@ const MAX_RZDC_NAME_LEN: u32 = 64 * 1024;
 const MAX_RZDC_PNG_LEN: u32 = 512 * 1024 * 1024;
 pub(crate) const MAX_RZDC_META_LEN: u32 = 16 * 1024 * 1024;
 
+/// Cap on EACH of the four document blobs the version-6 tail carries — the
+/// ICC profile and the EXIF, XMP and IPTC packets — applied independently,
+/// so a crafted file tops out at 64 MiB of blob next to the 1.6 GB of layer
+/// pixels [`MAX_RZDC_TOTAL_LAYER_PIXELS`] already admits. There is no total
+/// budget and none is needed: unlike channels, blobs are not multiplied by
+/// the canvas size.
+///
+/// 16 MiB is deliberately just ABOVE what any JPEG can carry: an ICC profile
+/// travels in at most 255 APP2 chunks of 65533 - 14 payload bytes
+/// (16 707 345 bytes = 15.93 MiB, the same arithmetic `image`'s JPEG encoder
+/// does). So no blob that arrived in a JPEG can ever be refused on the way
+/// out, while a hand-built profile (a CMYK device link is the large real
+/// case, a few MB) is far inside it. The FFI setters enforce it too, so a
+/// document can never hold a blob the writer would refuse.
+///
+/// Separate from [`MAX_RZDC_META_LEN`] on purpose: that one is a *string*
+/// cap the FFI meta and style setters also enforce, and raising one must not
+/// silently raise the other.
+pub(crate) const MAX_RZDC_BLOB_LEN: u32 = 16 * 1024 * 1024;
+
 /// The RZDC revision this build writes. Version 1 files (no mask, no layer
 /// meta), version 2 files (no clipped flag), version 3 files (no layer style,
-/// no global light) and version 4 files (no channels) still load; anything
+/// no global light), version 4 files (no channels) and version 5 files (no
+/// colour profile, no metadata packets, no resolution) still load; anything
 /// newer is refused.
-const RZDC_VERSION: u32 = 5;
+const RZDC_VERSION: u32 = 6;
 
 /// Ceiling on the SUM of decoded layer pixels across one RZDC file: even when
 /// every individual layer looks reasonable, a crafted file must not be able
@@ -98,6 +121,27 @@ impl RzDocument {
     /// collapse. `Channel::id` is NOT written: it is a per-process handle a
     /// host hangs view state on, minted fresh whenever a channel is created,
     /// this reader included.
+    ///
+    /// Version 6 appends the DOCUMENT TAIL after the channel list, so a
+    /// version-5 file is a strict prefix of a version-6 one: f32 horizontal
+    /// resolution and f32 vertical resolution in pixels per inch (sanitized
+    /// by [`Resolution::sane`] on both sides — non-finite or non-positive
+    /// takes the 72 ppi default, finite values clamp to [1, 30000] and
+    /// quantize to four decimals, exactly like the global light), then FOUR
+    /// optional blobs in this order — the ICC colour profile, the EXIF
+    /// packet, the XMP packet and the IPTC packet — each written as u8
+    /// present and, when present, u32 byte length + that many RAW bytes,
+    /// capped at [`MAX_RZDC_BLOB_LEN`] each. The blobs are stored VERBATIM
+    /// and never interpreted here: they are what the file they came from
+    /// carried, and the export path splices them back. Unlike meta and the
+    /// style they are NOT UTF-8 (an ICC profile and an EXIF packet are
+    /// binary; XMP merely happens to be XML), so they take the byte helpers
+    /// rather than the string ones.
+    ///
+    /// The ICC slot is written ABSENT when the document's profile is the
+    /// built-in sRGB, and an absent slot reads back as that same profile —
+    /// so a plain document does not grow by 2.5 KB, and a blob-less
+    /// version-6 file is a version-5 file plus exactly 12 bytes.
     fn encode_native(&self) -> Result<Vec<u8>, String> {
         // The writer enforces the reader's caps, so every file it produces
         // can be read back: layer count and per-layer PNG size are hard
@@ -197,6 +241,40 @@ impl RzDocument {
             buf.extend_from_slice(&png_len.to_le_bytes());
             buf.extend_from_slice(&png);
         }
+        // Version 6: the document tail, after the channel list. Every cap the
+        // reader enforces is enforced here too, and the resolution is
+        // re-sanitized on the way out exactly as the global light is, so no
+        // document this build can build is one it cannot read back.
+        let res = self.resolution.sane();
+        buf.extend_from_slice(&res.x.to_le_bytes());
+        buf.extend_from_slice(&res.y.to_le_bytes());
+        // The built-in sRGB is the document default and is elided: an absent
+        // slot reads back as exactly that profile.
+        let icc = if self.profile.is_builtin_srgb() {
+            None
+        } else {
+            Some(&**self.profile.bytes())
+        };
+        put_opt_bytes(&mut buf, icc, "ICC profile", MAX_RZDC_BLOB_LEN)?;
+        let meta = &self.metadata;
+        put_opt_bytes(
+            &mut buf,
+            meta.exif.as_deref(),
+            "EXIF packet",
+            MAX_RZDC_BLOB_LEN,
+        )?;
+        put_opt_bytes(
+            &mut buf,
+            meta.xmp.as_deref(),
+            "XMP packet",
+            MAX_RZDC_BLOB_LEN,
+        )?;
+        put_opt_bytes(
+            &mut buf,
+            meta.iptc.as_deref(),
+            "IPTC packet",
+            MAX_RZDC_BLOB_LEN,
+        )?;
         Ok(buf)
     }
 
@@ -230,34 +308,59 @@ fn put_name(buf: &mut Vec<u8>, name: &str) {
     buf.extend_from_slice(bytes);
 }
 
-/// Writes an optional string slot (meta, style): u8 present, then u32 len +
-/// UTF-8 bytes when present. The cap error names the slot.
-fn put_opt_string(buf: &mut Vec<u8>, value: Option<&str>, what: &str) -> Result<(), String> {
+/// Writes an optional LENGTH-PREFIXED slot — u8 present, then u32 len + that
+/// many bytes when present — under `cap`. The ONE implementation: the layer
+/// string slots (meta, style) and the version-6 document blobs both go
+/// through it. `what` is the whole noun ("layer meta", "ICC profile").
+fn put_opt_bytes(
+    buf: &mut Vec<u8>,
+    value: Option<&[u8]>,
+    what: &str,
+    cap: u32,
+) -> Result<(), String> {
     buf.push(u8::from(value.is_some()));
-    if let Some(s) = value {
-        let len = u32::try_from(s.len())
+    if let Some(b) = value {
+        let len = u32::try_from(b.len())
             .ok()
-            .filter(|&len| len <= MAX_RZDC_META_LEN)
-            .ok_or_else(|| format!("layer {what} too large (max {MAX_RZDC_META_LEN})"))?;
+            .filter(|&len| len <= cap)
+            .ok_or_else(|| format!("{what} too large (max {cap})"))?;
         buf.extend_from_slice(&len.to_le_bytes());
-        buf.extend_from_slice(s.as_bytes());
+        buf.extend_from_slice(b);
     }
     Ok(())
+}
+
+/// Reads a slot written by [`put_opt_bytes`]; the cap error names the slot,
+/// and the cap is checked BEFORE a byte is taken.
+fn take_opt_bytes(r: &mut Reader<'_>, what: &str, cap: u32) -> Result<Option<Vec<u8>>, String> {
+    if r.u8()? == 0 {
+        return Ok(None);
+    }
+    let len = r.u32()?;
+    if len > cap {
+        return Err(format!("{what} length {len} out of range"));
+    }
+    Ok(Some(r.take(len as usize)?.to_vec()))
+}
+
+/// Writes an optional string slot (meta, style) — the UTF-8 twin of
+/// [`put_opt_bytes`], under the shared string cap.
+fn put_opt_string(buf: &mut Vec<u8>, value: Option<&str>, what: &str) -> Result<(), String> {
+    put_opt_bytes(
+        buf,
+        value.map(str::as_bytes),
+        &format!("layer {what}"),
+        MAX_RZDC_META_LEN,
+    )
 }
 
 /// Reads an optional string slot written by [`put_opt_string`]; the cap
 /// error names the slot. Lenient on UTF-8 (lossy), like names and meta.
 fn take_opt_string(r: &mut Reader<'_>, what: &str) -> Result<Option<String>, String> {
-    if r.u8()? == 0 {
-        return Ok(None);
-    }
-    let len = r.u32()?;
-    if len > MAX_RZDC_META_LEN {
-        return Err(format!("layer {what} length {len} out of range"));
-    }
-    Ok(Some(
-        String::from_utf8_lossy(r.take(len as usize)?).into_owned(),
-    ))
+    Ok(
+        take_opt_bytes(r, &format!("layer {what}"), MAX_RZDC_META_LEN)?
+            .map(|b| String::from_utf8_lossy(&b).into_owned()),
+    )
 }
 
 /// Bounds-checked little-endian reader over an RZDC byte buffer.
@@ -301,16 +404,21 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Parses an RZDC buffer of version 1 to 5 (version 1 predates layer masks
+/// Parses an RZDC buffer of version 1 to 6 (version 1 predates layer masks
 /// and layer meta, which default to absent; versions 1 and 2 predate the
 /// clipped flag, which defaults to false; versions 1 to 3 predate the layer
 /// style and the global light, which default to absent / (120°, 30°);
-/// versions 1 to 4 predate the channel list, which defaults to empty).
+/// versions 1 to 4 predate the channel list, which defaults to empty;
+/// versions 1 to 5 predate the document tail, so the resolution defaults to
+/// 72 x 72 ppi, the colour profile to the built-in sRGB and the three
+/// metadata packets to absent).
 /// Corrupt or truncated input produces `Err`, never a panic; unknown
-/// blend-mode values fall back to Normal, opacity is clamped, the light is
-/// sanitized, and a style is read LENIENTLY (`LayerStyle::from_json_lenient`:
-/// a style from a newer build keeps the effects this build knows; only a
-/// structurally malformed style — or an identity — loads as no style).
+/// blend-mode values fall back to Normal, opacity is clamped, the light and
+/// the resolution are sanitized, the four document blobs are length-capped
+/// but otherwise uninterpreted, and a style is read LENIENTLY
+/// (`LayerStyle::from_json_lenient`: a style from a newer build keeps the
+/// effects this build knows; only a structurally malformed style — or an
+/// identity — loads as no style).
 pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
     let mut r = Reader { bytes, pos: 0 };
     if r.take(4)? != b"RZDC" {
@@ -327,6 +435,7 @@ pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
     let has_clipped = version >= 3;
     let has_style = version >= 4;
     let has_channels = version >= 5;
+    let has_document_tail = version >= 6;
     let width = r.u32()?;
     let height = r.u32()?;
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
@@ -472,11 +581,50 @@ pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
             });
         }
     }
+    // Version 6: the document tail. Sanitized rather than refused, like the
+    // global light; the blobs are capped before a byte is taken and are
+    // otherwise passed through untouched.
+    let (resolution, profile, metadata) = if has_document_tail {
+        let resolution = Resolution {
+            x: r.f32()?,
+            y: r.f32()?,
+        }
+        .sane();
+        let icc = take_opt_bytes(&mut r, "ICC profile", MAX_RZDC_BLOB_LEN)?;
+        let exif = take_opt_bytes(&mut r, "EXIF packet", MAX_RZDC_BLOB_LEN)?;
+        let xmp = take_opt_bytes(&mut r, "XMP packet", MAX_RZDC_BLOB_LEN)?;
+        let iptc = take_opt_bytes(&mut r, "IPTC packet", MAX_RZDC_BLOB_LEN)?;
+        // An absent slot is the built-in sRGB (the writer elides it); a
+        // present blob that no longer parses as an RGB profile falls back to
+        // it too, rather than refusing a file whose pixels are fine.
+        let profile = icc
+            .and_then(|b| IccProfile::parse(&b))
+            .map(Arc::new)
+            .unwrap_or_else(IccProfile::srgb);
+        (
+            resolution,
+            profile,
+            Metadata {
+                exif: exif.map(Arc::from),
+                xmp: xmp.map(Arc::from),
+                iptc: iptc.map(Arc::from),
+            },
+        )
+    } else {
+        (
+            Resolution::default(),
+            IccProfile::srgb(),
+            Metadata::default(),
+        )
+    };
     Ok(RzDocument {
         width,
         height,
         layers,
         global_light,
         channels,
+        profile,
+        metadata,
+        resolution,
     })
 }

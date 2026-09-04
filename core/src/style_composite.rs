@@ -73,6 +73,28 @@
 //! Down composites into the union of two layer rects, and a canvas-aligned
 //! gradient must bake exactly the pixels the projection showed.
 //!
+//! # A style's colours are AUTHORED, and convert here
+//!
+//! Every colour inside a style — an effect's `color`, a bevel's two lit
+//! sides, a gradient's stops — is stored as the sRGB `#rrggbb` the user or
+//! the agent authored, the same convention every colour argument this crate
+//! is handed follows. It is converted into the DOCUMENT's colour space
+//! exactly once, in [`composite_contribution`], which is the one place a
+//! contribution's colour is read; `CompositeEnv::colors` carries the
+//! conversion (absent when the document is already in that space, so an
+//! sRGB document is byte-for-byte what it was before colour management).
+//!
+//! Converting HERE rather than when the plane is rendered is what keeps the
+//! two properties that matter. The plane cache holds the AUTHORED colour, so
+//! a document that changes profile — Assign, Convert to Profile, or an undo
+//! of either — invalidates nothing and re-renders nothing; and the style
+//! JSON is never rewritten, so `set_layer_style` stays idempotent, a `.rz`
+//! round trip stays byte-identical, and Convert to Profile preserves a
+//! style's APPEARANCE (its authored colour re-converts into the new space)
+//! without touching a single stored value. A document whose profile this
+//! crate cannot model keeps its authored numbers verbatim, which is exactly
+//! what the host does when it paints into such a document.
+//!
 //! # Merge Down's extent
 //!
 //! `merge_extent` is the rect a baked layer needs: its pixel rect grown by
@@ -85,25 +107,47 @@
 
 use crate::blend::{blend_kind, composite_buffer_into, composite_source_into, BlendMode};
 use crate::doc::{composite_layer_into, sane_opacity, Layer, RzDocument};
+use crate::icc_transform::Transform;
 use crate::style::{BlendIf, GlobalLight, LayerStyle};
 use crate::style_blend_if::source_weight;
 use crate::style_render::{Contribution, RenderContext, RenderedEffects, Shape};
 
 /// What every composite reads beyond the layers: the global light every
-/// "use global light" effect resolves against, and the document canvas
-/// size canvas-aligned gradients span (module doc).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct CompositeEnv {
+/// "use global light" effect resolves against, the document canvas size
+/// canvas-aligned gradients span, and the conversion an authored style
+/// colour takes into the document's space (module doc).
+///
+/// `colors` is a BORROW so this stays `Copy` — a `Transform` is twelve
+/// kilobytes of lookup tables, built once per projection by
+/// `RzDocument::style_colors` and handed down.
+#[derive(Clone, Copy)]
+pub(crate) struct CompositeEnv<'a> {
     pub light: GlobalLight,
     pub canvas: (u32, u32),
+    pub colors: Option<&'a Transform>,
 }
 
 impl RzDocument {
+    /// The conversion every AUTHORED style colour takes into this document's
+    /// space (module doc), or `None` when there is nothing to do: the
+    /// document is already in sRGB — the overwhelmingly common case, and the
+    /// one that must stay byte-for-byte what it was — or its profile is one
+    /// this crate cannot model, where the honest answer is the numbers as
+    /// authored, exactly as the host paints them.
+    ///
+    /// Owned by the caller and borrowed into [`CompositeEnv`], so one
+    /// projection builds one transform however many styled layers it has.
+    pub(crate) fn style_colors(&self) -> Option<Transform> {
+        let srgb = crate::icc::IccProfile::srgb();
+        Transform::between(srgb.model()?, self.profile.model()?)
+    }
+
     /// The document's compositing environment.
-    pub(crate) fn composite_env(&self) -> CompositeEnv {
+    pub(crate) fn composite_env<'a>(&self, colors: Option<&'a Transform>) -> CompositeEnv<'a> {
         CompositeEnv {
             light: self.global_light,
             canvas: (self.width, self.height),
+            colors,
         }
     }
 }
@@ -131,7 +175,7 @@ pub(crate) fn composite_styled_into(
     group: &[Layer],
     style: &LayerStyle,
     opacity: f32,
-    env: CompositeEnv,
+    env: CompositeEnv<'_>,
 ) {
     let ctx = RenderContext {
         light: env.light,
@@ -167,7 +211,7 @@ fn composite_direct_into(
     group: &[Layer],
     style: &LayerStyle,
     opacity: f32,
-    env: CompositeEnv,
+    env: CompositeEnv<'_>,
     planes: Option<&RenderedEffects>,
 ) {
     let rel = (
@@ -191,7 +235,17 @@ fn composite_direct_into(
 
     if let Some(planes) = planes {
         for c in &planes.below {
-            composite_contribution(acc, acc_w, acc_h, origin, rel, &planes.shape, c, opacity);
+            composite_contribution(
+                acc,
+                acc_w,
+                acc_h,
+                origin,
+                rel,
+                &planes.shape,
+                c,
+                opacity,
+                env.colors,
+            );
         }
     }
 
@@ -261,7 +315,17 @@ fn composite_direct_into(
 
     if let Some(planes) = planes {
         for c in &planes.interior {
-            composite_contribution(acc, acc_w, acc_h, origin, rel, &planes.shape, c, opacity);
+            composite_contribution(
+                acc,
+                acc_w,
+                acc_h,
+                origin,
+                rel,
+                &planes.shape,
+                c,
+                opacity,
+                env.colors,
+            );
         }
     }
 }
@@ -278,7 +342,7 @@ fn composite_package_into(
     group: &[Layer],
     style: &LayerStyle,
     opacity: f32,
-    env: CompositeEnv,
+    env: CompositeEnv<'_>,
     planes: &RenderedEffects,
 ) {
     let Some((x0, y0, x1, y1)) = affected_window(acc_w, acc_h, origin, layer, planes) else {
@@ -532,12 +596,18 @@ fn composite_contribution(
     shape: &Shape,
     c: &Contribution,
     opacity_scale: f32,
+    colors: Option<&Transform>,
 ) {
     let scale = c.opacity * opacity_scale;
     if scale.is_nan() || scale <= 0.0 || c.coverage.len() != shape.coverage.len() {
         return;
     }
     let kind = blend_kind(c.blend);
+    // The style's AUTHORED sRGB colour into the document's space, once for
+    // the whole contribution (module doc). A gradient converts its stops, so
+    // this is a stop list either way, never per-pixel work.
+    let converted = colors.map(|t| c.color.converted(t));
+    let color = converted.as_ref().unwrap_or(&c.color);
     let (sx, sy) = (i64::from(c.shift.0), i64::from(c.shift.1));
     // Window position of plane pixel (0, 0).
     let base_x = i64::from(rel.0) + shape.origin.0 + sx;
@@ -570,7 +640,7 @@ fn composite_contribution(
             }
             let ax = base_x + px;
             let ai = (ay as u64 * u64::from(acc_w) + ax as u64) as usize;
-            let cs = c.color.at(px + shape.origin.0, py + shape.origin.1);
+            let cs = color.at(px + shape.origin.0, py + shape.origin.1);
             let canvas_xy = (ax + i64::from(origin.0), ay + i64::from(origin.1));
             composite_source_into(target, ai, cs, sa, kind, canvas_xy);
         }
@@ -604,7 +674,7 @@ fn clamp_alpha_to_shape(
 /// baked `layer` (module doc): its pixel rect grown by the style's pad, and
 /// the drop shadow's shifted copy of that rect clipped to the canvas. The
 /// pixel rect alone without a renderable style.
-pub(crate) fn merge_extent(layer: &Layer, env: CompositeEnv) -> (i64, i64, i64, i64) {
+pub(crate) fn merge_extent(layer: &Layer, env: CompositeEnv<'_>) -> (i64, i64, i64, i64) {
     let (lw, lh) = layer.pixels.dimensions();
     let (x, y) = (i64::from(layer.offset.0), i64::from(layer.offset.1));
     let Some(style) = layer.renders_style() else {

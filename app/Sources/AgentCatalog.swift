@@ -38,6 +38,18 @@ extension AgentServer {
                 + "the current selection, intersect keeps the overlap; an empty result "
                 + "clears the selection.",
         ]
+        // Which profile an assign/convert targets: the two this build writes
+        // for itself, or an .icc/.icm file on disk.
+        let profileChoice: [String: Any] = [
+            "type": "string",
+            "enum": ["srgb", "display_p3", "file"],
+            "description": "srgb or display_p3 use the built-in profile; file reads the "
+                + "profile at path.",
+        ]
+        let profilePath: [String: Any] = [
+            "type": "string",
+            "description": "Path to an .icc/.icm profile; required when profile is \"file\".",
+        ]
         let blendNames = RzBlendMode.allBlendModes.map { $0.1 }
         // The modes a SINGLE 8-bit plane can carry: the four HSL modes are
         // defined over an RGB triple, so `rz_blend_planes` refuses them and
@@ -207,7 +219,16 @@ extension AgentServer {
                 "Reads the color of one pixel of the flattened composite (what you see "
                     + "in a render) — the eyedropper. Returns straight (non-premultiplied) "
                     + "RGBA components (0-255) and the hex string (#RRGGBB, or #RRGGBBAA "
-                    + "when not fully opaque). Errors when the point is outside the canvas.",
+                    + "when not fully opaque). The numbers are the DOCUMENT's, in its own "
+                    + "colour space (returned as \"space\") — not sRGB — so \"hex\" is "
+                    + "what the pixel actually holds. Every color ARGUMENT here is sRGB, "
+                    + "so to paint that colour back pass \"paint_hex\", the CLOSEST sRGB "
+                    + "spelling (the same string on an sRGB document). It reproduces the "
+                    + "pixel exactly only when the colour is inside the sRGB gamut: when "
+                    + "it is not, \"paint_hex_exact\" is false and a \"note\" says so — "
+                    + "painting that hex back gives a duller colour, and there is no sRGB "
+                    + "string that gives the sampled one. Errors when the point "
+                    + "is outside the canvas.",
                 [
                     "x": [
                         "type": "integer",
@@ -219,6 +240,75 @@ extension AgentServer {
                     ],
                     "document_id": docID,
                 ], required: ["x", "y"]),
+            // Colour management and metadata — the document's ICC profile,
+            // print resolution and preserved EXIF/XMP/IPTC (Image > Mode >
+            // Assign Profile… / Convert to Profile…, Image Size's
+            // Resolution, the Export panel's two checkboxes).
+            tool(
+                "get_color_profile",
+                "The document's colour space: its profile name, whether Rasterize can "
+                    + "convert with it, the print resolution and the print size that "
+                    + "implies. convertible false means Rasterize can display the profile "
+                    + "and re-embed it on export but cannot transform with it (a LUT-based "
+                    + "profile) — assign_profile still works, convert_profile does not. "
+                    + "on_open reports what the OPEN did: \"unchanged\", \"converted\" "
+                    + "into the working space, or \"kept\" because it could not be "
+                    + "converted from. A file with no profile is assumed sRGB, and is "
+                    + "converted when the working space differs. Every #RRGGBB argument "
+                    + "in this surface is sRGB and converts into the document's space "
+                    + "once, so on a non-sRGB document brush_stroke, fill, gradient and "
+                    + "the shape/text tools all lay down the same colour — but the bytes "
+                    + "a render or sample_color reports are the document's, not the hex "
+                    + "you passed.",
+                ["document_id": docID]),
+            tool(
+                "assign_profile",
+                "RELABELS the document with another colour profile. Pixel numbers are "
+                    + "NOT touched, so the picture changes appearance — this is the tool "
+                    + "for a file that was tagged wrongly. One undo step. Answers "
+                    + "changed:false when the document already carries that profile; "
+                    + "errors only on bytes that are not an RGB ICC profile.",
+                [
+                    "profile": profileChoice, "path": profilePath, "document_id": docID,
+                ], required: ["profile"]),
+            tool(
+                "convert_profile",
+                "CONVERTS the document to another colour profile: every layer's pixels "
+                    + "are transformed so the picture LOOKS the same and its numbers "
+                    + "change. Layer masks, alpha channels and layer descriptions are "
+                    + "coverage and are untouched, and so are layer-style and text-layer "
+                    + "colours: those are authored in sRGB and convert where they are used, "
+                    + "so they keep their appearance. One undo step. Answers changed:false "
+                    + "when the two profiles describe the same space, or when either is "
+                    + "not a matrix/TRC profile.",
+                [
+                    "profile": profileChoice, "path": profilePath, "document_id": docID,
+                ], required: ["profile"]),
+            tool(
+                "set_resolution",
+                "Sets the print resolution in pixels per inch. NO pixel is resampled — "
+                    + "only the print size changes; use image_size to change the pixel "
+                    + "dimensions. Mirrors Image Size…'s Resolution field with Resample "
+                    + "off. One undo step; 1-30000 ppi.",
+                [
+                    "ppi_x": ["type": "number", "minimum": 1, "maximum": 30000],
+                    "ppi_y": [
+                        "type": "number", "minimum": 1, "maximum": 30000,
+                        "description": "Vertical resolution; defaults to ppi_x.",
+                    ],
+                    "document_id": docID,
+                ], required: ["ppi_x"]),
+            tool(
+                "get_metadata",
+                "Which metadata packets the document carries and how big they are — "
+                    + "presence and byte sizes only, not a parsed EXIF dump — plus its "
+                    + "print resolution, its profile name and what the open did. EXIF, "
+                    + "XMP and IPTC are captured from JPEG and PNG files only, and are "
+                    + "re-spliced on export unless strip_metadata is set. "
+                    + "metadata_not_captured: true means this document came from a file "
+                    + "decoded by the platform (HEIC, a Live Photo), whose packets were "
+                    + "never read — absent here does not mean the file had none.",
+                ["document_id": docID]),
             tool(
                 "set_active_layer",
                 "Selects the layer that untargeted edits apply to.",
@@ -1680,7 +1770,13 @@ extension AgentServer {
                 "Exports the document to a file without changing the open document. "
                     + "Format comes from the extension unless given explicitly. "
                     + "rz writes the full layered document (layers, masks, metadata); "
-                    + "raster formats flatten.",
+                    + "raster formats flatten. The result's \"wrote\" and \"dropped\" "
+                    + "arrays name what the chosen format actually carried — a kind is "
+                    + "dropped when the format cannot hold it, when it was too large for "
+                    + "the format's segment, or when you asked for it to be left out. "
+                    + "metadata_not_captured: true means the source file's EXIF/XMP/IPTC "
+                    + "was never read in (a platform-decoded HEIC or Live Photo), so none "
+                    + "of it could travel out either.",
                 [
                     "path": ["type": "string"],
                     "format": [
@@ -1688,6 +1784,17 @@ extension AgentServer {
                         "enum": ["rz", "png", "jpeg", "tiff", "bmp", "gif", "webp"],
                     ],
                     "jpeg_quality": ["type": "integer", "minimum": 1, "maximum": 100],
+                    "embed_profile": [
+                        "type": "boolean",
+                        "description": "Embed the document's ICC profile (default true). "
+                            + "PNG, JPEG, TIFF and WebP can carry one; BMP and GIF cannot.",
+                    ],
+                    "strip_metadata": [
+                        "type": "boolean",
+                        "description": "Drop EXIF/XMP/IPTC (default false). Kept packets "
+                            + "are re-spliced with the EXIF orientation reset to 1, since "
+                            + "the rotation is already baked into the pixels.",
+                    ],
                     "document_id": docID,
                 ], required: ["path"]),
         ]

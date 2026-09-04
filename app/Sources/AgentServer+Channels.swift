@@ -529,7 +529,7 @@ extension AgentServer {
             ]) { _, shared in shared })
     }
 
-    /// The channel-budget question `ResizeSheetController` and
+    /// The channel-budget question `ImageSizeSheetController` and
     /// `CanvasSizeSheetController` ask before their edit, asked for the
     /// agent's mirrors of those two commands (image_size, canvas_size).
     ///

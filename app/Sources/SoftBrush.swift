@@ -82,18 +82,34 @@ enum SoftBrush {
     /// `color`'s own alpha at the core falling off per `falloff`. The
     /// stroke's opacity rides in via the color's alpha exactly as it does
     /// for a hard stroke. nil only if CoreGraphics cannot build the bitmap.
-    static func dab(color: NSColor, diameter: CGFloat, hardness: CGFloat) -> CGImage? {
-        let srgb = color.usingColorSpace(.sRGB) ?? color
-        let baseAlpha = srgb.alphaComponent
-        return dabImage(diameter: diameter) { context, radius in
+    ///
+    /// `space` is the space of the context this dab will be stamped into —
+    /// the document's DRAWING space. The colour is converted into it HERE,
+    /// so CoreGraphics converts nothing at stamp time and a colour SAMPLED
+    /// from the document round-trips byte-exactly through the eyedropper and
+    /// back onto the canvas. (An authored colour still converts, once, right
+    /// here.)
+    static func dab(
+        color: NSColor, diameter: CGFloat, hardness: CGFloat, space: CGColorSpace
+    ) -> CGImage? {
+        // `target` already degrades to sRGB when the space cannot become an
+        // NSColorSpace, so one fallback is enough.
+        let target = NSColorSpace(cgColorSpace: space) ?? .sRGB
+        let paint = color.usingColorSpace(target) ?? color
+        let baseAlpha = paint.alphaComponent
+        let rgb = [paint.redComponent, paint.greenComponent, paint.blueComponent]
+        return dabImage(diameter: diameter, space: space) { context, radius in
             let stops = gradientStops(hardness: rimCapped(hardness, diameter: diameter))
-            let colors = stops.map {
-                CGColor(
-                    srgbRed: srgb.redComponent, green: srgb.greenComponent,
-                    blue: srgb.blueComponent, alpha: baseAlpha * $0.alpha)
+            var colors: [CGColor] = []
+            for stop in stops {
+                guard let color = CGColor(
+                    colorSpace: space,
+                    components: [rgb[0], rgb[1], rgb[2], baseAlpha * stop.alpha])
+                else { return }
+                colors.append(color)
             }
             guard let gradient = CGGradient(
-                colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                colorsSpace: space,
                 colors: colors as CFArray, locations: stops.map { $0.location })
             else { return }
             let center = CGPoint(x: radius, y: radius)
@@ -246,16 +262,17 @@ enum SoftBrush {
         return stops.map { (location: $0.0, alpha: $0.1) }
     }
 
-    /// A premultiplied-sRGB square bitmap `diameter` px across handed to
-    /// `draw` with its radius; nil if the context cannot be made.
+    /// A premultiplied square bitmap `diameter` px across in `space` handed
+    /// to `draw` with its radius; nil if the context cannot be made. The
+    /// space is the caller's — the document's — so the dab image is already
+    /// in the numbers the overlay stores.
     private static func dabImage(
-        diameter: CGFloat, draw: (CGContext, CGFloat) -> Void
+        diameter: CGFloat, space: CGColorSpace, draw: (CGContext, CGFloat) -> Void
     ) -> CGImage? {
         let side = max(Int(ceil(diameter)), 1)
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-              let context = CGContext(
+        guard let context = CGContext(
                 data: nil, width: side, height: side, bitsPerComponent: 8,
-                bytesPerRow: side * 4, space: colorSpace,
+                bytesPerRow: side * 4, space: space,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
         draw(context, CGFloat(side) / 2)
