@@ -1,6 +1,6 @@
 # From Compositor to Photo Editor: a Gap Review
 
-**Status: in progress (updated 3 September 2026) — phases 1 and 2 of the order in section 4 have shipped; section 0 records what landed, what was decided along the way, and where to restart.** A
+**Status: in progress (updated 4 September 2026) — phases 1, 2 and 3 of the order in section 4 have shipped; section 0 records what landed, what was decided along the way, and where to restart.** A
 fresh-eyes review of the shipped feature set against what a working
 photographer actually reaches for in Photoshop, followed by a large, sized
 catalog of what to build. Companion to `next-features.md` (whose open
@@ -78,65 +78,50 @@ Decisions worth knowing:
   clamped and scrolled into view); rotated shapes re-box through the
   inverse map; frame picks keep map, mask and style.
 
-### Phase 3 — channels (§2.3): NOT started
+### Phase 3 — channels (§2.3): shipped, commit `e860fe2`
 
-The workflow was launched twice on 3 September and both runs died on API
-overload before any file changed; the tree is clean at `70000ac`. The
-brief its agents were given, which resolves the open choices in §2.3, is
-the starting point for the next attempt:
+All of §2.3. Decisions worth knowing:
 
-- Core: `RzDocument.channels: Vec<Channel { name, data: Arc<GrayImage>
-  (always canvas-sized), overlay_color, overlay_opacity }>`; every
-  geometry op keeps them consistent (crop crops, canvas resize pads with
-  0, rotate/flip permute, resize resamples; flatten, merge, duplicate and
-  clone keep them); `.rz` version 5 serializes them with caps. A new
-  `doc_channel.rs` with add / remove / rename / options / set data /
-  duplicate / invert, plane readers (`composite_plane` red/green/blue/
-  luma/alpha, `layer_plane` red/green/blue/alpha/mask, canvas-sized),
-  plane writers (`with_layer_plane`), painting (`painting_channel`,
-  `painting_layer_plane`, the same lerp as mask painting), `blend_planes`
-  through the existing blend table (behind Apply Image and Calculations),
-  and `luminosity_masks` (Lights/Darks/Midtones 1–3 from Rec. 709 luma).
-  One `ffi_channel.rs`, a "Channels" header section, wrappers, a
-  `channel_tests.rs` with analytic oracles, null-sweep entries.
-- UI: a third right-panel tab "Channels" (RGB, Red, Green, Blue, the
-  active layer's mask, then alpha channels, each with a thumbnail and an
-  eye); selecting a row sets the edit target — composite, one colour
-  plane, or an alpha channel — which paint tools honour and which the
-  destructive Filters and Adjustments honour through ONE generic hook in
-  `ImageDocument`'s active-layer path (extract plane → run the op → take
-  gray → re-insert); a single plane shows in grayscale, an alpha channel
-  over RGB as a rubylith (reuse the Quick Mask overlay drawing; Quick
-  Mask itself stays as is). Row menu: Duplicate, Delete, Options, Invert,
-  Load as Selection. Footer: Load, Save Selection, New, Delete.
-- Selection: Select > Save Selection… / Load Selection… sheets (sources:
-  channel, layer transparency, layer mask, colour plane; modes replace/
-  add/subtract/intersect; invert); ⌘-click a layer thumbnail, mask
-  thumbnail or channel row loads it, with Shift / Option / Shift+Option
-  combining as the selection tools do.
-- Image > Apply Image… and Calculations… sheets with live preview;
-  Select > Add Luminosity Masks.
-- iPhone auxiliary mattes: on HEIC open through `Bitmap.swift`'s ImageIO
-  path, add Depth (or Disparity), Portrait Matte, Skin, Hair, Teeth,
-  Glasses and Sky as channels when present (`AuxiliaryMattes.swift`,
-  AVFoundation matte types, bilinear resample to the canvas); never crash
-  on a malformed dictionary; a plain HEIC (make one with `sips -s format
-  heic`) adds none. No sample with mattes exists in the repo — say so
-  rather than fabricate a check.
-- MCP: `list_channels`, `add_channel`, `delete_channel`,
-  `rename_channel`, `set_channel_options`, `invert_channel`,
-  `load_selection`, `save_selection`, `apply_image`, `calculations`,
-  `add_luminosity_masks`; `render` gains `channel`; the paint tools'
-  `target` grows to `layer|mask|red|green|blue|alpha|channel:<name>`;
-  `get_document` reports channels. README: a Channels entry, the `.rz`
-  sentence, the tool count.
+- `RzDocument.channels: Vec<Channel { name, data: Arc<GrayImage>
+  (always canvas-sized), overlay_color, overlay_opacity,
+  color_indicates_selected }>` — a core field with a stable per-channel
+  id the UI keys its target on (an index would follow the wrong row
+  after a delete). `.rz` is at version 5; version 4 loads with an empty
+  list. Channel pixels have their own budget
+  (`MAX_RZDC_TOTAL_CHANNEL_PIXELS`, 9 × `MAX_PIXELS`, so a whole
+  luminosity-mask set fits the largest canvas the app builds), and every
+  UI path that creates a channel asks the budget first and names it in
+  the refusal.
+- `doc_plane.rs` is the ONE plane implementation — reader, writer, the
+  paint lerp (`doc.rs`'s mask painting routes through it), the blend,
+  the box reduction thumbnails use. `doc_channel.rs` holds the channel
+  ops. Every geometry op carries channels; straighten and resize share
+  `resample_canvas_plane` with layer masks, so a channel and a mask
+  under the same matrix come out byte-identical.
+- Plane edits run in the LAYER's own space (filters, fills and
+  gradients alike) and write back through `with_layer_space_plane`;
+  doing it in canvas space dropped the off-canvas ring and left a seam.
+- The edit target is `PaintTarget` (own file, out of the frozen
+  controller): layer | mask | plane | channel. Only the coverage-paint
+  tools reach a plane or channel — clone, dodge and text refuse rather
+  than silently rewriting the whole layer.
+- iPhone auxiliary mattes arrive through `AuxiliaryMattes.swift` on the
+  HEIC open path. No sample with mattes exists in the repo; that path is
+  verified by reading and typecheck only, and a plain HEIC adds none.
+- Two review passes (six rounds, five lenses) confirmed and fixed 67
+  defects. The rounds never went dry — a feature this size keeps
+  yielding minor findings — so the stopping rule was severity, not a
+  silent round.
 
 ### Remaining order
 
-Section 4's steps 4–8 in order (colour management and metadata; the
-adjustment batch with histogram and info panels; healing brush and
-Content-Aware Fill; groups, lock, multi-select, guides and snapping; RAW
-develop and Actions), then the breadth of section 3.
+Section 4's steps 4–8 in order — 4 colour management and metadata (§3A,
+first five rows) is next, then the adjustment batch with histogram and
+info panels; healing brush and Content-Aware Fill; groups, lock,
+multi-select, guides and snapping; RAW develop and Actions — then the
+breadth of section 3. Kevin asked on 3 September for this to run
+through the whole list without stopping between phases: finish, commit,
+start the next.
 
 ---
 
@@ -291,7 +276,7 @@ tracking, leading, underline, fixed-width paragraph boxes vs point text.
 Outline and shadow come from layer styles rather than from the text
 payload, exactly as in Photoshop.
 
-### 2.3 Channels: alpha channels and per-channel colour — NEXT (brief in §0)
+### 2.3 Channels: alpha channels and per-channel colour — SHIPPED (§0)
 
 The selection mask is already a canvas-sized u8 plane, and the GIMP study
 (§6) is explicit that selection, mask, and channel should be one
@@ -521,9 +506,9 @@ a **command palette** (⌘K-style fuzzy search over the whole menu).
 2. ✅ **Symbolic transforms** on text, shape and Live Photo layers (§2.2),
    with the text typography follow-ons — small, and it deletes a known
    limit.
-3. ▶ **Channels** (§2.3) with ⌘-click-to-select, luminosity masks, and the
+3. ✅ **Channels** (§2.3) with ⌘-click-to-select, luminosity masks, and the
    iPhone auxiliary mattes — one `.rz` bump shared with step 1.
-4. **Colour management and metadata** (§3A, first five rows) — silent
+4. ▶ **Colour management and metadata** (§3A, first five rows) — silent
    correctness. Do it before more people export photos from the app.
 5. **The adjustment batch** (§3B) plus the histogram and info panels —
    two weeks of S items that make the Adjustments menu look like a photo
