@@ -113,7 +113,7 @@ All of §2.3. Decisions worth knowing:
   yielding minor findings — so the stopping rule was severity, not a
   silent round.
 
-### Phase 4 — colour management and metadata (§3A rows 1–5): shipped
+### Phase 4 — colour management and metadata (§3A rows 1–5): shipped, commit `3d22373`
 
 The first five rows of §3A: ICC on open, canvas tagging, embedding on
 export, EXIF/XMP/IPTC preservation with the orientation reset, and ppi
@@ -453,11 +453,11 @@ mode}`, `list_channels`, `target` on the paint tools, `render {channel}`.
 
 | Feature | Size | Notes |
 |---|---|---|
-| Read the embedded ICC profile and convert to the document space on open | M | `image` exposes decoder ICC bytes; convert with a pure-Rust CMS (`qcms` or `moxcms`). Document space is sRGB by default with an option to keep Display P3. GIMP §7: keep *assign* and *convert* as separate commands. |
-| Tag the canvas with the document profile | S | Hand the display a CGImage in the document's `CGColorSpace` and the window server does the monitor transform. Correct on-screen colour on a P3 MacBook display for one line of Swift. |
-| Embed the profile on export | S | PNG, JPEG, TIFF, WebP encoders take profile bytes. |
-| Preserve EXIF / XMP / IPTC on export, orientation reset to 1 | M | Keep the raw metadata blobs from open and re-splice after encoding (the `img-parts` crate does this for JPEG/PNG/WebP). Export panel gets a "strip metadata" toggle. |
-| Image resolution (ppi) and print size in Image Size; File > Print | S/M | `RzDocument` gains a ppi pair; the `.rz` bump carries it. |
+| Read the embedded ICC profile and convert to the document space on open — SHIPPED | M | `image` exposes decoder ICC bytes; convert with a pure-Rust CMS (`qcms` or `moxcms`). Document space is sRGB by default with an option to keep Display P3. GIMP §7: keep *assign* and *convert* as separate commands. |
+| Tag the canvas with the document profile — SHIPPED | S | Hand the display a CGImage in the document's `CGColorSpace` and the window server does the monitor transform. Correct on-screen colour on a P3 MacBook display for one line of Swift. |
+| Embed the profile on export — SHIPPED | S | PNG, JPEG, TIFF, WebP encoders take profile bytes. |
+| Preserve EXIF / XMP / IPTC on export, orientation reset to 1 — SHIPPED | M | Keep the raw metadata blobs from open and re-splice after encoding (the `img-parts` crate does this for JPEG/PNG/WebP). Export panel gets a "strip metadata" toggle. |
+| Image resolution (ppi) and print size in Image Size; File > Print — SHIPPED | S/M | `RzDocument` gains a ppi pair; the `.rz` bump carries it. |
 | Camera RAW (CR3, NEF, ARW, DNG, ProRAW) via Core Image's `CIRAWFilter` | M | Swift-side decode, like HEIC today. A small "Develop" sheet before the pixels land — exposure, temperature/tint, noise reduction, lens correction — is the whole reason to own a RAW workflow. Highest photo value per day in this table. |
 | HEIC export; AVIF and JPEG XL open/export | S/M | `image` has AVIF behind a feature flag; JXL via `jxl-oxide`. HEIC export through ImageIO on the Swift side. |
 | Histogram panel with per-channel view and clipping warning | S | Levels and Curves want it too. A parallel scan with merged bins (GIMP §8). |
@@ -631,9 +631,9 @@ a **command palette** (⌘K-style fuzzy search over the whole menu).
    limit.
 3. ✅ **Channels** (§2.3) with ⌘-click-to-select, luminosity masks, and the
    iPhone auxiliary mattes — one `.rz` bump shared with step 1.
-4. ▶ **Colour management and metadata** (§3A, first five rows) — silent
+4. ✅ **Colour management and metadata** (§3A, first five rows) — silent
    correctness. Do it before more people export photos from the app.
-5. **The adjustment batch** (§3B) plus the histogram and info panels —
+5. ▶ **The adjustment batch** (§3B) plus the histogram and info panels —
    two weeks of S items that make the Adjustments menu look like a photo
    editor's.
 6. **Healing brush and Content-Aware Fill** (§3C) — the retouching gap.
