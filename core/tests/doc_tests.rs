@@ -13,6 +13,7 @@ use std::ptr;
 use image::{Rgba, RgbaImage};
 use rasterize_core::doc::RzDocument;
 use rasterize_core::ffi::*;
+use rasterize_core::ffi_adjust::*;
 use rasterize_core::ffi_channel::*;
 use rasterize_core::ffi_color::*;
 use rasterize_core::ffi_doc::*;
@@ -2032,6 +2033,8 @@ fn null_safety_sweep() {
         assert!(!rz_doc_icc_profile(null_doc, blob.as_mut_ptr(), 8));
         assert!(rz_doc_profile_name(null_doc).is_null());
         assert!(!rz_doc_profile_is_convertible(null_doc));
+        let mut lab = [0f32; 3];
+        assert!(!rz_doc_lab(null_doc, 0, 0, 0, lab.as_mut_ptr()));
         assert_eq!(rz_doc_metadata_len(null_doc, METADATA_EXIF), 0);
         assert!(!rz_doc_metadata(
             null_doc,

@@ -155,6 +155,15 @@ final class AgentServer {
         "add_adjustment_layer": addAdjustmentLayer,
         "edit_adjustment_layer": editAdjustmentLayer,
         "apply_filter": applyFilter,
+        // Auto Tone / Contrast / Color (AgentServer+Adjustments.swift):
+        // mirrors Image > Auto Tone, > Auto Contrast, > Auto Color.
+        "auto_tone": { $0.autoTone },
+        "auto_contrast": { $0.autoContrast },
+        "auto_color": { $0.autoColor },
+        // Statistics and the pixel readout (AgentServer+Info.swift):
+        // mirrors the Info panel's histogram and its cursor readout.
+        "histogram": { $0.histogram },
+        "sample_pixel": { $0.samplePixel },
         // Painting (brush, eraser, text)
         "brush_stroke": brushStroke,
         "eraser_stroke": eraserStroke,
@@ -376,7 +385,11 @@ final class AgentServer {
             let isAdjustment = doc.layerIsAdjustment(index)
             layer["is_adjustment"] = isAdjustment
             if isAdjustment, let payload = doc.adjustmentPayload(index) {
-                layer["adjustment"] = ["op": payload.op, "params": payload.params]
+                // Every key survives except a Color Lookup's table, which
+                // would swamp the reply (AgentServer+Adjustments.swift).
+                layer["adjustment"] = [
+                    "op": payload.op, "params": elidedAdjustmentParams(payload),
+                ]
             }
             // A SHAPE layer carries the parametric description its pixels
             // were rendered from (position is its origin).
@@ -1087,6 +1100,14 @@ final class AgentServer {
             throw ToolError(message: "Layer \(index) is out of range (0..\(count - 1))")
         }
         let filter = try requiredString(a, "filter")
+        // Validate an adjustment op's params ONCE, here, where we can still
+        // throw: `filtered` is non-throwing and is also called from the
+        // plane path's non-throwing closure, so a `try?` down there would
+        // swallow the message and report a generic failure instead of
+        // naming the key. nil for every legacy filter, whose flat arguments
+        // are untouched — and which refuse a stray `params` in there rather
+        // than dropping it (AgentServer+Adjustments.swift).
+        let adjustParams = try adjustmentFilterParams(a, filter: filter)
         // A colour plane or an alpha channel runs the SAME op on that plane
         // alone (AgentServer+ChannelTargets.swift); it must not go through
         // ImageDocument.applyToActiveLayer, which can raise a modal alert on
@@ -1095,14 +1116,14 @@ final class AgentServer {
         if planeTarget != .layer {
             return try applyPlaneFilter(
                 document, target: planeTarget, layer: index, filter: filter
-            ) { self.filtered($0, filter, a) }
+            ) { self.filtered($0, filter, a, adjustParams) }
         }
         try rejectAdjustmentPixelEdit(document, index)
         let rasterized = try performPixelEdit(
             document, "Apply \(filter)", pixelLayer: index
         ) { doc in
             guard let layer = doc.layerImage(index),
-                let filtered = self.filtered(layer, filter, a)
+                let filtered = self.filtered(layer, filter, a, adjustParams)
             else { return nil }
             return doc.withLayerPixels(index, filtered)
         }
@@ -1112,9 +1133,17 @@ final class AgentServer {
     }
 
     private func filtered(
-        _ image: RasterImage, _ filter: String, _ a: [String: Any]
+        _ image: RasterImage, _ filter: String, _ a: [String: Any],
+        _ adjustParams: [String: Any]?
     ) -> RasterImage? {
         switch filter {
+        case "exposure", "vibrance", "hue_saturation", "color_balance",
+            "black_and_white", "photo_filter", "channel_mixer", "selective_color",
+            "shadows_highlights", "white_balance", "gradient_map", "color_lookup":
+            // The destructive twin of the adjustment layer of the same
+            // name: the SAME core op (rz_image_adjust_op), parameters
+            // already validated in applyFilter above.
+            return adjustmentFilter(image, filter, adjustParams ?? [:])
         case "grayscale": return image.grayscaled()
         case "invert": return image.inverted()
         case "sepia": return image.sepia()
@@ -1160,8 +1189,8 @@ final class AgentServer {
                 + "instead, or target another layer.")
     }
 
-    /// The `op` argument of the adjustment tools, as one of the nine ops the
-    /// core's schema (core/src/adjust.rs) interprets.
+    /// The `op` argument of the adjustment tools, as one of the twenty-one
+    /// ops the core's schema (core/src/adjust.rs) interprets.
     private func adjustmentOp(_ name: String) throws -> AdjustmentLayerOp {
         guard let op = AdjustmentLayerOp(rawValue: name) else {
             let names = AdjustmentLayerOp.allCases.map { $0.rawValue }.joined(separator: ", ")
@@ -1200,6 +1229,10 @@ final class AgentServer {
         case .threshold: allowed = ["level"]
         case .posterize: allowed = ["levels"]
         case .invert, .grayscale, .sepia: allowed = []
+        case .exposure, .vibrance, .hueSaturation, .colorBalance, .blackAndWhite,
+            .photoFilter, .channelMixer, .selectiveColor, .shadowsHighlights,
+            .whiteBalance, .gradientMap, .colorLookup:
+            allowed = AdjustmentSchema.inputKeys(for: op)
         }
         let unknown = params.keys.filter { !allowed.contains($0) }.sorted()
         if let first = unknown.first {
@@ -1294,6 +1327,13 @@ final class AgentServer {
             }
         case .invert, .grayscale, .sepia:
             break // no params; the unknown-key check above already refused any
+        case .exposure, .vibrance, .hueSaturation, .colorBalance, .blackAndWhite,
+            .photoFilter, .channelMixer, .selectiveColor, .shadowsHighlights,
+            .whiteBalance, .gradientMap, .colorLookup:
+            // The phase-5 ops share ONE table-driven validator
+            // (AdjustmentSchema), which returns rather than falls through:
+            // color_lookup's `file` expansion REPLACES the params object.
+            return try AdjustmentSchema.validate(params, for: op)
         }
         return params
     }
@@ -1372,15 +1412,22 @@ final class AgentServer {
             }
             op = known
         }
-        let params = try adjustmentParams(a, for: op)
+        // The one merge this tool does, and only for color_lookup, whose
+        // table get_document has to elide (AgentServer+Adjustments.swift).
+        let params = try adjustmentParams(
+            mergingStoredLut(a, op: op, current: doc.adjustmentPayload(index)), for: op)
         guard let meta = AdjustmentLayerPayload(op: op, params: params).json() else {
             throw ToolError(message: "Could not encode the adjustment parameters")
         }
         try performGroupedEdit(document, "Edit \(op.displayName) Layer") {
             $0.withLayerMeta(index, meta)
         }
+        // Through the SAME elision get_document uses: a Color Lookup layer's
+        // base64 table is up to ~575 KB, and echoing it back would put in the
+        // reply exactly what `elidedAdjustmentParams` exists to keep out.
         return try jsonResult([
-            "ok": true, "layer": index, "op": op.rawValue, "params": params,
+            "ok": true, "layer": index, "op": op.rawValue,
+            "params": elidedAdjustmentParams(AdjustmentLayerPayload(op: op, params: params)),
         ])
     }
 

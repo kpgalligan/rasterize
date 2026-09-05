@@ -530,8 +530,10 @@ pub(crate) fn downsample_factor(sigma: f32) -> u32 {
 
 /// The sigma blurred at 1/`f` resolution so that, with the two Triangle
 /// resamples' own softening (`f² / 3` of variance), the result matches
-/// `sigma` at full resolution (module doc).
-fn reduced_sigma(sigma: f32, f: u32) -> f32 {
+/// `sigma` at full resolution (module doc). `pub(crate)` for
+/// `adjust_tone::tone_plane`, which reduces a plane itself rather than
+/// letting `blur_plane` do it, so that the crate keeps ONE such rule.
+pub(crate) fn reduced_sigma(sigma: f32, f: u32) -> f32 {
     let f = f as f32;
     (sigma * sigma - f * f / 3.0).max(0.0).sqrt() / f
 }

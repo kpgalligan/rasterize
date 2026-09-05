@@ -314,6 +314,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // Canvas Size rather than under a preferences window.
         menu.addItem(submenuItem(modeMenu()))
         menu.addItem(.separator())
+        // The destructive adjustments live here, next to Mode and Image
+        // Size, rather than under Filters: they change the picture's tone
+        // and colour, while Filters holds the true pixel filters (blur,
+        // sharpen, pixelate, noise, edge detect, emboss). Every item is the
+        // twin of an adjustment layer of the same name and runs the
+        // identical core op.
+        menu.addItem(submenuItem(adjustmentsMenu()))
+        menu.addItem(.separator())
+        menu.addItem(
+            item("Auto Tone", #selector(EditorViewController.autoTone(_:)), "l",
+                 [.command, .shift]))
+        menu.addItem(
+            item("Auto Contrast", #selector(EditorViewController.autoContrast(_:)), "l",
+                 [.command, .shift, .option]))
+        menu.addItem(
+            item("Auto Color", #selector(EditorViewController.autoColor(_:)), "b",
+                 [.command, .shift]))
+        menu.addItem(.separator())
         // Channel arithmetic and the channel list itself live under Image,
         // not Layer: channels are DOCUMENT state, next to Image Size and
         // Canvas Size.
@@ -321,6 +339,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menu.addItem(
             item("Calculations…", #selector(EditorViewController.calculationsSheet(_:))))
         menu.addItem(submenuItem(channelsMenu()))
+        return menu
+    }
+
+    /// Image > Adjustments: every tone and colour adjustment that rewrites
+    /// the active layer's pixels, in Photoshop's grouping with ours folded
+    /// in — tonal, then colour, then mapping, then the odds and ends. The
+    /// twelve phase-5 ops share one selector, each item's tag indexing
+    /// `AdjustmentMenuOrder.newOps` (layerStyleMenu's idiom); the older
+    /// items keep the selectors and shortcuts they already had.
+    private func adjustmentsMenu() -> NSMenu {
+        let menu = NSMenu(title: "Adjustments")
+        func destructive(_ op: AdjustmentLayerOp) -> NSMenuItem {
+            let entry = item(
+                op.displayName + "…", #selector(EditorViewController.showAdjustmentSheet(_:)))
+            // Every op passed here is in the list, so the fallback is
+            // unreachable; it exists so a mis-edit beeps rather than
+            // opening the wrong op's dialog.
+            entry.tag = AdjustmentMenuOrder.newOps.firstIndex(of: op) ?? -1
+            return entry
+        }
+        menu.addItem(
+            item(
+                "Brightness/Contrast/Saturation…",
+                #selector(EditorViewController.showAdjustments(_:)), "a",
+                [.command, .option]))
+        menu.addItem(item("Levels…", #selector(EditorViewController.showLevels(_:))))
+        menu.addItem(destructive(.exposure))
+        menu.addItem(.separator())
+        menu.addItem(destructive(.vibrance))
+        menu.addItem(destructive(.hueSaturation))
+        menu.addItem(destructive(.colorBalance))
+        menu.addItem(destructive(.blackAndWhite))
+        menu.addItem(destructive(.photoFilter))
+        menu.addItem(destructive(.channelMixer))
+        menu.addItem(destructive(.colorLookup))
+        menu.addItem(.separator())
+        menu.addItem(item("Invert", #selector(EditorViewController.applyInvert(_:)), "i"))
+        menu.addItem(item("Posterize…", #selector(EditorViewController.showPosterize(_:))))
+        menu.addItem(item("Threshold…", #selector(EditorViewController.showThreshold(_:))))
+        menu.addItem(destructive(.gradientMap))
+        menu.addItem(destructive(.selectiveColor))
+        menu.addItem(.separator())
+        menu.addItem(destructive(.shadowsHighlights))
+        menu.addItem(destructive(.whiteBalance))
+        menu.addItem(item("Hue Rotate…", #selector(EditorViewController.showHueRotate(_:))))
+        menu.addItem(item("Grayscale", #selector(EditorViewController.applyGrayscale(_:))))
+        menu.addItem(item("Sepia", #selector(EditorViewController.applySepia(_:))))
         return menu
     }
 
@@ -433,6 +498,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item("Posterize…", #selector(EditorViewController.newAdjustmentLayerPosterize(_:))))
         menu.addItem(
             item("Threshold…", #selector(EditorViewController.newAdjustmentLayerThreshold(_:))))
+        // The phase-5 ops, in AdjustmentMenuOrder's one order (shared with
+        // Image > Adjustments and the panel footer), tag-indexed into it.
+        for (tag, op) in AdjustmentMenuOrder.newOps.enumerated() {
+            let entry = item(
+                op.displayName + "…",
+                #selector(EditorViewController.newAdjustmentLayerOp(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
         menu.addItem(.separator())
         menu.addItem(
             item("Invert", #selector(EditorViewController.newAdjustmentLayerInvert(_:))))
@@ -491,21 +565,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         return menu
     }
 
+    /// Filters: the true PIXEL filters. Every tone and colour adjustment
+    /// moved to Image > Adjustments when the batch grew past what one flat
+    /// menu can carry — same selectors, same shortcuts, same behaviour.
     private func filtersMenu() -> NSMenu {
         let menu = NSMenu(title: "Filters")
-        menu.addItem(
-            item(
-                "Adjust Colors…", #selector(EditorViewController.showAdjustments(_:)), "a",
-                [.command, .option]))
-        menu.addItem(item("Levels…", #selector(EditorViewController.showLevels(_:))))
-        menu.addItem(item("Hue Rotate…", #selector(EditorViewController.showHueRotate(_:))))
-        menu.addItem(item("Threshold…", #selector(EditorViewController.showThreshold(_:))))
-        menu.addItem(item("Posterize…", #selector(EditorViewController.showPosterize(_:))))
-        menu.addItem(.separator())
-        menu.addItem(item("Grayscale", #selector(EditorViewController.applyGrayscale(_:))))
-        menu.addItem(item("Invert", #selector(EditorViewController.applyInvert(_:)), "i"))
-        menu.addItem(item("Sepia", #selector(EditorViewController.applySepia(_:))))
-        menu.addItem(.separator())
         menu.addItem(item("Gaussian Blur…", #selector(EditorViewController.showBlur(_:))))
         menu.addItem(item("Sharpen", #selector(EditorViewController.applySharpen(_:))))
         menu.addItem(item("Pixelate…", #selector(EditorViewController.showPixelate(_:))))
@@ -556,6 +620,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menu.addItem(
             item(
                 "Assistant", #selector(EditorViewController.showAssistant(_:)), "a",
+                [.command, .control]))
+        menu.addItem(
+            item(
+                "Info", #selector(EditorViewController.showInfo(_:)), "i",
                 [.command, .control]))
         return menu
     }

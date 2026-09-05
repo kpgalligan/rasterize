@@ -538,6 +538,99 @@ RzImage *rz_image_edge_detect(const RzImage *img);
 /* Emboss: 3x3 directional relief kernel on luma around mid-gray, opaque. */
 RzImage *rz_image_emboss(const RzImage *img);
 
+/* ------------------------------------------------------------------------ */
+/* Adjustments (the ONE destructive twin), statistics and readout           */
+/* ------------------------------------------------------------------------ */
+
+/* Applies the adjustment `op` with `params_json` — the SAME object an
+ * adjustment layer's meta carries (schema table in core/src/adjust.rs) — to
+ * img's pixels, destructively. This is the identical code path the
+ * compositor runs for an adjustment layer, so the filter and the layer can
+ * never drift. The one deliberate difference: a SPATIAL op
+ * (shadows_highlights) reads its neighbourhood from THIS image, while the
+ * layer reads it from the backdrop below itself, so the two agree on the
+ * same input and are different pictures on different inputs.
+ *
+ * An adjustment is a pure function of the numbers the document already
+ * holds: its parameters live in the same space as those pixels, so a colour
+ * in an adjustment's params is the DOCUMENT's numbers (like an eyedropper
+ * sample), not an authored sRGB colour like a layer style's. Where an op
+ * needs a colour space for its arithmetic it uses the sRGB transfer function
+ * and sRGB primaries, and its schema row says so.
+ *
+ * params_json may be NULL for "every default". NULL with a message through
+ * err_out (free with rz_string_free) when op is unknown, params_json is not
+ * valid UTF-8/JSON/an object, or the parameters are not valid for op; NULL
+ * with no message on a NULL image. Alpha untouched. */
+RzImage *rz_image_adjust_op(const RzImage *img, const char *op,
+                            const char *params_json, char **err_out);
+
+/* Parses an Adobe Cube LUT (.cube) at `path` into the params object a
+ * "color_lookup" adjustment stores: {"kind","size","source_size",
+ * "domain_min","domain_max","table","title"} as a heap JSON string freed
+ * with rz_string_free. 1D sizes 2..=65536 and 3D sizes 2..=64 are accepted;
+ * a table larger than this build STORES (1D 1024, 3D 33) is resampled down
+ * to that size. "source_size" is ALWAYS emitted and is the size the FILE
+ * declared, so a caller can report "resampled from 64" — "size" is what is
+ * stored. "title" is present only when the file carried a TITLE directive.
+ * NULL with a message through err_out for a missing/oversized/malformed file
+ * (the message names the path and what was wrong); never panics. */
+char *rz_lut_parse_cube(const char *path, char **err_out);
+
+/* Fills bins_out with 1024 counts — 256 red, then green, then blue, then
+ * Rec. 709 luma — and total_out with the number of pixels counted. A pixel
+ * counts when its alpha is non-zero and, when `mask` is given (a coverage
+ * buffer of exactly width*height bytes), its coverage is >= 128. `stride`
+ * counts every stride-th pixel in row-major order (0 and 1 both mean every
+ * pixel) and total_out reports how many were actually counted, so the
+ * proportions and the clipping counts stay comparable at any stride. A NULL
+ * total_out is tolerated — the bins still come back — but a NULL bins_out is
+ * not: false on that, or on a NULL image. */
+bool rz_image_histogram(const RzImage *img, const uint8_t *mask,
+                        uint32_t stride, uint32_t *bins_out,
+                        uint64_t *total_out);
+
+/* The straight RGBA at (x, y): the plain mean of the (2*reach+1) square
+ * about it with out-of-bounds pixels dropped (reach 0, 1 or 2 = point, 3x3,
+ * 5x5), truncating like the eyedropper it serves. Writes 4 bytes to
+ * rgba_out. false only when NO pixel of the block is inside the image, reach
+ * is above 2, or img/rgba_out is NULL — the CENTRE itself may be outside,
+ * which is what the eyedropper does today. */
+bool rz_image_sample(const RzImage *img, int32_t x, int32_t y, uint32_t reach,
+                     uint8_t *rgba_out);
+
+typedef enum {
+  RZ_AUTO_TONE = 0,     /* per-channel stretch */
+  RZ_AUTO_CONTRAST = 1, /* one stretch from the luma histogram */
+  RZ_AUTO_COLOR = 2,    /* per-channel stretch + neutral-candidate midtones */
+} RzAutoMode;
+
+/* Derives Levels parameters from img's own histogram — the same counting
+ * rule rz_image_histogram uses, so transparent pixels never move the black
+ * point — clipping `clip` of the counted pixels at each end (0..=0.1;
+ * 0.001 = Photoshop's 0.1%), and writes nine floats to params_out:
+ * black[3], white[3], gamma[3]. `mask` is optional (NULL = the whole
+ * image). false on a NULL image, an unknown mode, an out-of-range clip, an
+ * empty image, or when the result would be the identity (nothing to do). */
+bool rz_image_auto_levels(const RzImage *img, const uint8_t *mask,
+                          RzAutoMode mode, float clip, float *params_out);
+
+/* Levels with a black point, white point and gamma PER CHANNEL (three
+ * floats each, R, G, B). Same math and the same validity condition as
+ * rz_image_levels applied per channel: NULL unless every channel has
+ * 0 <= black < white <= 1 and gamma in [0.1, 10]. Alpha untouched. */
+RzImage *rz_image_levels_channels(const RzImage *img, const float *black,
+                                  const float *white, const float *gamma);
+
+/* CIE L*a*b* of one straight RGB triple of THIS document's pixels, through
+ * the document's own profile, against the D50 PCS white — so the same bytes
+ * read differently in an sRGB and a Display P3 document. Writes L, a, b to
+ * lab_out. false on a NULL doc/out pointer or a profile this build cannot
+ * model (a LUT profile), where the host must say so rather than assume
+ * sRGB. */
+bool rz_doc_lab(const RzDocument *doc, uint8_t r, uint8_t g, uint8_t b,
+                float *lab_out);
+
 /* ---- Selection regions and region painting ------------------------------
  *
  * Selection masks are canvas-sized u8 coverage buffers (width*height

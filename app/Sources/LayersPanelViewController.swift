@@ -19,6 +19,9 @@ final class LayersPanelViewController: NSViewController {
     /// Called when the user clicks the Assistant tab.
     var onShowAssistant: (() -> Void)?
 
+    /// Called when the user clicks the Info tab.
+    var onShowInfo: (() -> Void)?
+
     /// Called on a ⌘-click on a layer's own thumbnail (`.layer` — load its
     /// transparency) or its mask thumbnail (`.mask` — load the mask), with
     /// the selection tools' modifier convention for the combine mode.
@@ -97,10 +100,12 @@ final class LayersPanelViewController: NSViewController {
 
         // Panel tab row: Layers active here, Channels and Assistant switch
         // over.
-        let tab = PanelTabsView(titles: ["Layers", "Channels", "Assistant"], activeIndex: 0) {
-            [weak self] index in
+        let tab = PanelTabsView(
+            titles: ["Layers", "Channels", "Assistant", "Info"], activeIndex: 0
+        ) { [weak self] index in
             if index == 1 { self?.onShowChannels?() }
             if index == 2 { self?.onShowAssistant?() }
+            if index == 3 { self?.onShowInfo?() }
         }
         tab.translatesAutoresizingMaskIntoConstraints = false
 
@@ -468,6 +473,18 @@ final class LayersPanelViewController: NSViewController {
         add("Hue Rotate…", #selector(EditorViewController.newAdjustmentLayerHueRotate(_:)))
         add("Posterize…", #selector(EditorViewController.newAdjustmentLayerPosterize(_:)))
         add("Threshold…", #selector(EditorViewController.newAdjustmentLayerThreshold(_:)))
+        menu.addItem(.separator())
+        // The phase-5 ops, in AdjustmentMenuOrder's one order (the same
+        // list Image ▸ Adjustments and Layer ▸ New Adjustment Layer build
+        // from), each tagged with its index into it.
+        for (tag, op) in AdjustmentMenuOrder.newOps.enumerated() {
+            let entry = NSMenuItem(
+                title: op.displayName + "…",
+                action: #selector(EditorViewController.newAdjustmentLayerOp(_:)),
+                keyEquivalent: "")
+            entry.tag = tag
+            menu.addItem(entry)
+        }
         menu.addItem(.separator())
         add("Invert", #selector(EditorViewController.newAdjustmentLayerInvert(_:)))
         add("Grayscale", #selector(EditorViewController.newAdjustmentLayerGrayscale(_:)))

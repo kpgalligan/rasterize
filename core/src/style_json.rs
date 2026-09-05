@@ -209,7 +209,13 @@ fn object<'a>(value: &'a Value, path: &str) -> Result<&'a Map<String, Value>, St
         .ok_or_else(|| format!("{path} must be an object"))
 }
 
-fn gradient(
+/// The ONE gradient parser. Its second caller is the `gradient_map`
+/// adjustment (`adjust_map`), whose meta stores the SAME object so the core
+/// has one gradient spelling and one editor — with one difference to keep in
+/// mind: a style's stop colours are AUTHORED sRGB, converted into the
+/// document's space at composite time, while a map's are the DOCUMENT's own
+/// numbers, converted nowhere (see `adjust`'s colour note).
+pub(crate) fn gradient(
     obj: &Map<String, Value>,
     path: &str,
     key: &str,

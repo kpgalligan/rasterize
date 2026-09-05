@@ -135,10 +135,19 @@ func fieldLabel(_ text: String) -> NSTextField {
 }
 
 /// Bottom-left 10px mono footnote carried in the button row's leading slot.
+///
+/// `makeButtonRow` pins the row to both edges of the card and gives Cancel
+/// and Apply their intrinsic widths, so the footnote gets whatever is left —
+/// about 210 pt on the standard 420 pt card. A label built by
+/// `NSTextField(labelWithString:)` breaks by CLIPPING, so a longer footnote
+/// used to lose its tail mid-glyph with nothing to show it had: it ends
+/// with a tail ellipsis and carries the whole string as a tooltip instead.
 func sheetFootnote(_ text: String) -> NSTextField {
     let label = NSTextField(labelWithString: text)
     label.font = DS.mono(10)
     label.textColor = DS.textFaint
+    label.lineBreakMode = .byTruncatingTail
+    label.toolTip = text
     return label
 }
 
@@ -420,7 +429,9 @@ final class AdjustSheetController: NSViewController {
         let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
         let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
         view = makeSheetView(
-            title: "Adjust colors", content: grid,
+            // The menu item, the sheet title and the undo action name are
+            // one command, so all three read `AdjustmentLayerOp.bcs.displayName`.
+            title: AdjustmentLayerOp.bcs.displayName, content: grid,
             buttonRow: makeButtonRow(
                 cancel: cancelButton, apply: applyButton, leading: [resetButton]))
     }
@@ -482,7 +493,7 @@ final class AdjustSheetController: NSViewController {
         // Compose on the document's CURRENT active layer, not the captured
         // preview base, so any edit that slipped in while the sheet was open
         // survives.
-        document.applyToActiveLayer("Adjust Colors") {
+        document.applyToActiveLayer(AdjustmentLayerOp.bcs.displayName) {
             $0.adjusted(brightness: brightness, contrast: contrast, saturation: saturation)
         }
     }
@@ -1105,6 +1116,14 @@ final class AdjustmentLayerSheetController: NSViewController {
             // Curves has a dialog, but a bespoke one (the curve editor in
             // CurvesAdjustmentSheetController), not slider rows.
             return nil
+        case .exposure, .vibrance, .hueSaturation, .colorBalance, .blackAndWhite,
+            .photoFilter, .channelMixer, .selectiveColor, .shadowsHighlights,
+            .whiteBalance, .gradientMap, .colorLookup:
+            // The phase-5 ops have one sheet class each, built from
+            // AdjustmentSchema's table (AdjustmentSheets.make below): their
+            // controls are popups, swatches and gradient editors, not rows
+            // of sliders.
+            return nil
         case .invert, .grayscale, .sepia:
             // Parameterless: created directly, nothing to dialog.
             return nil
@@ -1114,7 +1133,7 @@ final class AdjustmentLayerSheetController: NSViewController {
     /// Whether `op` has a dialog to open — what enables Adjustment Options…
     /// (parameterless ops have none).
     static func opHasDialog(_ op: AdjustmentLayerOp) -> Bool {
-        op == .curves || config(for: op) != nil
+        op == .curves || AdjustmentSheets.hasDialog(op) || config(for: op) != nil
     }
 
     /// The one entry point the editor calls for both creation and re-edit;
@@ -1125,6 +1144,12 @@ final class AdjustmentLayerSheetController: NSViewController {
         op: AdjustmentLayerOp, document: ImageDocument, canvas: ImageCanvasView,
         mode: Mode, onCommitted: ((Int) -> Void)? = nil
     ) -> NSViewController? {
+        if let sheet = AdjustmentSheets.make(
+            op: op, document: document, canvas: canvas,
+            mode: AdjustmentSheetMode.from(mode), onCommitted: onCommitted)
+        {
+            return sheet
+        }
         if op == .curves {
             let controller = CurvesAdjustmentSheetController(
                 document: document, canvas: canvas, mode: mode)
@@ -1210,6 +1235,26 @@ final class AdjustmentLayerSheetController: NSViewController {
         grid.column(at: 0).xPlacement = .trailing
         grid.column(at: 0).width = 106
 
+        // Levels' handles mean nothing without the tones they move — and
+        // the plot is the BACKDROP BELOW the layer, not the composite,
+        // which would already have this layer's correction baked in.
+        var content: NSView = grid
+        if op == .levels {
+            let plot = HistogramView(frame: .zero)
+            Histogram.loadForSheet(
+                document, mode: AdjustmentSheetMode.from(mode), destructiveLayer: nil
+            ) { [weak plot] in plot?.bins = $0 }
+            NSLayoutConstraint.activate([
+                plot.widthAnchor.constraint(equalToConstant: 256),
+                plot.heightAnchor.constraint(equalToConstant: 72),
+            ])
+            let stack = NSStackView(views: [plot, grid])
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 10
+            content = stack
+        }
+
         let title: String
         if case .edit = mode {
             title = "\(op.displayName) options"
@@ -1219,7 +1264,7 @@ final class AdjustmentLayerSheetController: NSViewController {
         let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
         let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
         view = makeSheetView(
-            title: title, content: grid,
+            title: title, content: content,
             buttonRow: makeButtonRow(
                 cancel: cancelButton, apply: applyButton,
                 leading: [sheetFootnote("one undo step")]))
@@ -1389,6 +1434,13 @@ final class CurvesAdjustmentSheetController: NSViewController {
             }
         }
         super.init(nibName: nil, bundle: nil)
+        // The tones the curve moves, captured once and OFF the main thread:
+        // the BACKDROP BELOW the layer for an adjustment layer, so the plot
+        // shows what the curve acts on rather than the already-corrected
+        // composite.
+        Histogram.loadForSheet(
+            document, mode: AdjustmentSheetMode.from(mode), destructiveLayer: nil
+        ) { [weak self] in self?.curveView.histogram = $0 }
         renderer.onRender = { [weak self] cgImage in
             self?.canvas?.previewImage = cgImage
         }
@@ -1576,37 +1628,6 @@ extension SliderSheetController {
             ],
             compute: { image, values in
                 image.hueRotated(degrees: values[0])
-            })
-    }
-
-    static func levels(document: ImageDocument, canvas: ImageCanvasView) -> SliderSheetController {
-        SliderSheetController(
-            document: document, canvas: canvas,
-            title: "Levels", actionName: "Levels",
-            sliders: [
-                FilterSliderDescriptor(
-                    label: "Black:", min: 0, max: 0.99, initial: 0,
-                    format: { String(format: "%.2f", $0) }),
-                FilterSliderDescriptor(
-                    label: "White:", min: 0.01, max: 1, initial: 1,
-                    format: { String(format: "%.2f", $0) }),
-                // Log-feel gamma: the slider runs -1…1 and maps to 10^x, so
-                // 0.1, 1, and 10 sit at the left edge, center, and right edge.
-                FilterSliderDescriptor(
-                    label: "Gamma:", min: -1, max: 1, initial: 0,
-                    map: { pow(10, $0) },
-                    format: { String(format: "%.2f", $0) }),
-            ],
-            willChange: { changed, values in
-                // Keep black < white by pushing the OTHER slider along.
-                if changed == 0, values[1] <= values[0] {
-                    values[1] = min(values[0] + 0.01, 1)
-                } else if changed == 1, values[0] >= values[1] {
-                    values[0] = max(values[1] - 0.01, 0)
-                }
-            },
-            compute: { image, values in
-                image.levels(black: values[0], white: values[1], gamma: values[2])
             })
     }
 

@@ -206,6 +206,13 @@ final class CurveEditorView: NSView {
     var curveColor: NSColor = DS.textStrong {
         didSet { needsDisplay = true }
     }
+    /// The tones the curve moves, drawn behind it: the layer being filtered
+    /// for a destructive dialog, the BACKDROP BELOW the layer for an
+    /// adjustment layer's (`Histogram.forSheet`). The plot is 256 pt at the
+    /// default size, so one bar is one bin and nothing is resampled.
+    var histogram: HistogramBins? {
+        didSet { needsDisplay = true }
+    }
     var onPointsChanged: (([CurvePoint]) -> Void)?
     /// "in → out" while a point drags; nil when the drag ends.
     var onDragReadout: ((String?) -> Void)?
@@ -257,6 +264,15 @@ final class CurveEditorView: NSView {
 
         DS.canvasVoid.setFill()
         NSBezierPath(rect: rect).fill()
+
+        // The tones under the curve, clipped to the plot so a full bar
+        // cannot paint over the frame.
+        if let histogram = histogram {
+            NSGraphicsContext.current?.saveGraphicsState()
+            NSBezierPath(rect: rect).addClip()
+            drawHistogram(histogram, display: .luminosity, in: rect)
+            NSGraphicsContext.current?.restoreGraphicsState()
+        }
 
         // Light quarter gridlines.
         let grid = NSBezierPath()

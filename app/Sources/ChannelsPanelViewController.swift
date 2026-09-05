@@ -16,9 +16,10 @@ import AppKit
 final class ChannelsPanelViewController: NSViewController {
     weak var document: ImageDocument?
 
-    /// Tab switches, mirroring the other two panels.
+    /// Tab switches, mirroring the other three panels.
     var onShowLayers: (() -> Void)?
     var onShowAssistant: (() -> Void)?
+    var onShowInfo: (() -> Void)?
 
     /// The selected row's paint target: the editor makes it the edit target.
     var onSelectTarget: ((PaintTarget) -> Void)?
@@ -116,10 +117,12 @@ final class ChannelsPanelViewController: NSViewController {
         root.wantsLayer = true
         root.layer?.backgroundColor = DS.chromeBackground.cgColor
 
-        let tab = PanelTabsView(titles: ["Layers", "Channels", "Assistant"], activeIndex: 1) {
-            [weak self] index in
+        let tab = PanelTabsView(
+            titles: ["Layers", "Channels", "Assistant", "Info"], activeIndex: 1
+        ) { [weak self] index in
             if index == 0 { self?.onShowLayers?() }
             if index == 2 { self?.onShowAssistant?() }
+            if index == 3 { self?.onShowInfo?() }
         }
         tab.translatesAutoresizingMaskIntoConstraints = false
 

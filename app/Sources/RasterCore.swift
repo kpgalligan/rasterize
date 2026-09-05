@@ -120,6 +120,115 @@ final class RasterImage {
     func edgeDetected() -> RasterImage? { wrap(rz_image_edge_detect(ptr)) }
     func embossed() -> RasterImage? { wrap(rz_image_emboss(ptr)) }
 
+    // MARK: - Adjustments, statistics and auto tone
+
+    /// The adjustment `op` with `params` applied destructively — the SAME
+    /// object an adjustment layer's meta carries, run through the SAME core
+    /// code the compositor runs (core/src/adjust.rs's schema table is the
+    /// contract). One export covers every op, which is what makes the
+    /// filter and the layer incapable of drifting.
+    ///
+    /// nil for an unknown op or parameters the core refuses; the core's
+    /// message goes to the log only, because every caller validates against
+    /// `AdjustmentSchema` first and a sheet has nowhere to put a second
+    /// refusal.
+    func applyingAdjustment(op: String, params: [String: Any]) -> RasterImage? {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: params, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8)
+        else { return nil }
+        var err: UnsafeMutablePointer<CChar>? = nil
+        let handle = rz_image_adjust_op(ptr, op, json, &err)
+        if handle == nil, err != nil {
+            NSLog("rasterize: adjustment %@ refused: %@",
+                  op, takeErrorMessage(err, fallback: "invalid parameters"))
+        }
+        return wrap(handle)
+    }
+
+    /// 1024 counts — 256 red, then green, then blue, then Rec. 709 luma —
+    /// and the number of pixels counted. A pixel counts when its alpha is
+    /// non-zero and, with a mask, its coverage is at least 128. `stride`
+    /// counts every stride-th pixel in row-major order (0 and 1 both mean
+    /// every pixel) and the total says how many were actually counted, so
+    /// proportions stay comparable at any stride.
+    ///
+    /// Deliberately a flat array plus a count and not a struct: the typed
+    /// value lives beside the panel that draws it, so this file stays free
+    /// of feature types.
+    func histogram(mask: [UInt8]?, stride: Int) -> (bins: [UInt32], total: UInt64)? {
+        if let mask = mask, mask.count != width * height { return nil }
+        var bins = [UInt32](repeating: 0, count: 1024)
+        var total: UInt64 = 0
+        let step = UInt32(max(1, min(stride, Int(UInt32.max))))
+        let ok = bins.withUnsafeMutableBufferPointer { out -> Bool in
+            guard let mask = mask else {
+                return rz_image_histogram(ptr, nil, step, out.baseAddress, &total)
+            }
+            return mask.withUnsafeBufferPointer { coverage in
+                rz_image_histogram(ptr, coverage.baseAddress, step, out.baseAddress, &total)
+            }
+        }
+        return ok ? (bins, total) : nil
+    }
+
+    /// The straight RGBA at (x, y): the plain mean of the (2*reach+1)
+    /// square about it with out-of-bounds pixels dropped (reach 0/1/2 =
+    /// point, 3×3, 5×5), truncating. The CENTRE may be outside the image —
+    /// nil only when NO pixel of the block is inside, which is exactly what
+    /// the eyedropper needs at a canvas edge.
+    func sample(x: Int, y: Int, reach: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8)? {
+        guard reach >= 0, reach <= 2 else { return nil }
+        var rgba = [UInt8](repeating: 0, count: 4)
+        let ok = rgba.withUnsafeMutableBufferPointer { out in
+            rz_image_sample(
+                ptr, Int32(clamping: x), Int32(clamping: y), UInt32(reach), out.baseAddress)
+        }
+        return ok ? (rgba[0], rgba[1], rgba[2], rgba[3]) : nil
+    }
+
+    /// Levels parameters derived from this image's own histogram — the same
+    /// counting rule `histogram` uses, so a transparent surround never pins
+    /// the black point at 0. `clip` is the share of counted pixels dropped
+    /// at each end (0…0.1; 0.001 is Photoshop's 0.1 %). nil when the result
+    /// would change nothing, so the caller registers no undo step.
+    func autoLevels(mask: [UInt8]?, mode: RzAutoMode, clip: Double)
+        -> (black: [Double], white: [Double], gamma: [Double])?
+    {
+        if let mask = mask, mask.count != width * height { return nil }
+        var params = [Float](repeating: 0, count: 9)
+        let ok = params.withUnsafeMutableBufferPointer { out -> Bool in
+            guard let mask = mask else {
+                return rz_image_auto_levels(ptr, nil, mode, Float(clip), out.baseAddress)
+            }
+            return mask.withUnsafeBufferPointer { coverage in
+                rz_image_auto_levels(
+                    ptr, coverage.baseAddress, mode, Float(clip), out.baseAddress)
+            }
+        }
+        guard ok else { return nil }
+        let values = params.map(Double.init)
+        return (Array(values[0..<3]), Array(values[3..<6]), Array(values[6..<9]))
+    }
+
+    /// Levels with a black point, white point and gamma per channel — the
+    /// twin `autoLevels`' nine numbers feed. nil unless every channel has
+    /// 0 ≤ black < white ≤ 1 and gamma in 0.1…10.
+    func levelsChannels(black: [Double], white: [Double], gamma: [Double]) -> RasterImage? {
+        guard black.count == 3, white.count == 3, gamma.count == 3 else { return nil }
+        let b = black.map(Float.init)
+        let w = white.map(Float.init)
+        let g = gamma.map(Float.init)
+        return b.withUnsafeBufferPointer { bp in
+            w.withUnsafeBufferPointer { wp in
+                g.withUnsafeBufferPointer { gp in
+                    wrap(rz_image_levels_channels(
+                        ptr, bp.baseAddress, wp.baseAddress, gp.baseAddress))
+                }
+            }
+        }
+    }
+
     /// Composites a full-frame premultiplied RGBA8 overlay (top row first, no
     /// row padding) onto this image. `data` must point to width*height*4
     /// bytes; the dimensions must match this image exactly.
@@ -1265,6 +1374,21 @@ final class RasterDocument {
     /// only Convert to Profile refuses.
     var profileIsConvertible: Bool { rz_doc_profile_is_convertible(ptr) }
 
+    /// The CIE L*a*b* of one straight RGB triple of THIS document's pixels,
+    /// read through the document's own profile against the D50 PCS white.
+    /// The same bytes therefore read differently in an sRGB and a Display P3
+    /// document, which is the point — a sampled colour is already in the
+    /// document's space and converts nowhere (ColorProfile.swift's rule).
+    /// nil for a profile the core cannot model (a LUT profile), where the
+    /// readout must say so rather than assume sRGB.
+    func lab(r: UInt8, g: UInt8, b: UInt8) -> (l: Double, a: Double, b: Double)? {
+        var out = [Float](repeating: 0, count: 3)
+        let ok = out.withUnsafeMutableBufferPointer { lab in
+            rz_doc_lab(ptr, r, g, b, lab.baseAddress)
+        }
+        return ok ? (Double(out[0]), Double(out[1]), Double(out[2])) : nil
+    }
+
     /// The print resolution in pixels per inch, per axis. Pixels never
     /// change with it — only the print size does.
     var resolution: (x: Double, y: Double) {
@@ -1720,5 +1844,38 @@ enum ExportFormat: CaseIterable {
 extension Int {
     func clamped(_ low: Int, _ high: Int) -> Int {
         Swift.min(Swift.max(self, low), high)
+    }
+}
+
+// MARK: - Cube LUTs
+
+/// The `.cube` lookup-table parser — a free function, because parsing a file
+/// owns no handle: it produces the params object a `color_lookup` adjustment
+/// stores, which the caller then hands to `add_adjustment_layer` or to
+/// `applyingAdjustment`.
+enum RasterLUT {
+    /// The params object parsed from the Adobe Cube LUT at `path`, or the
+    /// core's message (`RasterCoreError.message`, since Swift's `Result`
+    /// needs a failure type that conforms to `Error` and this file already
+    /// has exactly one). A table larger than the core stores is resampled
+    /// down and `source_size` reports the size the FILE declared, so a host
+    /// can say "resampled from 64". The core never panics on a malformed
+    /// file — every failure comes back as a message naming the path.
+    static func parseCube(path: String) -> Result<[String: Any], RasterCoreError> {
+        var err: UnsafeMutablePointer<CChar>? = nil
+        guard let json = rz_lut_parse_cube(path, &err) else {
+            return .failure(RasterCoreError(
+                message: takeErrorMessage(err, fallback: "Could not read the LUT.")))
+        }
+        defer { rz_string_free(json) }
+        let text = String(cString: json)
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let params = object as? [String: Any]
+        else {
+            return .failure(RasterCoreError(
+                message: "The LUT parsed but its parameters could not be read."))
+        }
+        return .success(params)
     }
 }

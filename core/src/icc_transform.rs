@@ -275,6 +275,25 @@ impl MatrixTrc {
         true
     }
 
+    /// One ENCODED straight RGB triple in [0, 1] as PCS XYZ: linearized
+    /// with this profile's own three TRCs, then through its own matrix
+    /// columns. The result is ALREADY D50-adapted — that is what the three
+    /// XYZ tags mean (module doc) — so nothing downstream adapts again.
+    ///
+    /// Forward direction only. There is deliberately no `from_pcs_xyz`
+    /// twin: coming back would need a curve INVERTER, and this crate not
+    /// having one is a documented decision, not an omission.
+    pub(crate) fn to_pcs_xyz(&self, rgb: [f32; 3]) -> [f32; 3] {
+        let mut xyz = [0.0f64; 3];
+        for (c, column) in self.to_pcs.iter().enumerate() {
+            let linear = self.trc[c].eval(f64::from(rgb[c]));
+            for (slot, entry) in xyz.iter_mut().zip(column) {
+                *slot += entry * linear;
+            }
+        }
+        xyz.map(|v| v as f32)
+    }
+
     /// `inv(dst.to_pcs) · self.to_pcs`, row-major: the matrix a conversion
     /// from `self` to `dst` applies to linear RGB.
     fn combined_with(&self, dst: &MatrixTrc) -> [[f64; 3]; 3] {

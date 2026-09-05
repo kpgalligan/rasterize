@@ -24,6 +24,81 @@ extension AgentServer {
         "description": "Target document id from list_documents; omit for the frontmost document.",
     ]
 
+    /// The op vocabulary `add_adjustment_layer` publishes and `apply_filter`
+    /// points at — one constant, so the two surfaces can never describe the
+    /// same op differently.
+    ///
+    /// Written as an array of independently-typed literals joined, never as
+    /// a `+` chain: Swift's checker resolves a long `+` chain
+    /// combinatorially and gives up well before thirty terms, worst of all
+    /// at type scope where there is no contextual type.
+    private static let adjustmentOps: String = [
+        "bcs (brightness, contrast, saturation, each -1..1, default 0); ",
+        "curves (rgb, r, g, b: each an optional array of 2-16 [in, out] control points, ",
+        "values 0-255, monotone-interpolated; a missing channel is identity; per-channel ",
+        "curves apply before rgb); ",
+        "levels (black default 0, white default 1, 0 <= black < white <= 1; gamma 0.1-10, ",
+        "default 1 \u{2014} here gamma > 1 BRIGHTENS); hue_rotate (degrees, default 0); ",
+        "threshold (level 0-1, default 0.5); posterize (levels, integer 2-64, REQUIRED); ",
+        "exposure (exposure -20..20 stops default 0, offset -0.5..0.5 default 0, gamma ",
+        "0.01-9.99 default 1 \u{2014} computed in linear light, and this is Photoshop's ",
+        "EXPOSURE gamma, the inverse of levels' midtone gamma: greater than 1 DARKENS); ",
+        "vibrance (vibrance -1..1 default 0, weighted toward the least saturated pixels, ",
+        "half strength on skin hues, and clamped so -1 converges to grey; saturation ",
+        "-1..1 default 0, the same two-sided HSL curve hue_saturation's master saturation ",
+        "uses); ",
+        "hue_saturation (hue -180..180 degrees, saturation -1..1, lightness -1..1, all ",
+        "default 0; bands, an object with any of reds/yellows/greens/cyans/blues/magentas, ",
+        "each {hue -180..180 degrees, saturation -1..1, lightness -1..1, all default 0, ",
+        "center 0-360 (360 excluded) degrees defaulting to 60 \u{d7} the band's index \u{2014} ",
+        "reds 0, yellows 60, greens 120, cyans 180, blues 240, magentas 300 \u{2014} inner ",
+        "0-180 default 15, falloff 0-180 default 30}. A band selects on CHROMA as well as ",
+        "hue: a neutral has no hue to be one of, so it takes no band edit at all, and a ",
+        "near-neutral ramps in, reaching full weight about 13 levels off grey. ",
+        "colorize false, colorize_hue 0-360 ",
+        "(360 excluded) default 0, ",
+        "colorize_saturation 0-1 default 0.25, colorize_lightness -1..1 default 0); ",
+        "color_balance (shadows, midtones, highlights, each {cyan_red, magenta_green, ",
+        "yellow_blue} in -1..1 default 0; preserve_luminosity default true, a Rec. 709 ",
+        "luma rescale); ",
+        "black_and_white (reds 0.4, yellows 0.6, greens 0.4, cyans 0.6, blues 0.2, ",
+        "magentas 0.8, each -2..3; tint false, tint_color \"#998a66\" \u{2014} only its hue ",
+        "and saturation are used); ",
+        "photo_filter (color \"#ec8a00\" (Warming 85; Cooling 80 is \"#006dff\"), density ",
+        "0-1 default 0.25, preserve_luminosity default true); ",
+        "channel_mixer (monochrome false; red, green, blue, gray, each {r, g, b, constant} ",
+        "in -2..2, defaulting to the identity rows and gray {0.4, 0.4, 0.2, 0}; values are ",
+        "fractions \u{2014} Photoshop's percentages over 100); ",
+        "selective_color (method \"relative\" or \"absolute\"; reds, yellows, greens, cyans, ",
+        "blues, magentas, whites, neutrals, blacks, each {c, m, y, k} in -1..1 default 0); ",
+        "shadows_highlights (shadows {amount 0-1 default 0.35, tone 0.01-1 default 0.5}, ",
+        "highlights {amount default 0, tone default 0.5}, radius 0-1000 px default 30, ",
+        "color -1..1 default 0.2, midtone_contrast -1..1 default 0 \u{2014} the tone estimate ",
+        "is an alpha-weighted large-radius blur of the luma, so local contrast survives and ",
+        "a cut-out gets no halo; it is the one op whose destructive twin sees different ",
+        "pixels, because a layer reads the backdrop below it and a filter reads itself); ",
+        "white_balance (temperature 1667-25000 K default 6504, tint -150..150 default 0; ",
+        "the pair describes the illuminant the pixels were shot under and is Bradford-",
+        "adapted to D65, so a HIGHER kelvin warms the image and a POSITIVE tint pushes it ",
+        "toward magenta; computed in sRGB primaries; 6504/0 is the exact identity); ",
+        "gradient_map (gradient \u{2014} the same object SHAPE a layer style carries: stops, ",
+        "2 to 32 of {position 0..1, color, opacity}, plus reverse \u{2014} but its stop colours ",
+        "are the DOCUMENT's numbers, not the authored sRGB a style's are; the pixel's ",
+        "Rec. 709 luma picks the colour and a stop's opacity blends back toward the ",
+        "original; dither default true adds a deterministic sub-level offset that stops ",
+        "8-bit banding \u{2014} it is keyed on the pixel's position, which the layer counts ",
+        "from the canvas and the destructive twin counts from the layer it was handed, so ",
+        "on a layer whose offset is not 0,0 the two land the jitter on different pixels ",
+        "and differ by one code on about half of them; pass dither false to compare them ",
+        "exactly); ",
+        "color_lookup (a .cube LUT: pass file, an absolute path this app parses, or the ",
+        "stored form kind \"1d\"|\"3d\", size, table (base64 f32), domain_min, domain_max, ",
+        "title, and source_size \u{2014} the .cube's own size when the table was resampled ",
+        "down to this build's storage cap (3D 33, 1D 1024); strength 0-1 default 1. ",
+        "get_document elides the table but keeps every other key); ",
+        "invert, grayscale, sepia (none).",
+    ].joined()
+
     func catalogJSON() throws -> String {
         let docID = Self.docIDProperty
         let index: [String: Any] = [
@@ -49,6 +124,18 @@ extension AgentServer {
         let profilePath: [String: Any] = [
             "type": "string",
             "description": "Path to an .icc/.icm profile; required when profile is \"file\".",
+        ]
+        // The three Auto commands take the same three arguments; the prose
+        // above each is what differs.
+        let autoProperties: [String: Any] = [
+            "layer": index,
+            "clip": [
+                "type": "number", "minimum": 0, "maximum": 0.1,
+                "description": "Share of the counted pixels dropped at EACH end before the "
+                    + "stretch (default 0.001 = 0.1 %). Larger values push more of the "
+                    + "image to pure black and pure white.",
+            ],
+            "document_id": docID,
         ]
         let blendNames = RzBlendMode.allBlendModes.map { $0.1 }
         // The modes a SINGLE 8-bit plane can carry: the four HSL modes are
@@ -237,6 +324,66 @@ extension AgentServer {
                     "y": [
                         "type": "integer",
                         "description": "Pixel y in canvas coordinates (0 = top edge).",
+                    ],
+                    "document_id": docID,
+                ], required: ["x", "y"]),
+            tool(
+                "histogram",
+                "Counts the tones of one image: 256 bins each for red, green, blue and "
+                    + "Rec. 709 luma, over the flattened composite (source \"composite\", the "
+                    + "default) or one layer (\"layer\" with layer), gated by the current "
+                    + "selection unless selection is false. Fully transparent pixels are not "
+                    + "counted, and with a selection a pixel counts when its coverage is 128 "
+                    + "or more \u{2014} the same 50 % rule the marquee uses. Reports total "
+                    + "(pixels counted) and clipped.shadows / clipped.highlights, the largest "
+                    + "per-channel count sitting in bin 0 / bin 255, which is what the panel's "
+                    + "clipping warning lights on. This tool always counts every pixel; only "
+                    + "the app's live panel samples. Read-only: no undo step, no dirty flag. "
+                    + "The UI path is the Info panel's histogram (also the plot behind Levels "
+                    + "and Curves).",
+                [
+                    "source": [
+                        "type": "string", "enum": ["composite", "layer"],
+                        "description": "What to count: the flattened composite (default) or "
+                            + "one layer's canvas-space pixels.",
+                    ],
+                    "layer": index,
+                    "selection": [
+                        "type": "boolean",
+                        "description": "Gate the count on the current selection when there "
+                            + "is one (default true).",
+                    ],
+                    "document_id": docID,
+                ]),
+            tool(
+                "sample_pixel",
+                "Reads one pixel off the flattened composite and reports it every way the "
+                    + "Info panel does. r/g/b/a and hex are the DOCUMENT's own numbers, "
+                    + "converted nowhere; hsb is derived from them (h in degrees, s and b in "
+                    + "percent); lab is CIE L*a*b* against the D50 PCS white computed through "
+                    + "the document's OWN profile, so the same bytes read differently in an "
+                    + "sRGB and a Display P3 document \u{2014} it is null when this build cannot "
+                    + "model the profile (a LUT profile), and lab_space names the profile it "
+                    + "went through. paint_hex is the closest sRGB spelling for a colour "
+                    + "argument, with paint_hex_exact false when the pixel is outside the "
+                    + "sRGB gamut. sample_size 1, 3 or 5 averages that square about (x, y), "
+                    + "the eyedropper's own rule \u{2014} including its habit of accepting a "
+                    + "centre just outside the canvas as long as part of the square is "
+                    + "inside. Read-only. The UI path is the Info panel's readout; "
+                    + "sample_color is the paint-oriented twin.",
+                [
+                    "x": [
+                        "type": "integer",
+                        "description": "Pixel x in canvas coordinates (0 = left edge).",
+                    ],
+                    "y": [
+                        "type": "integer",
+                        "description": "Pixel y in canvas coordinates (0 = top edge).",
+                    ],
+                    "sample_size": [
+                        "type": "integer", "enum": [1, 3, 5],
+                        "description": "Side of the square averaged about (x, y); 1 (the "
+                            + "default) is the pixel itself.",
                     ],
                     "document_id": docID,
                 ], required: ["x", "y"]),
@@ -633,15 +780,10 @@ extension AgentServer {
                     + "apply_filter's matching filters, but reversible. The layer always gets "
                     + "a mask gating where the adjustment applies: built from the current "
                     + "selection when one exists (which stays active), else reveal-all; "
-                    + "brush/eraser strokes on the layer paint that mask. Ops and their "
-                    + "params: bcs (brightness, contrast, saturation, each -1..1, default 0); "
-                    + "curves (rgb, r, g, b: each an optional array of 2-16 [in, out] control "
-                    + "points, values 0-255, monotone-interpolated; a missing channel is "
-                    + "identity; per-channel curves apply before rgb); levels (black default "
-                    + "0, white default 1, 0 <= black < white <= 1; gamma 0.1-10, default 1); "
-                    + "hue_rotate (degrees, default 0); threshold (level 0-1, default 0.5); "
-                    + "posterize (levels, integer 2-64, REQUIRED); invert, grayscale, sepia "
-                    + "(none).",
+                    + "brush/eraser strokes on the layer paint that mask. A colour in an "
+                    + "adjustment's params is in the DOCUMENT's numbers, not authored sRGB "
+                    + "\u{2014} an adjustment transforms the pixels it sits over. Ops and their "
+                    + "params: " + Self.adjustmentOps,
                 [
                     "op": [
                         "type": "string",
@@ -652,7 +794,7 @@ extension AgentServer {
                         "type": "object",
                         "description": "Parameters for op (see the tool description); omit "
                             + "for that op's defaults. posterize has no default: its levels "
-                            + "is required.",
+                            + "is required, and color_lookup needs file or a complete table.",
                     ],
                     "name": [
                         "type": "string",
@@ -665,10 +807,17 @@ extension AgentServer {
                 "Changes an existing adjustment layer non-destructively by replacing its "
                     + "stored description — one undo step; pixels, mask, opacity, blend mode "
                     + "and stacking are untouched. params REPLACES the whole params object "
-                    + "(pass every key you want kept — nothing is merged); op without params "
+                    + "(pass every key you want kept — nothing is merged, with one stated "
+                    + "exception); op without params "
                     + "switches the layer to that op's defaults. Ops and params exactly as in "
-                    + "add_adjustment_layer. Errors when the target layer is not an "
-                    + "adjustment layer.",
+                    + "add_adjustment_layer. The exception is a color_lookup layer's LUT: "
+                    + "because get_document has to elide its table, omitting kind, size, "
+                    + "table, source_size, domain_min, domain_max and title — or passing the "
+                    + "elision placeholder back as table — keeps the LUT the layer already "
+                    + "holds, so "
+                    + "{\"strength\": 0.5} alone is enough to restrength it. Pass file, an "
+                    + "absolute .cube path, to replace the LUT instead. Errors when the target "
+                    + "layer is not an adjustment layer.",
                 [
                     "layer": index,
                     "op": [
@@ -684,6 +833,32 @@ extension AgentServer {
                     "document_id": docID,
                 ]),
             tool(
+                "auto_tone",
+                "Stretches EACH channel's own histogram to the full range, clipping clip of "
+                    + "the counted pixels at each end (default 0.001 = 0.1 %, Photoshop's own "
+                    + "default; fully transparent pixels are never counted), then applies the "
+                    + "levels math destructively to one layer \u{2014} one undo step. Reports the "
+                    + "derived black, white and gamma per channel; changed is false when the "
+                    + "image is already at full range (nothing is written). Errors on an "
+                    + "adjustment layer. The UI path is Image > Auto Tone (\u{21E7}\u{2318}L).",
+                autoProperties),
+            tool(
+                "auto_contrast",
+                "Auto Tone with ONE black and white point derived from the luma histogram "
+                    + "and applied to all three channels, so the colour balance is untouched. "
+                    + "The UI path is Image > Auto Contrast (\u{2325}\u{21E7}\u{2318}L).",
+                autoProperties),
+            tool(
+                "auto_color",
+                "Auto Tone's per-channel stretch plus a per-channel gamma that snaps the "
+                    + "midtones neutral. The gamma is derived only from near-neutral midtone "
+                    + "pixels and is clamped to 0.5-2.0, so a legitimately coloured scene "
+                    + "\u{2014} a sunset, a forest, a brick wall \u{2014} is not neutralised; when too "
+                    + "few pixels qualify every gamma stays 1. This is a neutral-candidate "
+                    + "snap, not Photoshop's algorithm. The UI path is Image > Auto Color "
+                    + "(\u{21E7}\u{2318}B).",
+                autoProperties),
+            tool(
                 "apply_filter",
                 "Applies a filter or adjustment DESTRUCTIVELY to one layer's pixels (prefer "
                     + "add_adjustment_layer for a reversible color adjustment; this tool "
@@ -693,7 +868,17 @@ extension AgentServer {
                     + "(brightness, contrast, saturation, each -1..1, default 0); levels "
                     + "(black 0-1, white 0-1, gamma 0.1-10); hue_rotate (degrees); threshold "
                     + "(level 0-1); posterize (levels 2-64); pixelate (block 1-1024); "
-                    + "add_noise (amount 0-1, seed).",
+                    + "add_noise (amount 0-1, seed). Every adjustment-layer op also runs "
+                    + "destructively here \u{2014} exposure, vibrance, hue_saturation, "
+                    + "color_balance, black_and_white, photo_filter, channel_mixer, "
+                    + "selective_color, shadows_highlights, white_balance, gradient_map, "
+                    + "color_lookup \u{2014} with its parameters in a params OBJECT (not flat), "
+                    + "exactly as add_adjustment_layer takes them. The older filters listed "
+                    + "first read their arguments FLAT. Each style REFUSES the other rather "
+                    + "than ignoring it: posterize takes levels beside filter and is refused "
+                    + "a params object, and exposure takes {\"params\": {\"gamma\": 0.4}} and "
+                    + "is refused a bare gamma \u{2014} which would otherwise have applied the "
+                    + "op's defaults and reported success.",
                 [
                     "filter": [
                         "type": "string",
@@ -701,6 +886,10 @@ extension AgentServer {
                             "grayscale", "invert", "sepia", "edge_detect", "emboss", "blur",
                             "sharpen", "adjust", "levels", "hue_rotate", "threshold",
                             "posterize", "pixelate", "add_noise",
+                            "exposure", "vibrance", "hue_saturation", "color_balance",
+                            "black_and_white", "photo_filter", "channel_mixer",
+                            "selective_color", "shadows_highlights", "white_balance",
+                            "gradient_map", "color_lookup",
                         ],
                     ],
                     "layer": index,
@@ -711,6 +900,12 @@ extension AgentServer {
                     "degrees": ["type": "number"], "level": ["type": "number"],
                     "levels": ["type": "integer"], "block": ["type": "integer"],
                     "seed": ["type": "integer"],
+                    "params": [
+                        "type": "object",
+                        "description": "Parameters for the adjustment ops (see "
+                            + "add_adjustment_layer); the older filters take their "
+                            + "arguments flat.",
+                    ],
                     "target": [
                         "type": "string",
                         "description": "What the filter runs on: \"layer\" (default) the "

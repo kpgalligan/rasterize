@@ -6,6 +6,15 @@
 //! `ffi_util`. This file declares modules and re-exports only.
 
 mod adjust;
+mod adjust_color;
+mod adjust_curves;
+mod adjust_lut;
+mod adjust_map;
+mod adjust_math;
+mod adjust_mix;
+mod adjust_parse;
+mod adjust_tone;
+mod adjust_white_balance;
 pub mod agent;
 pub mod assistant;
 mod blend;
@@ -20,6 +29,7 @@ pub mod doc_retouch;
 pub mod doc_select;
 pub mod doc_transform;
 pub mod ffi;
+pub mod ffi_adjust;
 pub mod ffi_agent;
 pub mod ffi_assistant;
 pub mod ffi_channel;
@@ -31,11 +41,14 @@ mod ffi_util;
 pub mod icc;
 mod icc_builtin;
 pub mod icc_transform;
+mod lab;
 pub mod metadata;
 mod metadata_write;
 mod metadata_xmp;
 mod ops;
+mod ops_auto;
 mod ops_filters;
+mod ops_stats;
 mod psd;
 mod rz_image;
 mod rzdc;

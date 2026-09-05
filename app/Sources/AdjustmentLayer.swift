@@ -6,7 +6,10 @@ import Foundation
 /// badges as an adjustment layer (`rz_doc_layer_is_adjustment`), and still
 /// round-trips untouched through `AdjustmentLayerPayload`; only the app-side
 /// dialog would be missing. Adding an op means: a case here, a dialog behind
-/// `AdjustmentLayerSheetController.make`, and a menu item.
+/// `AdjustmentLayerSheetController.make` — which now hands the phase-5 ops to
+/// `AdjustmentSheets.make` (AdjustmentSheet.swift), whose parameter table is
+/// `AdjustmentSchema` — and a menu item (built from
+/// `AdjustmentMenuOrder.newOps`).
 enum AdjustmentLayerOp: String, CaseIterable {
     case bcs = "bcs"
     case curves = "curves"
@@ -17,6 +20,18 @@ enum AdjustmentLayerOp: String, CaseIterable {
     case invert = "invert"
     case grayscale = "grayscale"
     case sepia = "sepia"
+    case exposure = "exposure"
+    case vibrance = "vibrance"
+    case hueSaturation = "hue_saturation"
+    case colorBalance = "color_balance"
+    case blackAndWhite = "black_and_white"
+    case photoFilter = "photo_filter"
+    case channelMixer = "channel_mixer"
+    case selectiveColor = "selective_color"
+    case shadowsHighlights = "shadows_highlights"
+    case whiteBalance = "white_balance"
+    case gradientMap = "gradient_map"
+    case colorLookup = "color_lookup"
 
     /// The user-facing name: the new layer's default name, and the stem of
     /// the menu item ("Brightness/Contrast/Saturation…") and the undo action
@@ -33,15 +48,33 @@ enum AdjustmentLayerOp: String, CaseIterable {
         case .invert: return "Invert"
         case .grayscale: return "Grayscale"
         case .sepia: return "Sepia"
+        case .exposure: return "Exposure"
+        case .vibrance: return "Vibrance"
+        case .hueSaturation: return "Hue/Saturation"
+        case .colorBalance: return "Color Balance"
+        case .blackAndWhite: return "Black & White"
+        case .photoFilter: return "Photo Filter"
+        case .channelMixer: return "Channel Mixer"
+        case .selectiveColor: return "Selective Color"
+        case .shadowsHighlights: return "Shadows/Highlights"
+        case .whiteBalance: return "White Balance"
+        case .gradientMap: return "Gradient Map"
+        case .colorLookup: return "Color Lookup"
         }
     }
 
     /// Ops with no params: created immediately, no dialog, and Adjustment
-    /// Options… stays disabled for them.
+    /// Options… stays disabled for them. Every phase-5 op is parameterized
+    /// — each carries at least one number — so the list below never grows
+    /// on that side.
     var isParameterless: Bool {
         switch self {
         case .invert, .grayscale, .sepia: return true
         case .bcs, .curves, .levels, .hueRotate, .posterize, .threshold: return false
+        case .exposure, .vibrance, .hueSaturation, .colorBalance, .blackAndWhite,
+            .photoFilter, .channelMixer, .selectiveColor, .shadowsHighlights,
+            .whiteBalance, .gradientMap, .colorLookup:
+            return false
         }
     }
 }
@@ -86,6 +119,55 @@ struct AdjustmentLayerPayload {
             return def
         }
         return value
+    }
+
+    /// A nested params object (`{cyan_red, …}`, one mixer row, a gradient),
+    /// or nil when the key is absent or holds something else. Same
+    /// contract as `number`: a dialog reading a malformed sub-object falls
+    /// back to the op's defaults rather than refusing to open.
+    func object(_ key: String) -> [String: Any]? {
+        params[key] as? [String: Any]
+    }
+
+    /// A boolean parameter, defensively. JSON `true`/`false` and the 0/1
+    /// numbers an over-eager encoder may produce both read; anything else
+    /// takes `def`.
+    func bool(_ key: String, default def: Bool) -> Bool {
+        guard let value = params[key] as? NSNumber else { return def }
+        return value.boolValue
+    }
+
+    /// A string parameter (an enum choice, a LUT title), defensively.
+    func string(_ key: String, default def: String) -> String {
+        params[key] as? String ?? def
+    }
+
+    /// A `#rrggbb` colour parameter, defensively — a colour in an
+    /// adjustment's params is the DOCUMENT's numbers (AdjustmentColor), so
+    /// this only validates the SPELLING and converts nothing. Anything that
+    /// is not six hex digits behind a `#` takes `def`.
+    func colorHex(_ key: String, default def: String) -> String {
+        guard let text = params[key] as? String, text.count == 7,
+              text.hasPrefix("#"),
+              text.dropFirst().allSatisfy({ $0.isHexDigit })
+        else { return def }
+        return text.lowercased()
+    }
+
+    /// A fixed-length array of numbers (a LUT domain corner), defensively:
+    /// a wrong length, a non-numeric entry or a non-finite one all take
+    /// `def`.
+    func numbers(_ key: String, count: Int, default def: [Double]) -> [Double] {
+        guard let list = params[key] as? [Any], list.count == count else { return def }
+        var out: [Double] = []
+        out.reserveCapacity(count)
+        for entry in list {
+            guard let value = (entry as? NSNumber)?.doubleValue, value.isFinite else {
+                return def
+            }
+            out.append(value)
+        }
+        return out
     }
 
     /// The JSON to store as the layer's metadata; nil only if the params

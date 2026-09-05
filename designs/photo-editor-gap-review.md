@@ -1,6 +1,6 @@
 # From Compositor to Photo Editor: a Gap Review
 
-**Status: in progress (updated 4 September 2026) — phases 1 to 4 of the order in section 4 have shipped; section 0 records what landed, what was decided along the way, and where to restart.** A
+**Status: in progress (updated 5 September 2026) — phases 1 to 5 of the order in section 4 have shipped; section 0 records what landed, what was decided along the way, and where to restart.** A
 fresh-eyes review of the shipped feature set against what a working
 photographer actually reaches for in Photoshop, followed by a large, sized
 catalog of what to build. Companion to `next-features.md` (whose open
@@ -237,14 +237,251 @@ Decisions worth knowing:
   sheets, the Working Space check marks, Image Size with Resample off,
   ⌘P and ⇧⌘P, and a wide-gamut display — all worth one manual pass.
 
+### Phase 5 — the adjustment batch (§3B) plus histogram and info panels (§3A rows 6–7): shipped
+
+The whole of §3B — twelve new adjustments and the auto trio — plus the
+histogram and Info rows of §3A. Match Color and Equalize stayed out (the
+spec defers them), and so did the presets browser, on-canvas targeted
+adjustment and any change to the existing nine ops' semantics.
+Adjustment-layer ops: 9 → **21**. Decisions worth knowing:
+
+- **There is exactly ONE destructive twin, not twelve.**
+  `rz_image_adjust_op(img, op, params_json, err_out)` runs
+  `Adjustment::from_op` + `adjust_math::apply_to_image` — the same code
+  the compositor runs — so "apply the layer" and "run the filter" cannot
+  drift, and the invariant is now literal rather than mirrored. Twelve
+  exports with up to 37 float parameters each is not a C surface anyone
+  could maintain; a JSON + `err_out` FFI has the `rz_doc_set_layer_style`
+  precedent. `adjustment_tests.rs`'s parity test gained a row per op.
+  Measured end to end over MCP on `samples/plasma.jpg`: all ten pairs of
+  full-resolution PNGs saved from `add_adjustment_layer` and from
+  `apply_filter` with the same params are **byte-identical**, hashes and
+  all. That is not luck — `doc::composite_adjustment_into` takes the
+  blended value VERBATIM when `k >= 1.0` (a full-opacity, unmasked
+  adjustment) instead of lerping to it, because `cb + (e - cb) * 1.0` is
+  not the floating-point identity and a value on an exact half-code
+  quantizes one step apart. Delete that branch and the drift comes back;
+  `adjustment_tests::full_strength_adjustment_layer_is_byte_identical_over_every_level`
+  is what stops that happening silently. The parity table keeps a ±1
+  tolerance only for the legacy nine, whose 0–255 arithmetic is frozen.
+- **The first stated exception to that invariant is spatial.** Every op is
+  a pure function of the pixels handed to it; `shadows_highlights` — the
+  only op that reads a neighbourhood — is handed the layer's own image by
+  the filter and the backdrop below itself by the layer, so the two agree
+  on the same input and are deliberately different pictures on different
+  inputs. That is Photoshop's own distinction. It is written verbatim in
+  `adjust.rs`'s module doc, the `add_adjustment_layer` catalog entry and
+  the README, alongside the other two: the legacy nine's 0–255 arithmetic,
+  and `gradient_map`'s position-keyed dither, which the layer counts from
+  the canvas and the filter from the layer it was handed — so on a layer
+  at a non-zero offset the jitter falls on different pixels (`dither:
+  false` makes them exact again).
+- **`Adjustment::apply` became `apply_at(rgb, guide, xy)`.** Two
+  arguments ride along for ops that cannot be written per pixel:
+  `guide` is this pixel's value in the plane `Adjustment::guide` builds
+  once per image or composite (Shadows/Highlights' large-radius,
+  **alpha-weighted** blur of the luma, routed through the one
+  `style_render::blur_plane` — the alpha weighting is what stops a
+  cut-out haloing), and `xy` is the pixel's position, canvas on the layer
+  path and image on the destructive one, the convention
+  `blend::dissolve_threshold` already used. Every other op returns no
+  plane and pays one `Option` check. There is deliberately **no plane
+  cache** — the plane is a function of the BACKDROP, which a live stroke
+  on a layer underneath changes on every tick, so anything keyed more
+  cheaply than the backdrop's contents would serve a stale guide. What is
+  bounded instead is the cost of building it, and both bounds matter at
+  the sizes the app supports (measured at 12 MP through
+  `rz_image_adjust_op`, against a 69 ms per-pixel-op baseline): the plane
+  is held at the resolution a blur at that radius actually carries
+  (`adjust_tone::GuidePlane`, one box-averaged pass into a
+  `downsample_factor`-sized grid and a blur of THAT, read back bilinear —
+  479 ms → 384 ms at radius 30, and three canvas-sized intermediates plus
+  two full-canvas resample round trips replaced by three of 1/64 the
+  size); and a Shadows/Highlights whose two amounts are zero never reads
+  the guide, so it builds none (428 ms → 162 ms). The earlier record's
+  "~2 % of composite time" was measured against a whole-document
+  composite that included the layer's own per-pixel cost; the guide alone
+  was closer to half of it.
+- **An adjustment's parameters are DOCUMENT-space numbers, and no
+  adjustment converts anything through a profile.** An `RzImage` carries
+  no profile, so a profile-dependent adjustment would make the
+  destructive twin and the layer disagree on a non-sRGB document — the
+  one thing that must stay tested. So a colour in an adjustment's params
+  is the document's numbers, like an eyedropper sample, not an authored
+  sRGB colour like a layer style's; where an op needs a space for its
+  arithmetic (`white_balance`'s XYZ round trip) it uses the sRGB transfer
+  function and sRGB D65 primaries, stated in its schema row. Two visible
+  consequences: (1) `gradient_map` reuses `style::GradientFill` and its
+  parser — one gradient spelling in the core — so the **same JSON shape
+  means different things** under a style (authored sRGB, converted at
+  composite time) and under a map (the document's numbers, converted
+  nowhere); that sentence is in the schema row, the catalog, the now
+  `pub(crate)` `style_json::gradient` and `GradientEditorView`'s class
+  doc, and the view takes a `colorSpace` so a future style caller can
+  hand it sRGB. (2) **Named presets are still authored colours** — Photo
+  Filter's eight, Black & White's `#998a66`, Gradient Map's ramps — so
+  they are defined in sRGB and converted into the document's numbers
+  ONCE, by the sheet, at the moment the user picks one. What is stored is
+  always the document's numbers. White Balance's identity is D65
+  (6504 K / 0), snapped exactly rather than left near-identity by the CCT
+  fit, because that is the number a photographer expects.
+- **The two gamma conventions are the one place a word means opposite
+  things**, so all three surfaces say which: `levels`' midtone gamma is
+  `out = in^(1/γ)` and above 1 **brightens**; `exposure`'s is
+  `out = u^γ` and above 1 **darkens** (Photoshop's Exposure convention),
+  with the sheet's slider drawn reversed — 9.99 left, 0.01 right — so
+  dragging right lightens while the number falls.
+- **A Hue/Saturation band selects on chroma as well as hue.** The ramp
+  itself is Photoshop's (inner 15°, falloff 30°, so the six bands sum to
+  exactly 1 at every hue and "all six" IS the master edit), but a hue
+  alone cannot say which pixels a range is about: `rgb_to_hsl` answers 0°
+  for a neutral, so every grey sat at the dead centre of Reds and a pixel
+  one 8-bit level off neutral landed on an exact multiple of 60°. Hue and
+  Saturation hid it — both are fixed points at zero chroma — while
+  Lightness applied the edit in full, so one slider of one range behaved
+  unlike all the others and one level of sensor noise blotched. The band
+  weight is therefore multiplied by `(min(chroma / 0.05, 1))²` on the
+  max-min extent (`adjust_color::band_chroma_gate`): zero at a neutral,
+  full by about 13 levels, and quadratic so its slope at zero is zero and
+  quantization noise earns 0.6 % of the band rather than 8 %.
+- **Shadows/Highlights has ONE radius**, not Photoshop's one per band:
+  two radii mean two blurred guide planes per composite for the same
+  picture. The schema row says so.
+- **The LUT lives in the layer's meta**, base64 little-endian f32, with a
+  storage cap of 3D **33** / 1D **1024**; a bigger `.cube` (files up to
+  3D 64 / 1D 65536 are read) is resampled down by `rz_lut_parse_cube`,
+  which always reports the file's own size as `source_size` so a host can
+  say "resampled from 64". 33³ is the industry delivery size and
+  film-emulation packs are smooth by construction, so the resample is
+  invisible; `MAX_RZDC_META_LEN` (16 MiB) was never the binding
+  constraint. **Render cost was the real problem**, since
+  `Adjustment::from_meta` runs on every `composite_layer_into`: fixed by
+  an `Arc<Vec<f32>>` table, a `Clone` derive, and a 16-entry LRU memo in
+  `adjust_lut` keyed on the whole meta string (sampled prehash, verified
+  by full equality) consulted **only when `meta.len() > 64 KiB`**, so the
+  other twenty ops pay one integer comparison. The capacity is a
+  correctness-of-caching matter, not a tuning knob: one composite walks
+  the layers in a fixed order, so a memo smaller than the number of
+  Color Lookup layers evicts exactly the entry the next lookup wants and
+  every layer re-parses its ~575 KB meta on every render. Measured at
+  20 MP: a 33³ `color_lookup` layer costs ~1 % of composite time (757 ms
+  vs 748 ms). The memo is transparent — same input, same output — which
+  is why it does not violate the core's purity rule. `get_document`
+  elides the table, replacing it with a placeholder that names the entry
+  count and BOTH recovery paths — keep the stored LUT by omitting the key
+  or echoing the placeholder back, or replace it wholesale with a `file`
+  path (`AgentServer+Adjustments.elidedAdjustmentParams` builds the exact
+  wording, and `mergingStoredLut` implements the keep) — and keeps every
+  other key, `source_size` included; MCP accepts an input-only
+  `params.file` path the app parses and expands.
+- **Auto Tone / Contrast / Color are menu commands and MCP tools, never
+  layers.** All three derive Levels parameters from the image's own
+  histogram — the one `ops_stats::histogram` definition, and its one
+  counting rule — and apply them through the existing levels math via a
+  new per-channel `rz_image_levels_channels`. Clipping is **0.001
+  (0.1 %) per end**, Photoshop's own Auto Color Correction default.
+  Auto Color's midtone snap is a **neutral-candidate** mean, not
+  gray-world (gray-world neutralises a sunset, a forest or a brick wall,
+  whose channel means are legitimately unequal): candidates are counted
+  pixels whose post-stretch `max − min < 0.1` and whose luma is in
+  0.25–0.75, fewer than 0.5 % of them means every gamma is 1, the
+  logarithms are guarded *before* they are taken (a NaN gamma would fail
+  the range check and silently refuse the whole op), and the result is
+  clamped into [0.5, 2] to bound how far an automatic command may rewrite
+  a scene's colour.
+- **The alpha rule is the whole point of the histogram's counting
+  predicate**: a pixel counts when alpha > 0 and, with a mask, coverage
+  ≥ 128 (`doc_select`'s existing contour rule). Every alpha-0 pixel of an
+  `RgbaImage` is (0,0,0,0), so an alpha-blind scan spikes bin 0 and pins
+  the black point at 0 on any cut-out. Verified on `shapes-alpha.png`:
+  58 660 of 160 000 canvas pixels counted, bin 0 empty, and the derived
+  black points 0.27 / 0.22 / 0.27 rather than zero.
+- **Lab goes through the document's own profile.** `rz_doc_lab`
+  linearizes with the profile's own TRC, multiplies by its own `to_pcs`
+  columns (already D50-adapted — phase 4's rule) and converts against the
+  D50 PCS white; a profile this build cannot model returns false and the
+  host says "—" rather than assuming sRGB. Verified against a
+  hand-written oracle: the same bytes `#443D45` read L 26.713 / a 4.423 /
+  b −3.750 in an sRGB document and L 26.794 / a 5.355 / b −4.004 after
+  Assign Display P3, both within 0.02 of the oracle (the residual is the
+  profile's s15Fixed16 matrix and parametric TRC against published
+  floats).
+- **One histogram view, three places.** `HistogramView` draws the bins
+  per-channel or as luminosity with a clipping wedge at each end, and is
+  used by the new Info tab, by Levels and inside the Curves editor — the
+  last two drew nothing behind their controls before. On an adjustment
+  layer the plot is `HistogramSource.backdrop(below:)`, captured once at
+  sheet open, so it shows what the curve acts on rather than the
+  already-corrected composite. `rz_image_histogram` gained a `stride`
+  and the panel samples ~4 M pixels on a background loader (bumping the
+  stride until `gcd(stride, width) == 1`, so a stride sharing a factor
+  with the row length cannot sample the same columns forever); sheets and
+  the MCP tool always pass 1.
+- **Destructive adjustments moved to `Image ▸ Adjustments`.** There was
+  no Adjustments menu; rather than grow Filters to 27 items, the eight
+  existing destructive adjustment items moved and Filters kept the true
+  pixel filters (Blur, Sharpen, Pixelate, Add Noise, Edge Detect,
+  Emboss). Selectors, shortcuts and semantics are untouched. New
+  shortcuts: ⇧⌘L Auto Tone, ⌥⇧⌘L Auto Contrast, ⇧⌘B Auto Color, ⌃⌘I
+  Info — none collide.
+- **Core layout**: `adjust.rs` keeps the schema table, the enum and the
+  dispatch; every op's payload struct *and* its `parse` live in its math
+  module — `adjust_tone`, `adjust_color`, `adjust_mix`, `adjust_map`,
+  `adjust_white_balance`, `adjust_lut`, with `adjust_curves` split out
+  and `adjust_math` / `adjust_parse` shared. `ops_stats`, `ops_auto` and
+  `lab` are new; `ffi_adjust.rs` holds all seven new shims. `doc.rs`
+  changed in one place (the guide plane and the position argument),
+  `icc_transform.rs` gained `to_pcs_xyz` (forward only — coming back
+  would need the curve inverter this crate deliberately does not have),
+  and **`.rz` did not change**: `meta` is an existing slot, so
+  `RZDC_VERSION` stays 6.
+- **App side**: one `AdjustmentSheet` base class owns the five-step
+  live-preview contract for all twelve dialogs, reachable from both
+  Image ▸ Adjustments and Layer ▸ New Adjustment Layer; one
+  `AdjustmentSchema` table drives MCP validation for the twelve (the
+  legacy nine keep their hand-written arms untouched); `GradientEditorView`
+  is the reusable stop bar Gradient Map uses — the layer-style Gradient
+  Overlay pane was deliberately left alone. The core's gradient model has
+  **no per-span midpoint and no separate opacity stops**, so the editor
+  has no midpoint diamond; adding one would be a model change
+  (`RZDC_VERSION`, schema, parser, writer, Swift mirror, catalog).
+- MCP grew five tools — `histogram`, `sample_pixel`, `auto_tone`,
+  `auto_contrast`, `auto_color` — to **75**, and `apply_filter` gained
+  the twelve op names plus a `params` **object** (the flat namespace was
+  already colliding on `gamma`, `levels`, `amount`), validated once in
+  `applyFilter` where a refusal can still name the offending key. All
+  seventy-five catalog entries and handlers match, and `tools/list`
+  returns 75.
+- Verified end to end over MCP on `plasma.jpg`, `portrait-exif6.jpg` and
+  `shapes-alpha.png`: every op round-trips through
+  `add_adjustment_layer` → `get_document` (params echo back byte-identical)
+  → `render` → `edit_adjustment_layer` → `undo`; refusals name the
+  offending key on **both** surfaces (unknown key, out-of-range value,
+  nested unknown key, bad enum, 33 stops, malformed colour, wrong type, a
+  malformed `.cube` — `line 2: data row is missing a value` — and a
+  missing file); the auto trio reports its derived nine numbers and
+  refuses an out-of-range clip. One leniency worth knowing:
+  Foundation's NSNumber bridging means JSON `1` is accepted for a boolean
+  and `true` for a number, both **normalized** to a valid stored value —
+  which is strictly better than the legacy nine, where the same input is
+  accepted and then silently degrades the layer to plain raster because
+  the core's parse is typed.
+- Not exercised on screen (worth one manual pass): all twelve sheets from
+  both menus and their live preview; Cancel leaving no undo step and
+  Apply exactly one; the gradient editor's add/drag/remove and its
+  two-stop floor; the Info readout following the cursor and freezing when
+  it leaves; the histogram behind Levels and Curves; Exposure's reversed
+  gamma slider; White Balance's "As shot" snap; Hue/Saturation's grid
+  resizing as rows collapse; Photo Filter's popup snapping to Custom;
+  and footnote widths against the Cancel/Apply row at 420 pt.
+
 ### Remaining order
 
-Section 4's steps 5–8 in order — the adjustment batch with histogram and
-info panels is next, then healing brush and Content-Aware Fill; groups,
-lock, multi-select, guides and snapping; RAW develop and Actions — then
-the breadth of section 3. Kevin asked on 3 September for this to run
-through the whole list without stopping between phases: finish, commit,
-start the next.
+Section 4's steps 6–8 in order — healing brush and Content-Aware Fill is
+next, then groups, lock, multi-select, guides and snapping; RAW develop
+and Actions — then the breadth of section 3. Kevin asked on 3 September
+for this to run through the whole list without stopping between phases:
+finish, commit, start the next.
 
 ---
 
@@ -460,12 +697,12 @@ mode}`, `list_channels`, `target` on the paint tools, `render {channel}`.
 | Image resolution (ppi) and print size in Image Size; File > Print — SHIPPED | S/M | `RzDocument` gains a ppi pair; the `.rz` bump carries it. |
 | Camera RAW (CR3, NEF, ARW, DNG, ProRAW) via Core Image's `CIRAWFilter` | M | Swift-side decode, like HEIC today. A small "Develop" sheet before the pixels land — exposure, temperature/tint, noise reduction, lens correction — is the whole reason to own a RAW workflow. Highest photo value per day in this table. |
 | HEIC export; AVIF and JPEG XL open/export | S/M | `image` has AVIF behind a feature flag; JXL via `jxl-oxide`. HEIC export through ImageIO on the Swift side. |
-| Histogram panel with per-channel view and clipping warning | S | Levels and Curves want it too. A parallel scan with merged bins (GIMP §8). |
-| Info panel: cursor position, RGB/HSB/Lab readout, selection bounds | S | Table over values the eyedropper already samples. |
+| Histogram panel with per-channel view and clipping warning — SHIPPED | S | Levels and Curves want it too. A parallel scan with merged bins (GIMP §8). |
+| Info panel: cursor position, RGB/HSB/Lab readout, selection bounds — SHIPPED | S | Table over values the eyedropper already samples. |
 | A per-document **linear-light compositing** toggle | M | Photoshop's "Blend RGB colors using gamma 1.0". Decode 8-bit sRGB to linear f32 on ingest (a 256-entry LUT), encode on output; storage stays 8-bit sRGB. Soft brushes and gradients stop turning muddy in the middle. Not the GIMP §3 three-axis system — one flag — and honestly optional. |
 | 16-bit / half-float pixels | XL | Every op assumes `RgbaImage<u8>`. Defer; the f32 adjustment chain covers the banding case that matters most. |
 
-### 3B. Adjustments — every row is one `Adjustment` variant
+### 3B. Adjustments — every row is one `Adjustment` variant — SHIPPED (§0), except Match Color / Equalize
 
 Each lands at once as an adjustment layer, a destructive Filters twin,
 and an MCP op; each is **S** unless marked.
@@ -633,10 +870,10 @@ a **command palette** (⌘K-style fuzzy search over the whole menu).
    iPhone auxiliary mattes — one `.rz` bump shared with step 1.
 4. ✅ **Colour management and metadata** (§3A, first five rows) — silent
    correctness. Do it before more people export photos from the app.
-5. ▶ **The adjustment batch** (§3B) plus the histogram and info panels —
+5. ✅ **The adjustment batch** (§3B) plus the histogram and info panels —
    two weeks of S items that make the Adjustments menu look like a photo
    editor's.
-6. **Healing brush and Content-Aware Fill** (§3C) — the retouching gap.
+6. ▶ **Healing brush and Content-Aware Fill** (§3C) — the retouching gap.
 7. **Groups, lock, multi-select** (§3F) and **guides / rulers / snapping**
    (§3H) — the workflow layer that 20-layer documents demand.
 8. **RAW develop** (§3A) and **Actions** (§3J) — the two features that

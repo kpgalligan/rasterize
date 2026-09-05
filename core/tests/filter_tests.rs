@@ -2,9 +2,11 @@
 //! `include/rasterize_core.h`, exercised through the C ABI like
 //! `tests/integration.rs`.
 
+use std::ffi::{c_char, CString};
 use std::ptr;
 
 use image::{Rgba, RgbaImage};
+use rasterize_core::ffi_adjust::*;
 use rasterize_core::ffi_filters::*;
 use rasterize_core::RzImage;
 
@@ -428,4 +430,45 @@ fn null_safety_all_filters() {
     assert!(unsafe { rz_image_noise(null, 0.5, 1) }.is_null());
     assert!(unsafe { rz_image_edge_detect(null) }.is_null());
     assert!(unsafe { rz_image_emboss(null) }.is_null());
+
+    // The adjustment, statistics and readout exports of `ffi_adjust` join
+    // the same sweep: a NULL image is a refusal everywhere, and the two
+    // fallible ones tolerate a NULL err_out as well.
+    let op = CString::new("invert").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    assert!(unsafe { rz_image_adjust_op(null, op.as_ptr(), ptr::null(), &mut err) }.is_null());
+    assert!(err.is_null(), "a NULL image is a refusal, not an error");
+    assert!(
+        unsafe { rz_image_adjust_op(null, op.as_ptr(), ptr::null(), ptr::null_mut()) }.is_null()
+    );
+    let mut err: *mut c_char = ptr::null_mut();
+    assert!(unsafe { rz_lut_parse_cube(ptr::null(), &mut err) }.is_null());
+    assert!(!take_err_string(err).is_empty());
+    assert!(unsafe { rz_lut_parse_cube(ptr::null(), ptr::null_mut()) }.is_null());
+    let mut bins = [0u32; 1024];
+    let mut total = 0u64;
+    let mut rgba = [0u8; 4];
+    let mut params = [0f32; 9];
+    let triple = [0.0f32, 0.0, 0.0];
+    unsafe {
+        assert!(!rz_image_histogram(
+            null,
+            ptr::null(),
+            1,
+            bins.as_mut_ptr(),
+            &mut total
+        ));
+        assert!(!rz_image_sample(null, 0, 0, 0, rgba.as_mut_ptr()));
+        assert!(!rz_image_auto_levels(
+            null,
+            ptr::null(),
+            0,
+            0.001,
+            params.as_mut_ptr()
+        ));
+        assert!(
+            rz_image_levels_channels(null, triple.as_ptr(), triple.as_ptr(), triple.as_ptr())
+                .is_null()
+        );
+    }
 }

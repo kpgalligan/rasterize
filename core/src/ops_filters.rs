@@ -57,17 +57,44 @@ pub(crate) fn hue_rotate(img: &RgbaImage, degrees: f32) -> Option<RgbaImage> {
 /// Levels: maps [black, white] to [0, 1], then applies gamma
 /// (`out = t^(1/gamma)`). Requires `0 <= black < white <= 1` and gamma in
 /// [0.1, 10]; returns `None` otherwise (NaN fails every comparison).
+///
+/// The whole body is [`levels_channels`] with the triple repeated — one
+/// implementation, so the Auto commands (which derive a black/white/gamma
+/// PER channel) and this cannot drift.
 pub(crate) fn levels(img: &RgbaImage, black: f32, white: f32, gamma: f32) -> Option<RgbaImage> {
-    if !(black >= 0.0 && black < white && white <= 1.0 && (0.1..=10.0).contains(&gamma)) {
-        return None;
+    levels_channels(img, [black; 3], [white; 3], [gamma; 3])
+}
+
+/// Levels with a black point, white point and gamma PER channel (R, G, B).
+/// The same math and the same validity condition as [`levels`] applied to
+/// each channel: `None` unless EVERY channel has `0 <= black < white <= 1`
+/// and gamma in [0.1, 10]. Alpha untouched.
+pub(crate) fn levels_channels(
+    img: &RgbaImage,
+    black: [f32; 3],
+    white: [f32; 3],
+    gamma: [f32; 3],
+) -> Option<RgbaImage> {
+    for c in 0..3 {
+        if !(black[c] >= 0.0
+            && black[c] < white[c]
+            && white[c] <= 1.0
+            && (0.1..=10.0).contains(&gamma[c]))
+        {
+            return None;
+        }
     }
-    let range = white - black;
-    let inv_gamma = 1.0 / gamma;
+    let mut range = [0.0f32; 3];
+    let mut inv_gamma = [0.0f32; 3];
+    for c in 0..3 {
+        range[c] = white[c] - black[c];
+        inv_gamma[c] = 1.0 / gamma[c];
+    }
     let mut out = img.clone();
     for px in out.pixels_mut() {
-        for ch in px.0.iter_mut().take(3) {
-            let t = ((f32::from(*ch) / 255.0 - black) / range).clamp(0.0, 1.0);
-            *ch = (t.powf(inv_gamma) * 255.0).round() as u8;
+        for (c, ch) in px.0.iter_mut().take(3).enumerate() {
+            let t = ((f32::from(*ch) / 255.0 - black[c]) / range[c]).clamp(0.0, 1.0);
+            *ch = (t.powf(inv_gamma[c]) * 255.0).round() as u8;
         }
     }
     Some(out)

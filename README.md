@@ -71,20 +71,48 @@ decoding, encoding, and manipulation.
   are saved in `.rz`
 - **Adjustment layers**: non-destructive color adjustments that live in the
   layer stack and recolor everything below them at composite time, their
-  parameters editable forever. Layer > New Adjustment Layer offers nine ops
-  — Brightness/Contrast/Saturation, Levels, Curves (an interactive spline
-  editor: click the curve to add up to 16 control points per channel, drag
-  to move them, with a channel popup switching between the master RGB curve
-  and Red/Green/Blue individually), Hue Rotate, Posterize, Threshold,
-  Invert, Grayscale, and Sepia. The parameterized ops open live-preview
-  dialogs and re-open any time via Layer > Adjustment Options… or a
-  double-click on the layer's row in the panel (which badges adjustment
-  layers "◐"). Every adjustment layer is created with a layer mask gating where
-  the adjustment applies — built from the selection when one exists, else
-  revealing all — and brush and eraser strokes on the layer paint that mask
-  automatically. Because it is just a layer, opacity, blend mode and
-  clipping all apply; where an op has a destructive Filters-menu twin the
-  math mirrors it, so the only difference is reversibility
+  parameters editable forever. Layer > New Adjustment Layer offers
+  twenty-one ops — Brightness/Contrast/Saturation, Levels, Curves (an
+  interactive spline editor: click the curve to add up to 16 control points
+  per channel, drag to move them, with a channel popup switching between the
+  master RGB curve and Red/Green/Blue individually), Exposure (in linear
+  light, with Photoshop's gamma convention, where above 1 darkens), Vibrance
+  (weighted toward the least saturated pixels and half-strength on skin
+  hues), Hue/Saturation (master plus six editable hue bands, and Colorize),
+  Color Balance (shadows/midtones/highlights, holding Rec. 709 luma),
+  Black & White (six hue weights and an optional tint), Photo Filter (the
+  standard warming and cooling filters, or any colour, at a chosen density),
+  Channel Mixer (a 3×4 matrix with a monochrome mode), Selective Color (nine
+  ranges of CMYK nudges, relative or absolute), Shadows/Highlights (whose
+  tone estimate is an alpha-weighted large-radius blur of the luma, so local
+  contrast survives and a cut-out gets no halo), White Balance (temperature
+  and tint, Bradford-adapted to D65), Gradient Map (luma through a multi-stop
+  gradient you edit in place — drag a stop, click the ramp to add one, ⌫ to
+  remove — with dithering that stops an 8-bit map banding a smooth sky),
+  Color Lookup (a .cube LUT, 1D or 3D, parsed in the core and applied with
+  trilinear interpolation at a chosen strength; a table larger than this
+  build stores is resampled down and says what size it came from), Hue
+  Rotate, Posterize, Threshold, Invert, Grayscale, and Sepia. The
+  parameterized ops open live-preview dialogs and re-open any time via
+  Layer > Adjustment Options… or a double-click on the layer's row in the
+  panel (which badges adjustment layers "◐"). Every adjustment layer is
+  created with a layer mask gating where the adjustment applies — built from
+  the selection when one exists, else revealing all — and brush and eraser
+  strokes on the layer paint that mask automatically. Because it is just a
+  layer, opacity, blend mode and clipping all apply; the twelve newer ops'
+  destructive Image > Adjustments twin runs the identical core op and lands
+  on the identical bytes, so the only difference is reversibility. Three
+  stated exceptions: Shadows/Highlights is the only op that reads a
+  neighbourhood, so the layer reads the backdrop below it and the filter
+  reads its own layer — the two agree on the same pixels and are
+  deliberately different pictures on different ones; Gradient Map's dither
+  is keyed on the pixel's position, and the layer counts that from the
+  canvas while the filter counts it from the layer it was handed, so on a
+  layer whose offset is not (0, 0) the same jitter falls on different pixels
+  (turn `dither` off and they agree exactly at any offset); and the nine
+  older adjustments keep the single-purpose filters that predate the shared
+  twin, which do their arithmetic in 0-255 rather than 0-1 and so can land
+  one step away on a value falling exactly between two codes
 - **Clipping masks** (Layer > Create Clipping Mask, ⌥⌘G): confine a layer
   to the alpha footprint of the first unclipped layer beneath it —
   Photoshop group semantics, so the base's blend mode and opacity apply to
@@ -201,11 +229,22 @@ decoding, encoding, and manipulation.
   and Canvas Size with the Photoshop-style 3×3 anchor selector — grow or
   trim the canvas without scaling; layers keep their pixels and can be
   revealed again later
-- Brightness / contrast / saturation, Levels, Hue Rotate, Threshold, and
-  Posterize adjustments with live in-context preview on the active layer —
-  the destructive Filters-menu twins of the adjustment layers above
-- Grayscale, invert, sepia, Gaussian blur, sharpen, Pixelate, Add Noise,
-  Edge Detect, Emboss
+- Image > Adjustments: the destructive twins of every adjustment layer
+  above except Curves, which stays layer-only, with live in-context preview
+  on the active layer — and Auto Tone,
+  Auto Contrast (⇧⌘L, ⌥⇧⌘L) and Auto Color (⇧⌘B), which derive Levels
+  parameters from the image's own histogram (clipping 0.1 % at each end,
+  Photoshop's default) and apply them through that same levels math
+- Filters: Gaussian blur, sharpen, Pixelate, Add Noise, Edge Detect, Emboss
+- An **Info panel** (⌃⌘I) with the document's histogram — per-channel or
+  luminosity, with a clipping wedge at each end — over a readout that
+  follows the cursor and freezes with its last value when the cursor leaves:
+  position, RGB, HSB, Lab (computed through the DOCUMENT's own profile
+  against the D50 white, so the same bytes read differently in an sRGB and a
+  Display P3 document), the selection's bounds and area, and the document's
+  size, resolution and profile. The same plot is drawn behind the Levels and
+  Curves controls — showing, for an adjustment layer, the backdrop below it
+  rather than the already-corrected composite
 - Selections beyond the rectangle: ellipse marquee (O), polygonal lasso
   (L — click vertices, double-click/Return/click-the-start closes, Escape
   cancels), and a magic wand (W) with tolerance + contiguous options that
@@ -447,11 +486,14 @@ model defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 70 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 75 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG — `render`'s `channel` shows ONE plane as a grayscale PNG
 instead — and `sample_color` reads single pixels off the flattened
-composite — the eyedropper), layer operations, blend modes, layer masks (add
+composite — the eyedropper; `sample_pixel` is its Info-panel twin, adding
+HSB, Lab through the document's own profile, and the closest sRGB spelling
+to paint it back with, and `histogram` counts the tones of the composite or
+one layer), layer operations, blend modes, layer masks (add
 revealing, hiding or from the selection; enable, apply, or delete), clipping
 masks (`set_layer_clipped` confines a layer to the alpha of the first
 unclipped layer below it; `get_document` reports the flag), layer styles
@@ -459,8 +501,11 @@ unclipped layer below it; `get_document` reports the flag), layer styles
 options — the same JSON `get_document` reports — and `set_global_light` the
 shared light; `render` shows the effects), non-destructive
 adjustment layers (`add_adjustment_layer` / `edit_adjustment_layer` over all
-nine ops with the same mask-on-creation rule as the UI's; `get_document`
-reports each one's op and params), filters, geometry —
+twenty-one ops with the same mask-on-creation rule as the UI's;
+`get_document` reports each one's op and params, eliding only a Color
+Lookup's table), filters — every adjustment op but `curves` also runs
+destructively through `apply_filter`, and `auto_tone` / `auto_contrast` / `auto_color`
+mirror the three menu commands — geometry —
 including `transform_layer`, the Free Transform pipeline with named parameters
 (rotate in degrees, positive is clockwise; scale, translate, pivot, sampler)
 and `distort_layer`, its perspective twin (four explicit corner destinations,

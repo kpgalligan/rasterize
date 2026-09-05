@@ -254,6 +254,11 @@ fn composite_adjustment_into(
     let (lw, lh) = layer.pixels.dimensions();
     let rel_x = i64::from(layer.offset.0) - i64::from(origin.0);
     let rel_y = i64::from(layer.offset.1) - i64::from(origin.1);
+    // A SPATIAL adjustment (Shadows/Highlights) weights its lift by a
+    // large-radius ALPHA-WEIGHTED blur of the backdrop's luma. The plane is
+    // built ONCE here, from the accumulator, and read per pixel below; every
+    // other op returns None and pays nothing (`adjust::Adjustment::guide`).
+    let guide = adjustment.guide(acc_w, acc_h, &|i| acc[i]);
     for ay in 0..i64::from(acc_h) {
         for ax in 0..i64::from(acc_w) {
             let coverage = match mask {
@@ -277,9 +282,15 @@ fn composite_adjustment_into(
                 continue; // nothing to adjust; alpha (and color) stay exact
             }
             let cb = [bg[0], bg[1], bg[2]];
-            let adjusted = adjustment.apply(cb);
+            let canvas_xy = (ax + i64::from(origin.0), ay + i64::from(origin.1));
+            // 0.0 for a guide-less op: `apply_at`'s guide argument is only
+            // ever read by an op whose `guide` returned a plane.
+            let g = guide
+                .as_ref()
+                .map_or(0.0, |plane| plane.at(ax as u32, ay as u32));
+            let adjusted = adjustment.apply_at(cb, g, canvas_xy);
             if let BlendKind::Dissolve = kind {
-                let (cx, cy) = (ax + i64::from(origin.0), ay + i64::from(origin.1));
+                let (cx, cy) = canvas_xy;
                 if dissolve_threshold(cx, cy) < k {
                     acc[ai] = [adjusted[0], adjusted[1], adjusted[2], bg[3]];
                 }
@@ -294,8 +305,20 @@ fn composite_adjustment_into(
                 BlendKind::NonSeparable(f) => f(cb, adjusted),
                 BlendKind::Dissolve => unreachable!("dissolve handled above"),
             };
-            for c in 0..3 {
-                acc[ai][c] = cb[c] + (effective[c] - cb[c]) * k;
+            // k == 1 — a full-opacity, unmasked adjustment, the common case
+            // — takes the blended value VERBATIM rather than lerping to it.
+            // `cb + (e - cb) * 1.0` is not the floating-point identity: the
+            // subtraction and the add each round, so the result can land one
+            // ULP below `e` and quantize to a different byte wherever `e`
+            // sits on an exact half-code (30.5/255, say). Verbatim is what
+            // makes an adjustment LAYER byte-identical to its destructive
+            // twin instead of merely within one step of it.
+            if k >= 1.0 {
+                acc[ai][..3].copy_from_slice(&effective);
+            } else {
+                for c in 0..3 {
+                    acc[ai][c] = cb[c] + (effective[c] - cb[c]) * k;
+                }
             }
         }
     }

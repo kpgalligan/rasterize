@@ -436,6 +436,11 @@ final class ImageCanvasView: NSView {
     /// brush/fill/gradient. The point is UNCLAMPED image pixels: samples
     /// outside the canvas are the receiver's no-op, not an edge pin.
     var onEyedropper: ((CGPoint) -> Void)?
+    /// Fired on every cursor move over the canvas (UNCLAMPED image pixels)
+    /// and once with nil when the cursor leaves — the Info panel's readout.
+    /// Pure reporting: the handler must never set `needsDisplay`, or every
+    /// mouse-moved event would redraw the canvas.
+    var onCursorMove: ((CGPoint?) -> Void)?
     /// Fired when a gradient drag commits (start, end in image pixels).
     var onGradientCommit: ((CGPoint, CGPoint) -> Void)?
 
@@ -1439,8 +1444,35 @@ final class ImageCanvasView: NSView {
         }
     }
 
+    /// Mouse tracking exists for ONE reason — reporting the cursor's pixel
+    /// to the Info panel — so it is the cheapest area that can do it.
+    /// `.inVisibleRect` is the one deviation from ToolRailView's template:
+    /// the canvas is a scroll view's document view and can be far larger
+    /// than the window, and an area sized to `bounds` would both cover
+    /// scrolled-away pixels and need rebuilding on every zoom.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(
+            NSTrackingArea(
+                rect: bounds,
+                options: [
+                    .mouseEnteredAndExited, .mouseMoved, .inVisibleRect, .activeInKeyWindow,
+                ],
+                owner: self, userInfo: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        onCursorMove?(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onCursorMove?(nil)
+    }
+
     override func mouseDragged(with event: NSEvent) {
         let raw = convert(event.locationInWindow, from: nil)
+        onCursorMove?(raw)
         if isTransforming {
             // Unclamped: transform handles are routinely dragged past the
             // canvas edges, and a layer may legitimately land outside it.

@@ -29,6 +29,10 @@ final class EditorViewController: NSViewController {
     // Display only — the sample itself lands in the shared paint color.
     var lastSampleColor: NSColor?
     var lastSampleText = "—"
+    // The Info readout's coalescing key: an extension cannot declare stored
+    // state, and EditorViewController+Info compares against this before
+    // building a PixelReadout — the same pattern lastSampleText follows.
+    var lastCursorPixel: (x: Int, y: Int)?
 
     // True after a rail swatch pointed the shared color panel at this
     // editor; deinit then clears the panel's (unretained) target.
@@ -40,12 +44,16 @@ final class EditorViewController: NSViewController {
     // EditorViewController+Channels owns the Channels tab's entry points.
     var layersPanel: LayersPanelViewController!
     var channelsPanel: ChannelsPanelViewController!
+    // Internal, like the panels above: EditorViewController+Info is a
+    // handler of this controller, and an extension cannot see a private
+    // member.
+    var infoPanel: InfoPanelViewController!
     private var assistantPanel: AssistantPanelViewController!
     private var panelSeparator: NSBox!
     private var scrollTrailingToRoot: NSLayoutConstraint!
     private var scrollTrailingToPanel: NSLayoutConstraint!
     var layersPanelVisible = true
-    /// 0 = Layers, 1 = Channels, 2 = Assistant.
+    /// 0 = Layers, 1 = Channels, 2 = Assistant, 3 = Info.
     var panelTab = 0
 
     // Move-tool drag state: the active layer's offset when the drag began.
@@ -386,6 +394,7 @@ final class EditorViewController: NSViewController {
         canvas.onShapeEditMouseUp = { [weak self] in self?.shapeEditSession?.drag = nil }
         canvas.onShapeEditCommit = { [weak self] in self?.commitShapeEditSession() }
         canvas.onShapeEditCancel = { [weak self] in self?.cancelShapeEditSession() }
+        canvas.onCursorMove = { [weak self] point in self?.cursorMoved(to: point) }
         canvas.onZoomClick = { [weak self] point, out in self?.zoomStep(at: point, out: out) }
         canvas.onZoomTo = { [weak self] target in self?.applyZoom(target) }
         canvas.onZoomRect = { [weak self] rect in self?.zoomToRect(rect) }
@@ -440,6 +449,7 @@ final class EditorViewController: NSViewController {
             // notification, yet the "<layer> Mask" row is computed from it —
             // and so is the canvas's mask base and rubylith.
             self?.channelsPanel?.activeLayerChanged()
+            self?.infoPanel?.activeLayerChanged()
             self?.refreshChannelDisplay()
         }
         layersPanel.onPaintTargetChange = { [weak self] target in
@@ -465,6 +475,7 @@ final class EditorViewController: NSViewController {
             self?.panelTab = 2
             self?.updatePanelVisibility()
         }
+        layersPanel.onShowInfo = { [weak self] in self?.showInfoTab() }
         layersPanel.onLoadLayerSelection = { [weak self] idx, target, mode in
             self?.loadLayerSelection(layer: idx, target: target, mode: mode)
         }
@@ -494,6 +505,7 @@ final class EditorViewController: NSViewController {
         channelsPanel.onRenameChannel = { [weak self] id, name in
             self?.renameChannel(id: id, to: name)
         }
+        channelsPanel.onShowInfo = { [weak self] in self?.showInfoTab() }
         addChild(channelsPanel)
         let channelsView = channelsPanel.view
         channelsView.translatesAutoresizingMaskIntoConstraints = false
@@ -506,10 +518,27 @@ final class EditorViewController: NSViewController {
             self?.updatePanelVisibility()
         }
         assistantPanel.onShowChannels = { [weak self] in self?.showChannelsTab() }
+        assistantPanel.onShowInfo = { [weak self] in self?.showInfoTab() }
         addChild(assistantPanel)
         let assistantView = assistantPanel.view
         assistantView.translatesAutoresizingMaskIntoConstraints = false
         assistantView.isHidden = true
+
+        infoPanel = InfoPanelViewController()
+        infoPanel.document = document
+        infoPanel.onShowLayers = { [weak self] in
+            self?.panelTab = 0
+            self?.updatePanelVisibility()
+        }
+        infoPanel.onShowChannels = { [weak self] in self?.showChannelsTab() }
+        infoPanel.onShowAssistant = { [weak self] in
+            self?.panelTab = 2
+            self?.updatePanelVisibility()
+        }
+        addChild(infoPanel)
+        let infoView = infoPanel.view
+        infoView.translatesAutoresizingMaskIntoConstraints = false
+        infoView.isHidden = true
 
         panelSeparator = NSBox()
         panelSeparator.boxType = .separator
@@ -523,6 +552,7 @@ final class EditorViewController: NSViewController {
         root.addSubview(panelView)
         root.addSubview(channelsView)
         root.addSubview(assistantView)
+        root.addSubview(infoView)
         root.addSubview(statusBar)
 
         NSLayoutConstraint.activate([
@@ -561,6 +591,11 @@ final class EditorViewController: NSViewController {
             assistantView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
             assistantView.topAnchor.constraint(equalTo: scrollView.topAnchor),
             assistantView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+
+            infoView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            infoView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
+            infoView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            infoView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             panelSeparator.trailingAnchor.constraint(equalTo: panelView.leadingAnchor),
             panelSeparator.widthAnchor.constraint(equalToConstant: 1),
@@ -931,24 +966,14 @@ final class EditorViewController: NSViewController {
         // Sample size: a point, or the plain mean of the 3×3 / 5×5 window
         // (out-of-bounds pixels just drop out of the mean).
         let reach = [0, 1, 2][min(max(options.sampleSizeIndex, 0), 2)]
-        let px = Int(floor(point.x))
-        let py = Int(floor(point.y))
-        var sum = (r: 0, g: 0, b: 0, a: 0)
-        var count = 0
-        for dy in -reach...reach {
-            for dx in -reach...reach {
-                guard let pixel = projection.pixelRGBA(x: px + dx, y: py + dy) else { continue }
-                sum.r += Int(pixel.r)
-                sum.g += Int(pixel.g)
-                sum.b += Int(pixel.b)
-                sum.a += Int(pixel.a)
-                count += 1
-            }
-        }
-        guard count > 0 else { return }
-        let sample = (
-            r: UInt8(sum.r / count), g: UInt8(sum.g / count),
-            b: UInt8(sum.b / count), a: UInt8(sum.a / count))
+        // The core's sampler (rz_image_sample), which the Info panel and
+        // sample_pixel read through too: the plain truncating mean of the
+        // block with out-of-bounds pixels dropped, and a CENTRE that may
+        // itself be outside — a sample at the canvas edge stays a sample
+        // rather than an edge pin, exactly as it has always behaved here.
+        guard let sample = projection.sample(
+            x: Int(floor(point.x)), y: Int(floor(point.y)), reach: reach)
+        else { return }
         // The pixel's numbers are the DOCUMENT's, so the swatch is built in
         // the document's space and converted nowhere: the hex readout reports
         // what the pixel actually holds, and painting it back is a no-op.
@@ -1629,6 +1654,10 @@ final class EditorViewController: NSViewController {
         // Mask toggle already lands.
         channelsPanel?.setSelectionState(
             hasSelection: canvas.selection != nil, quickMask: canvas.quickMaskActive)
+        // The Info panel's Selection rows land here for the same reason;
+        // the pixel COUNT is a canvas scan, so whether it is worth taking
+        // now is EditorViewController+Info's decision, not this line's.
+        infoPanel?.setSelectionState(bounds: canvas.selectionRect, area: selectedPixelArea())
         guard let document = document, let doc = document.doc else {
             statusDims.text = "No document open"
             statusMode.text = ""
@@ -1716,7 +1745,9 @@ final class EditorViewController: NSViewController {
         document.applyEdit(actionName, transform)
     }
 
-    private func performLayerEdit(_ actionName: String, _ op: (RasterImage) -> RasterImage?) {
+    /// Internal, like the panels above: EditorViewController+AutoAdjust
+    /// builds on it (Auto Tone and its two siblings are layer edits).
+    func performLayerEdit(_ actionName: String, _ op: (RasterImage) -> RasterImage?) {
         guard let document = document else {
             NSSound.beep()
             return
@@ -2026,7 +2057,9 @@ final class EditorViewController: NSViewController {
     /// sheet, and only its Apply commits. Either way the new layer's mask
     /// captures the CURRENT selection (marquee left up, exactly like
     /// Layer > Mask > From Selection) or is reveal-all.
-    private func newAdjustmentLayer(_ op: AdjustmentLayerOp) {
+    /// Internal, like the panels above: EditorViewController+Adjustments
+    /// builds on it (the twelve phase-5 ops share one tagged selector).
+    func newAdjustmentLayer(_ op: AdjustmentLayerOp) {
         guard let document = document, document.doc != nil else {
             NSSound.beep()
             return
@@ -2061,7 +2094,9 @@ final class EditorViewController: NSViewController {
     /// Post-commit bookkeeping shared by every adjustment-layer commit (the
     /// steps newLayer takes): select the layer, then refresh. syncPaintTarget
     /// lands brush/eraser on the layer's mask.
-    private func didCommitAdjustmentLayer(_ idx: Int) {
+    /// Internal, like the panels above: EditorViewController+Adjustments
+    /// hands it the index its sheets commit.
+    func didCommitAdjustmentLayer(_ idx: Int) {
         guard let document = document, document.doc != nil else { return }
         document.activeLayerIndex = min(max(idx, 0), document.doc.layerCount - 1)
         // Unconditional (not setActiveLayer): re-committing the SAME
@@ -2110,6 +2145,7 @@ final class EditorViewController: NSViewController {
         syncPaintTarget()
         layersPanel.reload()
         channelsPanel?.activeLayerChanged()
+        infoPanel?.activeLayerChanged()
         refreshChannelDisplay()
         updateStatus()
         updateActiveLayerRect()
@@ -2162,6 +2198,8 @@ final class EditorViewController: NSViewController {
         channelsPanel.view.isHidden = !layersPanelVisible || panelTab != 1
         channelsPanel.setPanelVisible(!channelsPanel.view.isHidden)
         assistantPanel.view.isHidden = !layersPanelVisible || panelTab != 2
+        infoPanel.view.isHidden = !layersPanelVisible || panelTab != 3
+        infoPanel.setPanelVisible(!infoPanel.view.isHidden)
         panelSeparator.isHidden = !layersPanelVisible
         scrollTrailingToRoot.isActive = false
         scrollTrailingToPanel.isActive = false
@@ -2199,7 +2237,7 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        presentAsSheet(SliderSheetController.levels(document: document, canvas: canvas))
+        presentAsSheet(LevelsSheetController(document: document, canvas: canvas))
     }
 
     @objc func showThreshold(_ sender: Any?) {
@@ -2651,7 +2689,9 @@ extension EditorViewController: NSUserInterfaceValidations {
             #selector(showPixelate(_:)), #selector(showAddNoise(_:)),
             #selector(applyGrayscale(_:)), #selector(applyInvert(_:)),
             #selector(applySepia(_:)), #selector(applySharpen(_:)),
-            #selector(applyEdgeDetect(_:)), #selector(applyEmboss(_:)):
+            #selector(applyEdgeDetect(_:)), #selector(applyEmboss(_:)),
+            #selector(showAdjustmentSheet(_:)), #selector(autoTone(_:)),
+            #selector(autoContrast(_:)), #selector(autoColor(_:)):
             // Destructive filters rewrite the active layer's PIXELS, which
             // an adjustment layer doesn't meaningfully have; its parameters
             // re-open through Adjustment Options… instead. With a CHANNEL
@@ -2715,6 +2755,10 @@ extension EditorViewController: NSUserInterfaceValidations {
             return !activeLayerIsAdjustment
         case #selector(pasteAsNewLayer(_:)), #selector(paste(_:)):
             return NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
+        case #selector(showInfo(_:)):
+            // Like the other panel tabs: a document is all it needs, and
+            // the guard at the top has already established one.
+            return true
         case #selector(toggleLayersPanel(_:)):
             if let menuItem = item as? NSMenuItem {
                 menuItem.title = layersPanelVisible ? "Hide Layers" : "Show Layers"
