@@ -237,7 +237,7 @@ Decisions worth knowing:
   sheets, the Working Space check marks, Image Size with Resample off,
   ⌘P and ⇧⌘P, and a wide-gamut display — all worth one manual pass.
 
-### Phase 5 — the adjustment batch (§3B) plus histogram and info panels (§3A rows 6–7): shipped
+### Phase 5 — the adjustment batch (§3B) plus histogram and info panels (§3A rows 6–7): shipped, commit `c4f38be`
 
 The whole of §3B — twelve new adjustments and the auto trio — plus the
 histogram and Info rows of §3A. Match Color and Equalize stayed out (the
