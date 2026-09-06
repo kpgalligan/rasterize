@@ -475,7 +475,7 @@ Adjustment-layer ops: 9 → **21**. Decisions worth knowing:
   resizing as rows collapse; Photo Filter's popup snapping to Custom;
   and footnote widths against the Cancel/Apply row at 420 pt.
 
-### Phase 6 — healing brush and Content-Aware Fill (§3C rows 1–4 + red-eye): shipped
+### Phase 6 — healing brush and Content-Aware Fill (§3C rows 1–4 + red-eye): shipped, commit `315d98c`
 
 The first four rows of §3C plus red-eye: the **Healing Brush**, the **Spot
 Healing Brush**, the **Patch tool**, **Content-Aware Fill** and **Red Eye**
