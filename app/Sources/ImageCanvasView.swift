@@ -55,6 +55,17 @@ final class ImageCanvasView: NSView {
             // analysis behind it re-runs on identity, but the drawn path has
             // to go now (an agent edit can land mid-press).
             subjectSession.cancel()
+            // The patch outline is the exception, and it follows the
+            // selection's rule three blocks up: it is canvas GEOMETRY, not a
+            // reading of the pixels, so only a size change invalidates it.
+            // Cancelling unconditionally meant the patch's own commit
+            // destroyed the region it had just placed — `mouseUp` leaves it
+            // placed precisely so a second patch from the same outline is one
+            // more drag — and so did undoing one.
+            if image?.width != oldValue?.width || image?.height != oldValue?.height {
+                patchSession.cancel()
+            }
+            redEyeSession.cancel()
             needsDisplay = true
         }
     }
@@ -104,6 +115,11 @@ final class ImageCanvasView: NSView {
     /// the outline currently under the pointer. Logic lives in
     /// SubjectSelection.swift; this view only points it at events.
     var subjectSession = SubjectSession()
+
+    /// The Patch and Red Eye drags, on the same pattern: their own files own
+    /// the geometry and the drawing, this view only points them at events.
+    var patchSession = PatchSession()
+    var redEyeSession = RedEyeSession()
 
     /// When non-nil, drawn instead of `image` (live-preview sheets).
     var previewImage: CGImage? {
@@ -180,6 +196,8 @@ final class ImageCanvasView: NSView {
             cancelStroke()
             cancelLasso()
             subjectSession.cancel()
+            patchSession.cancel()
+            redEyeSession.cancel()
             gradientAnchor = nil
             gradientCurrent = nil
             eyedropperDragActive = false
@@ -255,10 +273,40 @@ final class ImageCanvasView: NSView {
     var cloneSource: CGPoint? {
         didSet {
             if cloneSource != oldValue { needsDisplay = true }
+            // A new source point starts a new alignment (see strokeAligned).
+            cloneOffsetTool = nil
         }
     }
     private var cloneSnapshot: CGImage?
     private var cloneOffset = CGVector.zero
+    /// The pointer's last canvas position, or nil while it is outside. The
+    /// clone/heal source marker needs it: with an Aligned offset latched the
+    /// point being sampled MOVES with the brush, so a marker parked on the
+    /// ⌥-clicked source would name pixels the tool is not reading. See
+    /// `cloneSourceMarkerPoint`.
+    private var hoverPoint: CGPoint?
+    /// Aligned (Healing Brush): the first stroke's offset survives later
+    /// ones. Toggling it moves the source marker — with an offset latched the
+    /// marker tracks the pointer, without one it sits on the ⌥-clicked point
+    /// (`cloneSourceMarkerPoint`) — so the canvas redraws.
+    var strokeAligned = false {
+        didSet {
+            if strokeAligned != oldValue, tool == .clone || tool == .heal,
+                cloneSource != nil, !isTransforming
+            {
+                needsDisplay = true
+            }
+        }
+    }
+    /// The tool that established `cloneOffset`, or nil when nothing is
+    /// latched. The LATCH IS PER TOOL, not per canvas: the Clone Stamp and
+    /// the Healing Brush share one source point and one offset, and the Clone
+    /// Stamp recomputes the offset on every mouse-down (it has no Aligned
+    /// option), so a clone stroke in between two aligned heals used to
+    /// re-aim the heal's alignment silently — the marker still drew at the
+    /// source the user picked while the heal sampled through the clone's
+    /// offset. An offset latched by a different tool is treated as unlatched.
+    private var cloneOffsetTool: EditorTool?
 
     // The View options' scrubby-zoom preference, kept current by
     // EditorViewController: a zoom-tool drag scrubs instead of marqueeing.
@@ -373,6 +421,18 @@ final class ImageCanvasView: NSView {
     /// drawMaskStrokeGhost).
     var onCommitMaskOverlay: ((_ data: UnsafePointer<UInt8>, _ actionName: String) -> Void)?
 
+    /// The retouching tools' four seams: each body is a one-line forward into
+    /// an EditorViewController extension (+Heal / +Patch / +RedEye.swift).
+    var onCommitStrokeOverlay: ((_ data: UnsafePointer<UInt8>, _ actionName: String) -> Void)?
+    var onStrokeSourceImage: (() -> CGImage?)?
+    /// The Patch tool's twin of `onStrokeSourceImage`: the pixels the drag
+    /// previews from, nil meaning the canvas's own composite. It is asked
+    /// only when a region is placed or a drag starts, never per tick — see
+    /// PatchSession's `snapshot`.
+    var onPatchSourceImage: (() -> CGImage?)?
+    var onPatchCommit: ((PatchSession.Result) -> Void)?
+    var onRedEyeCommit: ((CGRect) -> Void)?
+
     /// Fired on a text-tool click (image pixel coordinates). The receiver
     /// owns the document, so it decides whether the click re-opens an
     /// existing text layer or starts a new entry, then calls
@@ -479,6 +539,8 @@ final class ImageCanvasView: NSView {
     // stroke edits ONLY the mode's coverage buffer — no document edit, no
     // undo step, no callbacks.
     private var strokeActive = false
+    /// Non-nil while a HEALING stroke is in flight, latched at mouse-down.
+    private var strokeHealKind: EditorTool?
     private var strokeOnMask = false
     private var strokeOnQuickMask = false
     private var strokeLastPoint: CGPoint?
@@ -692,8 +754,8 @@ final class ImageCanvasView: NSView {
         // channel: clone and dodge strokes are refused by `onStrokeBegin` and
         // a text session by `refuseChannelTargetEdit`, so there is no edit
         // left for the guide to place.
-        if tool == .brush || tool == .eraser || tool == .clone || tool == .dodge
-            || tool == .text, !isTransforming,
+        if tool.usesBrushTip || tool == .text || tool == .patch || tool == .redEye,
+           !isTransforming,
            !quickMaskActive, !paintTarget.isChannel,
            let layerRect = activeLayerRect,
            layerRect != CGRect(origin: .zero, size: bounds.size) {
@@ -725,6 +787,11 @@ final class ImageCanvasView: NSView {
             drawSubjectOutline(outline)
         }
 
+        if !isTransforming {
+            patchSession.draw(in: context, image: image, magnification: magnification)
+            redEyeSession.draw(in: context, magnification: magnification)
+        }
+
         if let textView = activeTextView {
             drawTextSessionBorder(textView.frame)
         }
@@ -741,8 +808,8 @@ final class ImageCanvasView: NSView {
             drawShapeEditOverlay(overlay)
         }
 
-        if tool == .clone, let source = cloneSource, !isTransforming {
-            drawCloneSourceMarker(source)
+        if tool == .clone || tool == .heal, let source = cloneSource, !isTransforming {
+            drawCloneSourceMarker(cloneSourceMarkerPoint(source))
         }
 
         if let marquee = zoomMarquee {
@@ -752,6 +819,25 @@ final class ImageCanvasView: NSView {
         if let preview = transformPreview {
             drawTransformBox(preview)
         }
+    }
+
+    /// Where the source marker belongs: the point the next dab will sample
+    /// from, which is not always the ⌥-clicked one.
+    ///
+    /// With no latched offset — the Clone Stamp always, the Healing Brush
+    /// with Aligned off — every stroke re-aims from the source point, so the
+    /// marker IS the source point. With an Aligned offset latched the offset
+    /// is what persists and the sampled point tracks the brush; a marker left
+    /// on the source point then sits on pixels the tool is not reading (and
+    /// happily keeps sitting there while the sampled point has walked off the
+    /// canvas and the heal refuses with a beep). Falls back to the source
+    /// point when the pointer is outside the canvas and there is nothing to
+    /// aim from.
+    private func cloneSourceMarkerPoint(_ source: CGPoint) -> CGPoint {
+        guard strokeAligned, cloneOffsetTool == tool,
+            let brush = strokeActive ? Optional(strokeCursor) : hoverPoint
+        else { return source }
+        return CGPoint(x: brush.x - cloneOffset.dx, y: brush.y - cloneOffset.dy)
     }
 
     /// The clone tool's ⌥-set source point: a small crosshair ring, scaled
@@ -820,7 +906,8 @@ final class ImageCanvasView: NSView {
     /// on every tick is deliberately not attempted. The true result appears
     /// when the stroke commits on mouse-up.
     private func drawMaskStrokeGhost(in context: CGContext) {
-        guard strokeActive, strokeOnMask, let overlay = overlayContext?.makeImage() else { return }
+        guard strokeActive, let overlay = overlayContext?.makeImage(),
+              strokeOnMask || strokeHealKind == .spotHeal else { return }
         // The ghost's colour depends on what is underneath. Over the PICTURE
         // (a mask stroke with no wash on, the default) red at half alpha is
         // just "you painted here". But when the canvas is already showing the
@@ -832,7 +919,10 @@ final class ImageCanvasView: NSView {
         // vocabulary this whole feature uses. It sits over the wash rather
         // than under it, and commits into it at mouse-up.
         let onCoverage = channelDisplay?.shows(paintTarget) == true
-        let color: NSColor = onCoverage ? (tool == .eraser ? .black : .white) : .systemRed
+        // A spot-heal footprint ghosts BLUE: not coverage being painted, but
+        // the region the inpaint replaces at mouse-up.
+        let color: NSColor = strokeHealKind == .spotHeal ? .systemBlue
+            : (onCoverage ? (tool == .eraser ? .black : .white) : .systemRed)
         context.saveGState()
         context.translateBy(x: 0, y: bounds.height)
         context.scaleBy(x: 1, y: -1)
@@ -1409,7 +1499,7 @@ final class ImageCanvasView: NSView {
             } else {
                 onCropMouseDown?(point)
             }
-        case .clone:
+        case .clone, .heal:
             // ⌥ sets the source; a stroke without one has nothing to stamp.
             if event.modifierFlags.contains(.option) {
                 cloneSource = point
@@ -1418,8 +1508,16 @@ final class ImageCanvasView: NSView {
             } else {
                 beginStroke(at: point, pressure: Self.tabletPressure(of: event))
             }
-        case .dodge:
+        case .dodge, .spotHeal:
             beginStroke(at: point, pressure: Self.tabletPressure(of: event))
+        case .patch:
+            if patchSession.mouseDown(point, clickCount: event.clickCount,
+                selection: selection, in: image, magnification: magnification,
+                sampling: { self.onPatchSourceImage?() }) {
+                needsDisplay = true
+            }
+        case .redEye:
+            redEyeSession.mouseDown(point)
         case .shapeRect, .shapeEllipse, .shapeLine:
             if shapeEditOverlay != nil {
                 if event.clickCount >= 2 {
@@ -1463,11 +1561,45 @@ final class ImageCanvasView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        onCursorMove?(convert(event.locationInWindow, from: nil))
+        let raw = convert(event.locationInWindow, from: nil)
+        // Clamped for the marker, because that is what `beginStroke` would
+        // use as the dab's centre; the Info panel wants the raw point, which
+        // is what `onCursorMove` has always carried.
+        setHoverPoint(clamp(point: raw))
+        onCursorMove?(raw)
     }
 
     override func mouseExited(with event: NSEvent) {
+        setHoverPoint(nil)
         onCursorMove?(nil)
+    }
+
+    /// Latches the pointer position, redrawing only the source marker's own
+    /// two rectangles when it actually moves. An aligned source marker is the
+    /// only overlay that tracks the pointer, and `needsDisplay` per
+    /// mouse-moved event would be a whole-canvas repaint at pointer rate.
+    private func setHoverPoint(_ point: CGPoint?) {
+        guard strokeAligned, cloneOffsetTool == tool, let source = cloneSource,
+            !isTransforming
+        else {
+            hoverPoint = point
+            return
+        }
+        let before = cloneSourceMarkerPoint(source)
+        hoverPoint = point
+        let after = cloneSourceMarkerPoint(source)
+        guard before != after else { return }
+        setNeedsDisplay(markerBounds(before))
+        setNeedsDisplay(markerBounds(after))
+    }
+
+    /// The source marker's dirty rect: the crosshair arms' outer reach plus
+    /// the halo stroke, in canvas units, so it stays the same on screen at
+    /// any zoom exactly as the marker itself does.
+    private func markerBounds(_ point: CGPoint) -> CGRect {
+        let reach = (5 * 1.9 + 3) / magnification
+        return CGRect(
+            x: point.x - reach, y: point.y - reach, width: reach * 2, height: reach * 2)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -1505,11 +1637,16 @@ final class ImageCanvasView: NSView {
             guard let origin = moveDragOrigin else { return }
             NSCursor.closedHand.set()
             onMoveUpdate?(Int((raw.x - origin.x).rounded()), Int((raw.y - origin.y).rounded()))
-        case .brush, .eraser, .clone, .dodge:
+        case .brush, .eraser, .clone, .dodge, .heal, .spotHeal:
             // No clamping: the image-sized overlay context clips naturally,
             // so a stroke that leaves the canvas paints up to the edge and
             // stops instead of smearing along the border.
             continueStroke(to: raw, pressure: Self.tabletPressure(of: event))
+        case .patch:
+            if patchSession.mouseDragged(clamp(point: raw)) { needsDisplay = true }
+        case .redEye:
+            redEyeSession.mouseDragged(clamp(point: raw))
+            needsDisplay = true
         case .text:
             break
         case .crop:
@@ -1616,8 +1753,16 @@ final class ImageCanvasView: NSView {
             moveDragOrigin = nil
             window?.invalidateCursorRects(for: self)
             onMoveEnd?()
-        case .brush, .eraser, .clone, .dodge:
+        case .brush, .eraser, .clone, .dodge, .heal, .spotHeal:
             endStroke(at: convert(event.locationInWindow, from: nil))
+        case .patch:
+            let up = clamp(point: convert(event.locationInWindow, from: nil))
+            needsDisplay = true
+            if let result = patchSession.mouseUp(up) { onPatchCommit?(result) }
+        case .redEye:
+            let up = clamp(point: convert(event.locationInWindow, from: nil))
+            needsDisplay = true
+            if let rect = redEyeSession.mouseUp(up) { onRedEyeCommit?(rect) }
         case .text:
             break
         case .crop:
@@ -1719,6 +1864,7 @@ final class ImageCanvasView: NSView {
         // takes no separate alpha the way rz_doc_painting_layer does. A
         // Quick Mask stroke is coverage the same way: brush white (adds),
         // eraser black (removes), paint color ignored.
+        strokeHealKind = (tool == .heal || tool == .spotHeal) ? tool : nil
         strokeOnMask = strokeOnQuickMask ? false : paintsMask
         let onCoverage = strokeOnMask || strokeOnQuickMask
         // A dodge/burn stroke is pure coverage too: the retouch op reads
@@ -1755,7 +1901,10 @@ final class ImageCanvasView: NSView {
         // it keeps carrying opacity in the color.
         strokeCoverageScale = 1
         strokeTip = BrushTip(
-            hardness: brushHardness, flow: brushFlow,
+            hardness: brushHardness,
+            // Healing solves over the overlay's COVERAGE (alpha >= 128): a
+            // flowed-down dab would empty it, so strength lives in the op.
+            flow: strokeHealKind == nil ? brushFlow : 1,
             spacingPercent: brushSpacingPercent, angleDegrees: brushAngle,
             roundness: brushRoundness)
         strokeUsesPressure = brushPressureSize && pressure != nil && brushSize > 1
@@ -1765,7 +1914,7 @@ final class ImageCanvasView: NSView {
             position: point, radius: brushSmoothing * 32 / max(magnification, 0.01))
         let stamped = SoftBrush.isStamped(tip: strokeTip, size: brushSize)
             || ((strokeUsesPressure || brushAirbrush) && brushSize > 1)
-        if tool == .clone {
+        if tool == .clone || tool == .heal {
             if SoftBrush.isSoft(hardness: brushHardness, size: brushSize) {
                 cloneDabMask = SoftBrush.dabMask(
                     diameter: brushSize, hardness: brushHardness)
@@ -1782,13 +1931,17 @@ final class ImageCanvasView: NSView {
         strokeCursor = point
         strokeCursorPressure = pressure ?? 1
         strokeSpline.begin(at: point, pressure: pressure ?? 1)
-        if tool == .clone {
+        if tool == .clone || tool == .heal {
             // Latched here so an agent edit landing mid-drag cannot change
             // what is being cloned; the offset is the classic aligned-clone
-            // rule (first stamp − source).
-            cloneSnapshot = image
-            if let source = cloneSource {
+            // rule (first stamp − source), which Aligned then keeps.
+            // A nil ANSWER means the canvas's own projection — the Clone
+            // Stamp's, and the Healing Brush's with Sample All Layers on.
+            // flatMap: `?? image` on the double optional takes the inner nil.
+            cloneSnapshot = onStrokeSourceImage.flatMap { $0() } ?? image
+            if let source = cloneSource, !(strokeAligned && cloneOffsetTool == tool) {
                 cloneOffset = CGVector(dx: point.x - source.x, dy: point.y - source.y)
+                cloneOffsetTool = tool
             }
             stampCloneDab(in: context, at: point, pressure: strokeLastPressure)
         } else if let dab = strokeSoftDab {
@@ -1800,7 +1953,7 @@ final class ImageCanvasView: NSView {
                 width: brushSize, height: brushSize)
             context.fillEllipse(in: dot)
         }
-        if brushAirbrush, tool == .clone || strokeSoftDab != nil {
+        if brushAirbrush, tool == .clone || tool == .heal || strokeSoftDab != nil {
             // Airbrush: keep depositing at the (possibly resting) brush
             // position while the button is down. A main-run-loop Timer —
             // plain AppKit, no GCD (see the app hygiene rules).
@@ -1814,7 +1967,7 @@ final class ImageCanvasView: NSView {
     /// One airbrush deposit at the resting brush position.
     private func airbrushTick() {
         guard strokeActive, let context = overlayContext else { return }
-        if tool == .clone {
+        if tool == .clone || tool == .heal {
             stampCloneDab(in: context, at: strokeCursor, pressure: strokeCursorPressure)
         } else if let dab = strokeSoftDab {
             stampSoftDab(dab, in: context, at: strokeCursor, pressure: strokeCursorPressure)
@@ -1863,7 +2016,7 @@ final class ImageCanvasView: NSView {
     /// joined and capped round by the stroke's gstate.
     private func renderStroke(through vertices: [StrokeVertex], in context: CGContext) {
         guard var from = strokeLastPoint, !vertices.isEmpty else { return }
-        if tool == .clone || strokeSoftDab != nil {
+        if tool == .clone || tool == .heal || strokeSoftDab != nil {
             var pressure = strokeLastPressure
             for vertex in vertices {
                 var distance = hypot(vertex.point.x - from.x, vertex.point.y - from.y)
@@ -1952,7 +2105,7 @@ final class ImageCanvasView: NSView {
         }
         // A mask stroke never round-trips through the document mid-drag: it
         // ghosts on top of the unchanged projection and commits once.
-        guard !strokeOnMask else {
+        guard !strokeOnMask, strokeHealKind != .spotHeal else {
             needsDisplay = true
             return
         }
@@ -2022,8 +2175,17 @@ final class ImageCanvasView: NSView {
             // The receiver's applyEdit consumes the bytes synchronously.
             onCommitMaskOverlay?(
                 UnsafePointer(data.assumingMemoryBound(to: UInt8.self)), actionName)
+        } else if strokeHealKind != nil, let data = overlayData {
+            // The overlay holds the WHOLE footprint (tail included) and the
+            // live-edit session is still open, so the solve runs once against
+            // the pre-stroke handle: the drag's preview and this result are
+            // ONE undo step. The mask branch's coverage premultiply must NOT
+            // run here — a layer stroke's opacity is the op's own strength.
+            onCommitStrokeOverlay?(
+                UnsafePointer(data.assumingMemoryBound(to: UInt8.self)), actionName)
         }
         clearOverlay()
+        strokeHealKind = nil
         strokeOnMask = false
         needsDisplay = true
         // Always fires once a stroke began: the live-edit session must
@@ -2039,6 +2201,8 @@ final class ImageCanvasView: NSView {
         case .eraser: return "Erase"
         case .clone: return "Clone Stamp"
         case .dodge: return "Dodge / Burn"
+        case .heal: return "Healing Brush"
+        case .spotHeal: return "Spot Healing"
         default: return "Brush Stroke"
         }
     }
@@ -2056,6 +2220,7 @@ final class ImageCanvasView: NSView {
         guard strokeActive else { return }
         overlayContext?.restoreGState()
         strokeActive = false
+        strokeHealKind = nil
         strokeOnMask = false
         clearOverlay()
         if strokeOnQuickMask {
@@ -2302,14 +2467,19 @@ final class ImageCanvasView: NSView {
                 cancelLasso()
                 return
             }
+            patchSession.cancel()
+            redEyeSession.cancel()
             setSelection(nil)
             return
         }
-        // Return closes an in-progress lasso.
+        // Return closes an in-progress lasso, or a Patch outline.
         if (event.keyCode == 36 || event.keyCode == 76), !lassoPoints.isEmpty {
             closeLasso()
             return
         }
+        if event.keyCode == 36 || event.keyCode == 76, tool == .patch,
+           patchSession.closeOutlineFromKey(sampling: { self.onPatchSourceImage?() })
+        { needsDisplay = true; return }
         // Arrow-key nudges for the move tool (Shift: 10px). Down is +y in the
         // flipped image coordinate space. Inert in Quick Mask mode — a nudge
         // is a document edit, and only the mode's buffer may change there.
@@ -2342,10 +2512,10 @@ final class ImageCanvasView: NSView {
                 // the letter from every text field.
                 onQuickMaskKey?()
                 return
-            case "[" where tool == .brush || tool == .eraser || tool == .clone || tool == .dodge:
+            case "[" where tool.usesBrushTip:
                 onBrushSizeKey?(min(max(brushSize * 0.8, 1), 200))
                 return
-            case "]" where tool == .brush || tool == .eraser || tool == .clone || tool == .dodge:
+            case "]" where tool.usesBrushTip:
                 onBrushSizeKey?(min(max(brushSize * 1.25, 1), 200))
                 return
             default:

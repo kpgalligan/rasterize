@@ -242,6 +242,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // text is being edited — otherwise it would swallow every Delete.
         menu.addItem(
             item("Clear", #selector(EditorViewController.clearSelection(_:)), "\u{8}", []))
+        menu.addItem(.separator())
+        // Photoshop hangs this off Edit > Fill…; there is no Fill dialog in
+        // this build (the paint bucket is a TOOL), so it takes Fill's slot
+        // directly, after Clear.
+        menu.addItem(
+            item(
+                "Content-Aware Fill…",
+                #selector(EditorViewController.contentAwareFill(_:))))
         return menu
     }
 
@@ -576,6 +584,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menu.addItem(item("Add Noise…", #selector(EditorViewController.showAddNoise(_:))))
         menu.addItem(item("Edge Detect", #selector(EditorViewController.applyEdgeDetect(_:))))
         menu.addItem(item("Emboss", #selector(EditorViewController.applyEmboss(_:))))
+        menu.addItem(.separator())
+        // The AUTOMATIC red-eye pass: Vision's face landmarks find the eyes
+        // and the same core op runs on each. The Red Eye tool's drag
+        // rectangle is the manual route.
+        menu.addItem(
+            item("Remove Red Eye", #selector(EditorViewController.removeRedEye(_:))))
         return menu
     }
 

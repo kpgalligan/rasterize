@@ -44,8 +44,12 @@ extension EditorViewController {
             return cropClusters()
         case .move:
             return moveClusters()
-        case .brush, .eraser, .clone, .dodge:
+        case .brush, .eraser, .clone, .dodge, .heal, .spotHeal:
             return paintClusters(tool)
+        case .patch:
+            return patchClusters()
+        case .redEye:
+            return redEyeClusters()
         case .fill:
             return fillClusters()
         case .gradient:
@@ -430,7 +434,13 @@ extension EditorViewController {
                 OptionDescriptor(
                     id: "paint.size", microLabel: "Size", overflowLabel: "Size",
                     kind: .field(
-                        width: 56, unit: " px", decimals: 0, min: 1, max: 200,
+                        // The floor is the tool's own: three for the two
+                        // healing brushes, whose solve keeps the destination
+                        // at every covered pixel touching an uncovered one,
+                        // so a footprint two pixels across is all boundary
+                        // and heals nothing (EditorTool.minimumBrushSize).
+                        width: 56, unit: " px", decimals: 0,
+                        min: tool.minimumBrushSize, max: 200,
                         quick: Self.quickPx,
                         get: { read().size },
                         set: { [weak self] value in
@@ -441,6 +451,11 @@ extension EditorViewController {
                         })),
             ]),
             OptionCluster([
+                // On the two healing brushes hardness SHAPES the footprint —
+                // it shrinks the covered area inside the brush circle — and
+                // does not fade the heal: the Poisson join is already
+                // seamless at the covered set's edge, so there is nothing
+                // left to feather (§0.4).
                 OptionDescriptor(
                     id: "paint.hardness", microLabel: "Hardness", overflowLabel: "Hardness",
                     kind: .field(
@@ -455,6 +470,10 @@ extension EditorViewController {
                         })),
             ]),
             OptionCluster([
+                // Dodge/burn reads this as its exposure and the two healing
+                // brushes as the heal's STRENGTH — both carry their amount in
+                // the core op rather than in the stroke's alpha, which is why
+                // neither has a usable Flow (below).
                 OptionDescriptor(
                     id: "paint.opacity",
                     microLabel: tool == .dodge ? "Exposure" : "Opacity",
@@ -471,6 +490,38 @@ extension EditorViewController {
                         })),
             ]),
         ]
+        if tool == .heal || tool == .spotHeal {
+            // Aligned is the Healing Brush's alone (spot healing has no
+            // source point to align); Sample All Layers belongs to both.
+            var healing: [OptionDescriptor] = []
+            if tool == .heal {
+                healing.append(
+                    OptionDescriptor(
+                        id: "paint.aligned", overflowLabel: "Aligned",
+                        kind: .checkbox(
+                            label: "Aligned",
+                            get: { read().aligned },
+                            set: { [weak self] value in
+                                var options = read()
+                                options.aligned = value
+                                write(options)
+                                self?.syncCanvasPaintState()
+                            })))
+            }
+            healing.append(
+                OptionDescriptor(
+                    id: "paint.sampleall", overflowLabel: "Sample all layers",
+                    kind: .checkbox(
+                        label: "Sample all layers",
+                        get: { read().sampleAllLayers },
+                        set: { [weak self] value in
+                            var options = read()
+                            options.sampleAllLayers = value
+                            write(options)
+                            self?.syncCanvasPaintState()
+                        })))
+            clusters.append(OptionCluster(healing))
+        }
         if tool == .dodge {
             clusters.append(OptionCluster([
                 OptionDescriptor(
@@ -508,7 +559,14 @@ extension EditorViewController {
                             options.flow = value
                             write(options)
                             self?.syncCanvasPaintState()
-                        })),
+                        }),
+                    // The healing brushes' overlay ALPHA is the solve's own
+                    // domain (covered = alpha >= 128, §0.4), so a flowed-down
+                    // dab would empty it and the heal would refuse outright.
+                    // The stroke always deposits full coverage and Opacity
+                    // carries the strength; the canvas pins flow to 1 for
+                    // these two tools to match.
+                    isEnabled: { tool != .heal && tool != .spotHeal }),
                 OptionDescriptor(
                     id: "paint.blend", overflowLabel: "Blend",
                     kind: .popup(
@@ -603,6 +661,61 @@ extension EditorViewController {
             ]),
         ])
         return clusters
+    }
+
+    // MARK: - Patch
+
+    /// The Patch tool: which way the drag runs, and where the texture is
+    /// taken from. The outline itself is a gesture, not an option.
+    private func patchClusters() -> [OptionCluster] {
+        [
+            OptionCluster([
+                OptionDescriptor(
+                    id: "patch.direction", microLabel: "Patch", overflowLabel: "Patch",
+                    kind: .popup(
+                        width: 116, items: ["Source", "Destination"],
+                        get: { min(max(ToolOptionsStore.shared.patch.directionIndex, 0), 1) },
+                        set: { ToolOptionsStore.shared.patch.directionIndex = $0 })),
+            ]),
+            OptionCluster([
+                OptionDescriptor(
+                    id: "patch.sampleall", overflowLabel: "Sample all layers",
+                    kind: .checkbox(
+                        label: "Sample all layers",
+                        get: { ToolOptionsStore.shared.patch.sampleAllLayers },
+                        set: { ToolOptionsStore.shared.patch.sampleAllLayers = $0 })),
+            ]),
+        ]
+    }
+
+    // MARK: - Red Eye
+
+    private func redEyeClusters() -> [OptionCluster] {
+        [
+            OptionCluster([
+                // 100 % is the shipped default on purpose: the dial REJECTS a
+                // red region larger than this fraction of the rectangle's
+                // shorter side, and the gesture the app documents is a tight
+                // rectangle over one eye. Turn it down when something red got
+                // caught by a sloppy rectangle.
+                OptionDescriptor(
+                    id: "redeye.pupil", microLabel: "Pupil Size", overflowLabel: "Pupil Size",
+                    kind: .field(
+                        width: 52, unit: "%", decimals: 0, min: 1, max: 100,
+                        quick: Self.quickPercent,
+                        get: { ToolOptionsStore.shared.redEye.pupilSize },
+                        set: { ToolOptionsStore.shared.redEye.pupilSize = $0 })),
+            ]),
+            OptionCluster([
+                OptionDescriptor(
+                    id: "redeye.darken", microLabel: "Darken", overflowLabel: "Darken Amount",
+                    kind: .field(
+                        width: 52, unit: "%", decimals: 0, min: 0, max: 100,
+                        quick: [0] + Self.quickPercent,
+                        get: { ToolOptionsStore.shared.redEye.darken },
+                        set: { ToolOptionsStore.shared.redEye.darken = $0 })),
+            ]),
+        ]
     }
 
     // MARK: - Fill

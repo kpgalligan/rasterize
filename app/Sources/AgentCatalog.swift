@@ -169,6 +169,44 @@ extension AgentServer {
             "description": "Tip roundness in percent (default 100). Below 100 the dab "
                 + "squashes into an ellipse — with angle, a calligraphy nib.",
         ]
+        // The retouching tools' shared numbers: the inpaint's sampling ring
+        // and seed, and red-eye's two dials.
+        let ringProperty: [String: Any] = [
+            "type": "integer", "minimum": 0, "maximum": 512,
+            "description": "Sampling-ring width in px around the region, 0 = automatic "
+                + "(the default). Clamped to 21-512 — the floor is three patch widths, "
+                + "the narrowest band a source patch can move in, so anything from 1 to 20 "
+                + "comes out as 21 — and then widened from below by the "
+                + "region's own size — a ring narrower than the hole offers too few "
+                + "distinct patches and the fill tiles visibly, so on a large region a "
+                + "small number here is raised to half the region's radius. It is a "
+                + "quality control: pass a wide one for a wide neighbourhood, not for "
+                + "speed. It costs little — rule 2 narrows every part's ring together to "
+                + "fit the work caps before anything runs, and the working windows are "
+                + "sized from the ring that survives that, so on a 1131-part selection a "
+                + "ring of 512 measures 3.8 s against 3.6 s at 21.",
+        ]
+        let seedProperty: [String: Any] = [
+            "type": "integer", "minimum": 0,
+            "description": "RNG seed (default 0). The fill is reproducible: the same seed "
+                + "over the same pixels gives byte-identical output, and a different one "
+                + "gives a different plausible fill.",
+        ]
+        let pupilSizeProperty: [String: Any] = [
+            "type": "number", "minimum": 1, "maximum": 100,
+            "description": "Rejects a red region whose larger side exceeds this percent of "
+                + "the rectangle's SHORTER side (default 100). It exists to spare something "
+                + "bigger than an eye — a red shirt caught by a sloppy rectangle — not to "
+                + "require a small pupil, so 100 is the intended default; turn it down when "
+                + "something red was corrected that should not have been. A red region that "
+                + "reaches all four sides of the rectangle is rejected at any pupil_size: "
+                + "the rectangle is then inside the red, with no pupil in it to find.",
+        ]
+        let darkenProperty: [String: Any] = [
+            "type": "number", "minimum": 0, "maximum": 100,
+            "description": "How far the corrected pupil darkens once the red is neutralised "
+                + "(0-100, default 50 = Photoshop's; 0 neutralises only).",
+        ]
         let strokeBlendProperty: [String: Any] = [
             "type": "string", "enum": blendNames,
             "description": "Blend mode the stroke's paint composites with (default Normal) "
@@ -1124,6 +1162,311 @@ extension AgentServer {
                     "layer": index,
                     "document_id": docID,
                 ], required: ["points"]),
+            tool(
+                "heal_stroke",
+                "Heals a stroke from a sampled source — the Healing Brush tool. The pixels "
+                    + "under the whole footprint are taken from a region (first point − "
+                    + "source) away and Poisson-blended into the layer ONCE, at the end of "
+                    + "the stroke, so the healed patch keeps the SOURCE's texture and the "
+                    + "DESTINATION's illumination and a stroke has no ridges where its dabs "
+                    + "overlapped. Use it for a blemish or a wire that sits on a surface you "
+                    + "can sample cleanly nearby; use spot_heal_stroke when there is no such "
+                    + "source. Coverage below half is not written at all, so hardness SHAPES "
+                    + "the footprint rather than fading the heal — the join is already "
+                    + "seamless at the edge — and there is no flow: the stroke always "
+                    + "deposits full coverage and opacity is the heal's strength. Replace "
+                    + "mode is not offered: in this build it would be exactly clone_stamp. "
+                    + "Respects the active selection. A dab or a short stroke is a few "
+                    + "milliseconds; a stroke enclosing most of a large photograph is "
+                    + "seconds (about 16 at the biggest region allowed, and bigger than "
+                    + "that is refused with the limit in the message), and the app is "
+                    + "unresponsive for that whole time. Errors on an adjustment layer (no "
+                    + "pixels to rewrite). This rewrites the layer's pixels, so a re-editable "
+                    + "text, shape, or Live Photo layer drops its description (undo restores "
+                    + "it).",
+                [
+                    "source_x": [
+                        "type": "number",
+                        "description": "Canvas x of the point healed FROM — its texture lands "
+                            + "under the stroke's first point.",
+                    ],
+                    "source_y": [
+                        "type": "number",
+                        "description": "Canvas y of the point healed FROM.",
+                    ],
+                    "points": [
+                        "type": "array",
+                        "description": "[[x, y], …] along the stroke, in canvas px.",
+                        "items": [
+                            "type": "array", "items": ["type": "number"],
+                            "minItems": 2, "maxItems": 2,
+                        ],
+                        "minItems": 1, "maxItems": 10_000,
+                    ],
+                    "size": [
+                        "type": "number",
+                        "description": "Stroke width in px (1-200, default 24).",
+                    ],
+                    "hardness": [
+                        "type": "number", "minimum": 0, "maximum": 100,
+                        "description": "Edge hardness in percent (default 100). Below 100 it "
+                            + "SHRINKS the healed footprint inside the brush circle; it does "
+                            + "not fade the heal, which is seamless at the edge either way.",
+                    ],
+                    "opacity": [
+                        "type": "number", "minimum": 1, "maximum": 100,
+                        "description": "The heal's strength in percent (1-100, default 100): "
+                            + "how far the covered pixels move toward the blended result.",
+                    ],
+                    "sample_all_layers": [
+                        "type": "boolean",
+                        "description": "Sample the flattened composite instead of this "
+                            + "layer's own pixels (default true).",
+                    ],
+                    "spacing": spacingProperty,
+                    "angle": angleProperty,
+                    "roundness": roundnessProperty,
+                    "layer": index,
+                    "document_id": docID,
+                ], required: ["source_x", "source_y", "points"]),
+            tool(
+                "spot_heal_stroke",
+                "Heals a stroke with NO sampled source — the Spot Healing Brush tool. The "
+                    + "footprint is inpainted content-aware from a ring of valid pixels "
+                    + "around it (PatchMatch), then Poisson-blended in exactly as "
+                    + "heal_stroke's sampled patch is, so it takes the surrounding "
+                    + "illumination. Content-aware is the only type: there is no Proximity "
+                    + "Match or Create Texture in this build. Use it for a blemish with no "
+                    + "clean nearby source; heal_stroke is better when you can name one. "
+                    + "hardness shapes the footprint rather than fading the heal, there is no "
+                    + "flow (the stroke always deposits full coverage), and opacity is the "
+                    + "heal's strength. Bounded per CALL, counting every separate part of "
+                    + "the footprint together: at most 1,000,000 covered pixels and "
+                    + "4,000,000 pixels for the footprint plus its sampling ring — beyond "
+                    + "either it refuses with a message naming the limit, in the words of "
+                    + "a stroke (there is no selection and no ring to change — use a "
+                    + "smaller brush or a shorter stroke). A brush-sized footprint is well "
+                    + "under a second; a long stroke on a large canvas takes several "
+                    + "seconds, because cost follows the footprint plus the band it heals "
+                    + "from, and the app is busy for that whole time. "
+                    + "Respects the active selection. Errors on an adjustment layer. This "
+                    + "rewrites the layer's pixels, so a re-editable text, shape, or Live "
+                    + "Photo layer drops its description (undo restores it).",
+                [
+                    "points": [
+                        "type": "array",
+                        "description": "[[x, y], …] along the stroke, in canvas px.",
+                        "items": [
+                            "type": "array", "items": ["type": "number"],
+                            "minItems": 2, "maxItems": 2,
+                        ],
+                        "minItems": 1, "maxItems": 10_000,
+                    ],
+                    "size": [
+                        "type": "number",
+                        "description": "Stroke width in px (1-200, default 24).",
+                    ],
+                    "hardness": [
+                        "type": "number", "minimum": 0, "maximum": 100,
+                        "description": "Edge hardness in percent (default 100). Below 100 it "
+                            + "shrinks the healed footprint inside the brush circle rather "
+                            + "than fading the heal.",
+                    ],
+                    "opacity": [
+                        "type": "number", "minimum": 1, "maximum": 100,
+                        "description": "The heal's strength in percent (1-100, default 100).",
+                    ],
+                    "sample_all_layers": [
+                        "type": "boolean",
+                        "description": "Inpaint from the flattened composite instead of this "
+                            + "layer's own pixels (default false).",
+                    ],
+                    "ring": ringProperty,
+                    "seed": seedProperty,
+                    "spacing": spacingProperty,
+                    "angle": angleProperty,
+                    "roundness": roundnessProperty,
+                    "layer": index,
+                    "document_id": docID,
+                ], required: ["points"]),
+            tool(
+                "patch_region",
+                "Moves a region's texture from one part of the picture to another and blends "
+                    + "it to the destination's light — the Patch tool. direction \"source\" "
+                    + "(the default) HEALS the outlined region using the texture at "
+                    + "(offset_x, offset_y) away from it: outline the flaw and point the "
+                    + "offset at good pixels. direction \"destination\" is the opposite "
+                    + "gesture — the outlined region is the good texture, and the region it "
+                    + "would land on after the offset is what gets healed. The blend is the "
+                    + "same Poisson join heal_stroke uses, in one undo step. Give points for "
+                    + "an explicit polygon, or omit them to patch the current selection "
+                    + "(which may be any shape, a magic-wand or Select Subject mask "
+                    + "included). A small region is milliseconds, but patching most of a "
+                    + "large photograph is seconds — about 16 at the biggest region "
+                    + "allowed, with the app unresponsive throughout, and anything bigger "
+                    + "is refused with the limit in the message. Errors on an adjustment "
+                    + "layer. This rewrites the layer's "
+                    + "pixels, so a re-editable text, shape, or Live Photo layer drops its "
+                    + "description (undo restores it).",
+                [
+                    "points": [
+                        "type": "array",
+                        "description": "[[x, y], …] outlining the region, in canvas px "
+                            + "(closed automatically, 3 points or more). Omit to use the "
+                            + "current selection.",
+                        "items": [
+                            "type": "array", "items": ["type": "number"],
+                            "minItems": 2, "maxItems": 2,
+                        ],
+                        "minItems": 3, "maxItems": 10_000,
+                    ],
+                    "offset_x": [
+                        "type": "number",
+                        "description": "How far the region is dragged, in canvas px (x).",
+                    ],
+                    "offset_y": [
+                        "type": "number",
+                        "description": "How far the region is dragged, in canvas px (y).",
+                    ],
+                    "direction": [
+                        "type": "string", "enum": ["source", "destination"],
+                        "description": "Which end of the drag is healed (default source: the "
+                            + "outlined region is).",
+                    ],
+                    "sample_all_layers": [
+                        "type": "boolean",
+                        "description": "Take the texture from the flattened composite instead "
+                            + "of this layer's own pixels (default true).",
+                    ],
+                    "layer": index,
+                    "document_id": docID,
+                ], required: ["offset_x", "offset_y"]),
+            tool(
+                "content_aware_fill",
+                "Fills the current selection with plausible surroundings — Edit > "
+                    + "Content-Aware Fill. The region is inpainted by PatchMatch from a ring "
+                    + "of valid pixels around it and the result is Poisson-blended to the "
+                    + "surrounding illumination, in one undo step. It respects the "
+                    + "selection's SOFT edge — a feathered selection is filled and faded "
+                    + "across the whole of its ramp, not cut at the halfway line — and "
+                    + "leaves every pixel outside it byte-identical. Disjoint parts of the "
+                    + "selection are filled independently, each from its own neighbourhood, "
+                    + "so a scatter of blemishes costs the sum of their own boxes rather "
+                    + "than one box around all of them. A sampling ring narrower than the "
+                    + "region is widened automatically, because a narrow ring offers too "
+                    + "few distinct patches and the fill visibly tiles. Bounded per CALL, "
+                    + "counting every separate part of the selection together: at most "
+                    + "1,000,000 selected pixels, 4,000,000 for the region plus its ring, "
+                    + "and 80,000,000 for the bounding boxes the separate parts are worked "
+                    + "in — beyond any of them it refuses with a message naming the limit, "
+                    + "and a refusal is cheap: it is decided from the parts' bounding boxes "
+                    + "before a single working buffer is allocated, so 90,000 specks of "
+                    + "dust are turned down in 7 ms. A scattered "
+                    + "selection reaches the later limits long before the 1,000,000 one, "
+                    + "since every part carries its own ring and its own box. Cost follows "
+                    + "the region DILATED by its sampling ring plus the boxes its parts sit "
+                    + "in — which is what the 4,000,000 and the 80,000,000 bound — and not "
+                    + "the selected count: a compact 300 x 300 "
+                    + "region is half a second and a megapixel selection about five "
+                    + "(5.4 s at ring 48, 5.2 s at 512 — the ring you "
+                    + "pass barely moves it), but ONE 3 px scratch across a 5000 x 5000 "
+                    + "canvas selects 15,000 pixels and costs 4 s, and four of them cost "
+                    + "9 s. The most a permitted call can cost is about twelve seconds, at "
+                    + "the edge of the picture as in the middle of it. To make a fill "
+                    + "cheaper, shorten the region or select fewer separate parts rather "
+                    + "than thinning it; a narrow ring buys nothing, since it is widened "
+                    + "from below anyway. "
+                    + "The app is unresponsive for that whole time. "
+                    + "Requires a selection. Errors on an adjustment layer. This rewrites the "
+                    + "layer's pixels, so a re-editable text, shape, or Live Photo layer "
+                    + "drops its description (undo restores it).",
+                [
+                    "ring": ringProperty,
+                    "sample_all_layers": [
+                        "type": "boolean",
+                        "description": "Sample the flattened composite instead of this "
+                            + "layer's own pixels (default false).",
+                    ],
+                    "seed": seedProperty,
+                    "layer": index,
+                    "document_id": docID,
+                ]),
+            tool(
+                "red_eye",
+                "Removes flash red inside a rectangle — the Red Eye tool's drag. Pixels are "
+                    + "scored by red DOMINANCE (the ratio of red to the average of green and "
+                    + "blue, gated by saturation and hue), never a naive R > G test, which "
+                    + "every skin tone passes: a specular catchlight scores zero and comes "
+                    + "out bit-identical. Drag a tight rectangle over ONE eye. Nothing "
+                    + "happens if the rectangle holds no red, to a red region bigger than "
+                    + "pupil_size allows, or to one that reaches all four sides of the "
+                    + "rectangle — put the rectangle AROUND an eye, not inside something "
+                    + "red. This rewrites the layer's "
+                    + "pixels, so a re-editable text, shape, or Live Photo layer drops its "
+                    + "description (undo restores it).",
+                [
+                    "x": [
+                        "type": "number", "minimum": -100_000, "maximum": 100_000,
+                        "description": "Rectangle left, canvas px.",
+                    ],
+                    "y": [
+                        "type": "number", "minimum": -100_000, "maximum": 100_000,
+                        "description": "Rectangle top, canvas px.",
+                    ],
+                    "width": [
+                        "type": "number", "minimum": 1, "maximum": 100_000,
+                        "description": "Rectangle width in px.",
+                    ],
+                    "height": [
+                        "type": "number", "minimum": 1, "maximum": 100_000,
+                        "description": "Rectangle height in px.",
+                    ],
+                    "pupil_size": pupilSizeProperty,
+                    "darken": darkenProperty,
+                    "layer": index,
+                    "document_id": docID,
+                ], required: ["x", "y", "width", "height"]),
+            tool(
+                "red_eye_auto",
+                "Removes flash red from every eye in the picture — Filters > Remove Red Eye. "
+                    + "Vision's face landmarks locate each face's eyes and the same "
+                    + "correction red_eye applies runs on each of them, all in ONE undo step. "
+                    + "With no face in the picture it reports that and changes nothing — use "
+                    + "red_eye with a rectangle, or pass eyes explicitly; eyes also skips the "
+                    + "detector entirely, which is how a drawn or synthetic picture can be "
+                    + "corrected. This rewrites the layer's pixels, so a re-editable text, "
+                    + "shape, or Live Photo layer drops its description (undo restores it).",
+                [
+                    "eyes": [
+                        "type": "array",
+                        "description": "Optional explicit eyes; supplying them skips Vision "
+                            + "and corrects exactly these discs. radius is the IRIS radius in "
+                            + "canvas px and each eye is scanned over a square six times it, "
+                            + "so the eyes together are limited to 100 megapixels of picture "
+                            + "— a wrong-unit radius is refused with that number rather than "
+                            + "freezing the app.",
+                        "items": [
+                            "type": "object",
+                            "properties": [
+                                "x": [
+                                    "type": "number", "minimum": -100_000, "maximum": 100_000,
+                                ],
+                                "y": [
+                                    "type": "number", "minimum": -100_000, "maximum": 100_000,
+                                ],
+                                "radius": [
+                                    "type": "number", "exclusiveMinimum": 0, "maximum": 100_000,
+                                ],
+                            ] as [String: Any],
+                            "required": ["x", "y", "radius"],
+                        ] as [String: Any],
+                        "minItems": 1, "maxItems": 64,
+                    ],
+                    "pupil_size": pupilSizeProperty,
+                    "darken": darkenProperty,
+                    "layer": index,
+                    "document_id": docID,
+                ]),
             tool(
                 "add_text",
                 "Rasterizes text onto a layer's pixels — the characters become pixels and "

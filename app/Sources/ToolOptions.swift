@@ -45,10 +45,20 @@ struct MoveToolOptions: Codable, Equatable {
     var nudgeStep: Double = 1
 }
 
-/// Shared by the four paint tools — brush, eraser, clone, dodge — each of
-/// which keeps its OWN instance, so the eraser's size never follows the
-/// brush's. The dodge tool reads `opacity` as its exposure and adds the
-/// burn/range pair no other paint tool shows.
+/// Shared by the six paint tools — brush, eraser, clone, dodge and the two
+/// healing brushes — each of which keeps its OWN instance, so the eraser's
+/// size never follows the brush's. The dodge tool reads `opacity` as its
+/// exposure and adds the burn/range pair no other paint tool shows; the
+/// healing brushes read `opacity` as the heal's strength and add the
+/// aligned/sample pair below.
+///
+/// Adding a field resets every saved blob of this family once (the
+/// synthesized decoder throws on the first missing key and
+/// `ToolOptionsStore.load` falls back to defaults) — what every earlier
+/// addition here did. `TextToolOptions` buys its way out with a hand-written
+/// all-optional decoder; this family stays synthesized, because a
+/// hand-written one silently reads a LATER forgotten field as its default
+/// instead of resetting loudly once.
 struct PaintToolOptions: Codable, Equatable {
     var size: Double = 24
     /// 100 = the classic hard round; below that, SoftBrush dab stamping.
@@ -72,6 +82,20 @@ struct PaintToolOptions: Codable, Equatable {
     var burn = false
     /// 0 shadows, 1 midtones, 2 highlights.
     var rangeIndex = 1
+    // Healing Brush only (the two above are Dodge / Burn only the same way).
+    /// The sampled source offset set by the first stroke after the source
+    /// point was placed PERSISTS across strokes; off, every mouse-down
+    /// recomputes it from the source point — today's Clone Stamp rule. While
+    /// it is on, the canvas's source marker tracks the pointer rather than
+    /// the ⌥-clicked point, because the offset is what persists and the
+    /// point being sampled therefore moves (`ImageCanvasView`'s
+    /// `cloneSourceMarkerPoint`).
+    var aligned = true
+    /// Heal from the flattened composite instead of the layer's own pixels.
+    /// The Healing Brush honors it Swift-side (it picks the snapshot the
+    /// stroke stamps); the Spot Healing Brush passes it to the core, which
+    /// has to generate the source and so must know.
+    var sampleAllLayers = true
     /// nil in blobs saved before the tip options went live — those carry
     /// the redesign's DISABLED placeholder values (spacing 10), which no
     /// user could have chosen and the pipeline never honored. Decoding nil
@@ -90,6 +114,41 @@ struct PaintToolOptions: Codable, Equatable {
         out.tipVersion = 1
         return out
     }
+}
+
+/// The Patch tool: which way the drag runs, and where the texture comes
+/// from. No tip options — the footprint is an outlined region, not a brush.
+struct PatchToolOptions: Codable, Equatable {
+    /// 0 Source (the default, Photoshop's): the OUTLINED region is healed
+    /// from wherever it is dragged to. 1 Destination: the outlined region is
+    /// good texture, dragged onto the flaw.
+    var directionIndex = 0
+    var sampleAllLayers = true
+}
+
+/// The Red Eye tool's two dials, both percentages.
+struct RedEyeToolOptions: Codable, Equatable {
+    /// Rejects a red region whose larger side exceeds this fraction of the
+    /// drag rectangle's SHORTER side. 100 — permissive — is deliberate: the
+    /// gesture the app documents is a tight rectangle over one eye, where
+    /// the red iris spans 40–90 % of the short side, so a smaller default
+    /// would refuse the tool's own instruction. Turn it down when something
+    /// red (a shirt, lipstick) got caught by a sloppy rectangle.
+    var pupilSize: Double = 100
+    /// How far the corrected pupil darkens after the red is neutralised;
+    /// 50 is Photoshop's default, 0 neutralises only.
+    var darken: Double = 50
+}
+
+/// Content-Aware Fill's sheet values, persisted like a tool's options: the
+/// command has no tool of its own to hang them on.
+struct ContentAwareFillOptions: Codable, Equatable {
+    /// Sampling-ring width in px around the selection (21–512; the core's own
+    /// floor is three patch widths and it raises anything below it).
+    var ring: Double = 48
+    var sampleAllLayers = false
+    /// The inpaint's RNG seed: the same seed refills identically.
+    var seed = 0
 }
 
 struct FillToolOptions: Codable, Equatable {
@@ -261,6 +320,13 @@ final class ToolOptionsStore {
     var eraser: PaintToolOptions { didSet { save(eraser, "eraser") } }
     var clone: PaintToolOptions { didSet { save(clone, "clone") } }
     var dodge: PaintToolOptions { didSet { save(dodge, "dodge") } }
+    var heal: PaintToolOptions { didSet { save(heal, "heal") } }
+    var spotHeal: PaintToolOptions { didSet { save(spotHeal, "spotHeal") } }
+    var patch: PatchToolOptions { didSet { save(patch, "patch") } }
+    var redEye: RedEyeToolOptions { didSet { save(redEye, "redEye") } }
+    var contentAwareFill: ContentAwareFillOptions {
+        didSet { save(contentAwareFill, "contentAwareFill") }
+    }
     var fill: FillToolOptions { didSet { save(fill, "fill") } }
     var gradient: GradientToolOptions { didSet { save(gradient, "gradient") } }
     var shape: ShapeToolOptions { didSet { save(shape, "shape") } }
@@ -270,22 +336,38 @@ final class ToolOptionsStore {
     var sharedState: SharedToolState { didSet { save(sharedState, "shared") } }
 
     /// The paint-family options for a paint tool; nil for the rest.
+    ///
+    /// Size is floored at the tool's own minimum on the way out AND on the way
+    /// in (`EditorTool.minimumBrushSize` — three for the healing brushes,
+    /// whose solve can do nothing with a footprint two pixels across). Both
+    /// directions, because this is the one read every caller shares — the
+    /// options bar, the canvas sync and the `[` key's read-modify-write — and
+    /// a blob saved by an earlier build can hold anything.
     func paintOptions(for tool: EditorTool) -> PaintToolOptions? {
+        var options: PaintToolOptions
         switch tool {
-        case .brush: return brush
-        case .eraser: return eraser
-        case .clone: return clone
-        case .dodge: return dodge
+        case .brush: options = brush
+        case .eraser: options = eraser
+        case .clone: options = clone
+        case .dodge: options = dodge
+        case .heal: options = heal
+        case .spotHeal: options = spotHeal
         default: return nil
         }
+        options.size = max(options.size, tool.minimumBrushSize)
+        return options
     }
 
     func setPaintOptions(_ options: PaintToolOptions, for tool: EditorTool) {
+        var options = options
+        options.size = max(options.size, tool.minimumBrushSize)
         switch tool {
         case .brush: brush = options
         case .eraser: eraser = options
         case .clone: clone = options
         case .dodge: dodge = options
+        case .heal: heal = options
+        case .spotHeal: spotHeal = options
         default: break
         }
     }
@@ -298,6 +380,15 @@ final class ToolOptionsStore {
         eraser = (Self.load("eraser") ?? PaintToolOptions()).migratedToLiveTip
         clone = (Self.load("clone") ?? PaintToolOptions()).migratedToLiveTip
         dodge = (Self.load("dodge") ?? PaintToolOptions(opacity: 50)).migratedToLiveTip
+        heal = (Self.load("heal") ?? PaintToolOptions()).migratedToLiveTip
+        // Spot healing generates its own source from the layer it is used on;
+        // sampling the composite there would inpaint from pixels the layer
+        // does not own (§0.5), so its default is off — the one difference.
+        spotHeal = (Self.load("spotHeal") ?? PaintToolOptions(sampleAllLayers: false))
+            .migratedToLiveTip
+        patch = Self.load("patch") ?? PatchToolOptions()
+        redEye = Self.load("redEye") ?? RedEyeToolOptions()
+        contentAwareFill = Self.load("contentAwareFill") ?? ContentAwareFillOptions()
         fill = Self.load("fill") ?? FillToolOptions()
         gradient = Self.load("gradient") ?? GradientToolOptions()
         shape = Self.load("shape") ?? ShapeToolOptions()

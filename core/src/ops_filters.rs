@@ -9,6 +9,7 @@
 use image::{Rgba, RgbaImage};
 
 use crate::blend::{LUMA_B, LUMA_G, LUMA_R};
+use crate::rng::SplitMix64;
 
 /// The hueRotate matrix from the SVG filter effects specification, built
 /// from cos/sin of `degrees` (no HSL round-trip). Shared with the
@@ -191,24 +192,6 @@ pub(crate) fn pixelate(img: &RgbaImage, block: u32) -> Option<RgbaImage> {
     Some(out)
 }
 
-/// SplitMix64 PRNG; a few lines, no dependency, deterministic per seed.
-struct SplitMix64(u64);
-
-impl SplitMix64 {
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// Uniform in [0, 1), built from the top 24 bits.
-    fn next_unit_f32(&mut self) -> f32 {
-        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
-    }
-}
-
 /// Additive uniform noise in [-amount, +amount] (normalized scale) per COLOR
 /// channel, independent per channel, deterministic from `seed` (SplitMix64,
 /// pixels visited in row-major order, channels r, g, b). Requires `amount`
@@ -217,7 +200,7 @@ pub(crate) fn noise(img: &RgbaImage, amount: f32, seed: u64) -> Option<RgbaImage
     if !(amount > 0.0 && amount <= 1.0) {
         return None;
     }
-    let mut rng = SplitMix64(seed);
+    let mut rng = SplitMix64::new(seed);
     let mut out = img.clone();
     for px in out.pixels_mut() {
         for ch in px.0.iter_mut().take(3) {

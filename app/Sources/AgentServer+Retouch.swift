@@ -15,7 +15,9 @@ extension AgentServer {
     /// fill it, and hands the bytes to `commit` inside performPixelEdit —
     /// the pixel-rewrite chokepoint that silently drops a described layer's
     /// meta and reports it.
-    private func retouchOverlay(
+    /// Internal, not private: every +Feature retouching handler (heal, spot
+    /// heal, patch) builds its overlay through this one rasterizer.
+    func retouchOverlay(
         _ document: ImageDocument, layer: Int, actionName: String,
         draw: (CGContext) -> Void,
         commit: (RasterDocument, UnsafePointer<UInt8>, Int, Int) -> RasterDocument?
@@ -106,7 +108,9 @@ extension AgentServer {
     /// polyline through `points`, `size` px wide — the same geometry a
     /// brush stroke paints. A single point gets an epsilon segment so it
     /// strokes as a round dot instead of an empty path.
-    private static func strokeCoverage(points: [CGPoint], size: CGFloat) -> CGPath {
+    /// Internal, like retouchOverlay above: the healing handlers stroke the
+    /// same coverage rather than writing a second outline builder.
+    static func strokeCoverage(points: [CGPoint], size: CGFloat) -> CGPath {
         let path = CGMutablePath()
         path.move(to: points[0])
         if points.count == 1 {

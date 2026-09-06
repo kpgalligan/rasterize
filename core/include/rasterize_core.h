@@ -376,6 +376,109 @@ RzDocument *rz_doc_dodge_burn_layer(const RzDocument *doc, size_t idx,
                                     const uint8_t *src, uint32_t w, uint32_t h,
                                     float exposure, uint8_t range, bool burn);
 
+/* Retouching: healing, inpainting and red-eye. */
+
+/* Poisson-blends the source patch an overlay carries into layer idx: the
+ * source's TEXTURE with the destination's ILLUMINATION. src is the SAME
+ * canvas-frame premultiplied overlay rz_doc_painting_layer takes (w/h must
+ * equal the canvas size): its ALPHA is the footprint's coverage and its RGB
+ * the already-aligned source pixels, so the Clone Stamp's overlay is
+ * literally the healing brush's input. Covered pixels (alpha >= 128) that
+ * have a covered-and-usable neighbourhood are solved; a covered pixel next
+ * to an uncovered one keeps the destination, which is what makes the join
+ * seamless — so a hard-edged footprint needs no feather, and coverage below
+ * 128 is not written at all (hardness shrinks the footprint, it does not
+ * fade the heal). The covered set is split into connected components, each
+ * solved over its own bounding box. Straight colour, per channel, in the
+ * document's own numbers; layer alpha is never touched and fully transparent
+ * destination pixels are skipped. strength scales the write-back and is
+ * clamped to [0, 1]. Overlay outside the layer's extent is ignored (the layer
+ * does NOT grow). NULL with *err_out set when one region's bounding box
+ * exceeds the documented memory limit, or when every region's box together
+ * exceeds the documented working-area limit for one call — both are measured
+ * BEFORE anything is healed, so a refusal costs a component walk and not a
+ * heal; NULL with *err_out NULL on NULL args,
+ * dimension mismatch, non-finite strength, out-of-range idx, an empty covered
+ * set, a covered set with no interior to solve (every covered pixel is on the
+ * join contour, where the heal IS the destination), a layer extent that
+ * misses the canvas, or when no pixel would change. Free *err_out with
+ * rz_string_free. */
+RzDocument *rz_doc_heal_layer(const RzDocument *doc, size_t idx,
+                              const uint8_t *src, uint32_t w, uint32_t h,
+                              float strength, char **err_out);
+
+/* Spot healing: PatchMatch-inpaints the overlay's footprint from a ring of
+ * valid pixels around it, then Poisson-blends the result in exactly as
+ * rz_doc_heal_layer does, hard cut at the alpha = 128 contour and all — so a
+ * soft tip heals a SMALLER footprint, never a fainter one. Only the overlay's
+ * ALPHA is read (its RGB is ignored — there is no sampled source). ring is
+ * the sampling-ring width in
+ * px, 0 = automatic, clamped to [21, 512] (the floor is three patch widths,
+ * the narrowest band a source patch can move in) and then widened from below
+ * by the footprint's own size; seed makes the result reproducible; sample_all
+ * inpaints from the flattened composite instead of layer idx's own pixels;
+ * preview computes the WHOLE pipeline on a reduced copy (same structure,
+ * softer texture) and is for a live preview only; its reduction is chosen
+ * from the whole call, so a scattered footprint previews as cheaply as a
+ * compact one. A pixel is a valid SOURCE when it is outside every part of
+ * the footprint and its alpha is at least 128: alpha here answers only
+ * whether there is colour, and the RGB beside it is straight, so a
+ * semi-transparent layer or an 80 %-opaque composite samples fine. NULL with
+ * *err_out set when the footprint, its sampling window or one region's box
+ * exceeds a documented cap (the first two bound the whole CALL: every
+ * separate part of the footprint counts towards them together), or when
+ * there is nothing to sample from — every cap is measured BEFORE any pixel
+ * is filled, so a refusal costs a fraction of a fill, and every message is
+ * worded for the gesture that asked (a stroke is not told to select less).
+ * NULL with *err_out NULL when nothing would change. Free with
+ * rz_string_free. */
+RzDocument *rz_doc_spot_heal_layer(const RzDocument *doc, size_t idx,
+                                   const uint8_t *src, uint32_t w, uint32_t h,
+                                   float strength, uint32_t ring,
+                                   uint64_t seed, bool sample_all,
+                                   bool preview, char **err_out);
+
+/* Content-Aware Fill: PatchMatch-inpaints the region a canvas-sized u8
+ * coverage mask marks (the same convention every selection uses), sampled
+ * from a ring around it, then Poisson-blends the fill to the surrounding
+ * illumination. The region is every pixel the mask touches at all (> 0, not
+ * >= 128 — this is a selection, not a brush dab), and the mask's SOFT bytes
+ * weight the write-back, so a feathered selection is filled and faded across
+ * the whole of its ramp and nothing outside it moves. Disjoint parts of the mask
+ * are filled independently, each from its own neighbourhood, so a scatter of
+ * blemishes costs the sum of their own boxes and not one box around all of
+ * them. ring/seed/sample_all/preview as rz_doc_spot_heal_layer, so ring is
+ * likewise clamped to [21, 512]. The caps bound the WHOLE CALL: every
+ * separate part of the mask counts towards them together. NULL with
+ * *err_out set on a cap or a starved sample region; NULL with *err_out NULL
+ * when nothing would change. Free *err_out with rz_string_free. */
+RzDocument *rz_doc_content_aware_fill(const RzDocument *doc, size_t idx,
+                                      const uint8_t *mask, uint32_t w,
+                                      uint32_t h, uint32_t ring,
+                                      uint64_t seed, bool sample_all,
+                                      bool preview, char **err_out);
+
+/* Removes flash red inside a canvas rect on layer idx. Inside the rect,
+ * pixels are scored by red DOMINANCE — the ratio R/((G+B)/2) gated by HSV
+ * saturation and hue, not a naive R > G, which every skin tone passes —
+ * and a scoring component is corrected only when its larger side fits within
+ * pupil_size times the rect's SHORTER side AND it does not reach all four
+ * sides of the rect, so a red object caught by a sloppy rectangle is left
+ * alone and a rect dropped wholly inside one red region is refused rather
+ * than desaturated into a hard-edged square. pupil_size is a fraction in
+ * (0, 1] and 1.0 is the intended default: it exists to reject something
+ * bigger than the eye, not to require a small one — the four-sides rule is
+ * what gives it teeth on a square rect, where a clipped component can never
+ * be larger than the rect. Red drops to (G+B)/2 and the pixel darkens
+ * by darken (0.5 = Photoshop's default); a specular catchlight scores zero
+ * and comes out bit-identical. Layer alpha is never touched. NULL on an
+ * empty or off-canvas rect, out-of-range idx, non-finite parameters, nothing
+ * red at all, no component within the pupil-size limit, or when no pixel
+ * would change. */
+RzDocument *rz_doc_red_eye_layer(const RzDocument *doc, size_t idx,
+                                 int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                 float pupil_size, float darken);
+
 /* Whole-document geometry: every layer's pixels and offset transform
  * together with the canvas. */
 RzDocument *rz_doc_rotate90(const RzDocument *doc);

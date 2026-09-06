@@ -748,6 +748,123 @@ final class RasterDocument {
                 ptr, idx, data, UInt32(w), UInt32(h), Float(exposure), UInt8(range), burn))
     }
 
+    // MARK: - Retouching
+
+    /// The two-tier result of a core op that reports through `err_out`: NULL
+    /// WITH a message is an error, NULL WITHOUT one is a plain refusal
+    /// (nothing would change), and a handle is the new document. The idiom
+    /// `withLayerStyle` spells out inline, shared by the retouching wrappers
+    /// below — a non-NULL handle never comes back with a message, so nothing
+    /// is leaked by not reading `err` on that path.
+    private func fallible(
+        _ handle: OpaquePointer?, _ err: UnsafeMutablePointer<CChar>?, _ fallback: String
+    ) throws -> RasterDocument? {
+        guard let handle = handle else {
+            guard err != nil else { return nil }
+            throw RasterCoreError(message: takeErrorMessage(err, fallback: fallback))
+        }
+        return RasterDocument(owning: handle)
+    }
+
+    /// Poisson-blends the source patch an overlay carries into layer `idx` —
+    /// the healing brush. `overlay` is the same canvas-sized premultiplied
+    /// buffer `paintingLayer` takes: its alpha is the footprint's coverage,
+    /// its RGB the already-aligned source, so the Clone Stamp's overlay IS
+    /// this op's input. Coverage below 128 is not written at all (hardness
+    /// shrinks the footprint; the heal itself never fades), and `strength`
+    /// — the tool's Opacity — scales the write-back. nil when nothing would
+    /// change; throws the core's message when a healed region's box is over
+    /// the documented memory limit.
+    func healLayer(
+        _ idx: Int, overlay data: UnsafePointer<UInt8>, w: Int, h: Int, strength: Double
+    ) throws -> RasterDocument? {
+        guard isValidIndex(idx), w == width, h == height, strength.isFinite else { return nil }
+        var err: UnsafeMutablePointer<CChar>? = nil
+        let handle = rz_doc_heal_layer(
+            ptr, idx, data, UInt32(w), UInt32(h), Float(strength), &err)
+        return try fallible(handle, err, "The heal could not be applied.")
+    }
+
+    /// Spot healing: the core inpaints the overlay's footprint from a ring
+    /// around it and blends the result in as `healLayer` does. Only the
+    /// overlay's ALPHA is read — there is no sampled source, so the overlay
+    /// carries pure coverage. `ring` is the sampling-ring width in px (0 =
+    /// automatic), `seed` makes the result reproducible, and `preview`
+    /// computes the whole pipeline on a reduced copy. nil when nothing would
+    /// change; throws the core's message on a cap or a starved sample region.
+    func spotHealLayer(
+        _ idx: Int, overlay data: UnsafePointer<UInt8>, w: Int, h: Int, strength: Double,
+        ring: Int, seed: UInt64, sampleAllLayers: Bool, preview: Bool
+    ) throws -> RasterDocument? {
+        guard isValidIndex(idx), w == width, h == height, strength.isFinite else { return nil }
+        var err: UnsafeMutablePointer<CChar>? = nil
+        let handle = rz_doc_spot_heal_layer(
+            ptr, idx, data, UInt32(w), UInt32(h), Float(strength),
+            UInt32(clamping: max(0, ring)), seed, sampleAllLayers, preview, &err)
+        return try fallible(handle, err, "The spot heal could not be applied.")
+    }
+
+    /// Content-Aware Fill over `mask`, a canvas-sized coverage buffer (the
+    /// one fill and gradient take): the core inpaints the marked region from
+    /// a ring around it and blends it to the surrounding illumination. The
+    /// region is every pixel the mask touches at all and its soft bytes
+    /// weight the write-back, so a feathered selection is filled and faded
+    /// across the whole of its ramp and nothing outside it moves. nil when
+    /// nothing would change;
+    /// throws the core's message on a cap or a starved sample region.
+    func contentAwareFilled(
+        _ idx: Int, mask: [UInt8], ring: Int, seed: UInt64, sampleAllLayers: Bool, preview: Bool
+    ) throws -> RasterDocument? {
+        guard isValidIndex(idx), mask.count == width * height else { return nil }
+        var err: UnsafeMutablePointer<CChar>? = nil
+        let handle = mask.withUnsafeBufferPointer { buffer in
+            rz_doc_content_aware_fill(
+                ptr, idx, buffer.baseAddress, UInt32(width), UInt32(height),
+                UInt32(clamping: max(0, ring)), seed, sampleAllLayers, preview, &err)
+        }
+        return try fallible(handle, err, "The fill could not be applied.")
+    }
+
+    /// Removes flash red inside a canvas rect on layer `idx`: red dominance
+    /// gated by saturation and hue, corrected only where a scoring component
+    /// fits within `pupilSize` (a fraction, 1.0 = the default) of the rect's
+    /// SHORTER side and does not reach all four of its sides. `darken` is
+    /// 0…1 (0.5 = Photoshop's default). nil on an empty or off-canvas rect,
+    /// on nothing red inside it, on no component the rect contains and
+    /// admits under `pupilSize`, or when nothing would change.
+    func redEyeLayer(
+        _ idx: Int, rect: CGRect, pupilSize: Double, darken: Double
+    ) -> RasterDocument? {
+        guard isValidIndex(idx), !rect.isNull, !rect.isInfinite, !rect.isEmpty,
+            rect.minX.isFinite, rect.minY.isFinite, rect.width.isFinite, rect.height.isFinite,
+            pupilSize.isFinite, darken.isFinite
+        else { return nil }
+        // Clamp in DOUBLE space, before any integer conversion. `Int(_:)`
+        // TRAPS — it does not saturate — on a finite Double outside Int64's
+        // range, and the trap kills the process with every open document's
+        // unsaved work; `red_eye {"x": 1e300, …}` and an `eyes` entry with a
+        // huge radius both reached it. A canvas coordinate past ±2 × 10⁹
+        // cannot name a pixel of any document this app can hold (`MAX_PIXELS`
+        // is 100 million), so the clamp discards nothing real, and the agent
+        // handlers wall the arguments far below it so a caller gets a
+        // sentence rather than a silent clamp.
+        let x = Int32(clamping: Int(Self.pixelCoordinate(rect.minX.rounded(.down))))
+        let y = Int32(clamping: Int(Self.pixelCoordinate(rect.minY.rounded(.down))))
+        let w = UInt32(clamping: Int(Self.pixelCoordinate(rect.width.rounded())))
+        let h = UInt32(clamping: Int(Self.pixelCoordinate(rect.height.rounded())))
+        guard w > 0, h > 0 else { return nil }
+        return wrap(
+            rz_doc_red_eye_layer(ptr, idx, x, y, w, h, Float(pupilSize), Float(darken)))
+    }
+
+    /// A finite canvas coordinate brought inside the range `Int(_:)` can
+    /// convert without trapping. NaN is already excluded by the callers'
+    /// `isFinite` guards; this handles the finite-but-astronomical case that
+    /// a JSON number in scientific notation makes trivial to send.
+    private static func pixelCoordinate(_ value: Double) -> Double {
+        min(max(value, -2_000_000_000), 2_000_000_000)
+    }
+
     // MARK: - Selection regions and region painting
 
     /// Similar-color mask from the flattened composite: canvas-sized

@@ -433,7 +433,7 @@ fn coverage_byte(x: f32) -> u8 {
 /// contour (see the section comment above): positive inside (coverage
 /// `>= 128`), negative outside, `+inf`/`-inf` when the binarized mask has
 /// no outside (resp. inside) pixels at all.
-fn signed_distance_field(mask: &[u8], w: usize, h: usize) -> Vec<f32> {
+pub(crate) fn signed_distance_field(mask: &[u8], w: usize, h: usize) -> Vec<f32> {
     let len = w * h;
     let mut to_outside = vec![0f32; len];
     let mut to_inside = vec![0f32; len];

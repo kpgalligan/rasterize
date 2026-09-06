@@ -216,7 +216,12 @@ private func assistantToolTrampoline(
     let name = String(cString: toolName)
     let arguments = String(cString: argumentsJSON)
     let run = { AgentServer.shared.execute(tool: name, argumentsJSON: arguments) }
-    let result = Thread.isMainThread ? run() : DispatchQueue.main.sync(execute: run)
+    // The same App Nap assertion the MCP trampoline holds, for the same
+    // reason: a panel conversation runs while the app may be in the
+    // background (`AppActivity`).
+    let result = AppActivity.userInitiated("running the \(name) tool") {
+        Thread.isMainThread ? run() : DispatchQueue.main.sync(execute: run)
+    }
     return result.withCString { rz_agent_string_create($0) }
 }
 

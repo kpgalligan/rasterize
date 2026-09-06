@@ -291,6 +291,105 @@ decoding, encoding, and manipulation.
   darkens, banded to shadows / midtones / highlights with an exposure
   setting, applied by a Rust core op through the stroke's own coverage so
   soft edges fade the effect out
+- **Healing Brush** (P): ⌥-click sets the source, then a stroke clones its
+  TEXTURE while keeping the destination's LIGHT — the sampled pixels under
+  the whole footprint are Poisson-blended into the layer once, at mouse-up,
+  as one undo step, so a stroke has no ridges where its dabs overlapped.
+  The drag previews the raw clone; the healed result replaces it on
+  release. Aligned, Sample All Layers, and the tip options. With Aligned on
+  the source marker follows the pointer, because what persists between
+  strokes is the OFFSET and so the point being sampled moves with the brush;
+  with it off the marker stays on the point you ⌥-clicked and every stroke
+  re-aims from there, which is what the Clone Stamp always does. Hardness
+  shapes the footprint rather than fading the heal — the blend is already
+  seamless at the edge, so there is nothing to feather — and Opacity is the
+  heal's strength. Size stops at 3 px for both healing brushes, and `[` will
+  not step below it: the blend keeps the destination wherever the footprint
+  touches un-healed pixels, so a footprint two pixels across is all edge and
+  would heal nothing at all. Replace mode is deliberately not offered: in
+  this build it would be exactly the Clone Stamp
+- **Spot Healing Brush** (P): the same stroke with no source point. The
+  source is generated: the footprint is inpainted by PatchMatch from a ring
+  of valid pixels around it, then Poisson-blended in. Content-Aware is the
+  only type — there is no Proximity Match or Create Texture here — and the
+  footprint ghosts on the canvas while you drag. Hardness shapes the
+  footprint here exactly as it does for the Healing Brush: a soft tip heals
+  a smaller area, never a fainter one. It is the one BRUSH that makes you
+  wait (the Patch tool and Content-Aware Fill wait too, and say so below):
+  the whole footprint is inpainted and blended at mouse-up, which for a
+  big brush and a long drag is seconds (2.4 s for a 200 px brush
+  dragged 800 px across a 2000 × 1500 photo, 4.4 s for a 1500 px drag on a
+  5000 × 4000 one), with the cursor showing an hourglass and the app
+  unresponsive until it lands
+- **Patch tool** (P): outline a region (click a polygon, Return or a
+  double-click to close) or use the selection you already have, then drag
+  it: the outline follows the pointer and shows the pixels it will take. On
+  release the region takes that texture with its own illumination, one undo
+  step, and the region stays placed afterwards, so a second patch from the
+  same outline is one more drag rather than one more outline. Source (the
+  default) heals what you outlined from where you dragged to; Destination
+  drags good texture onto a flaw. Sample All Layers (on by default) chooses
+  what the patch takes — the composite, or the active layer's own pixels —
+  and the drag previews whichever one the release will use. A blemish-sized
+  patch lands in milliseconds, but the release blends the whole outlined
+  region at once, so outlining most of a large photograph is seconds — about
+  16 at the biggest region allowed, which is a 32-megapixel box, and bigger
+  than that is refused with the limit in the message — with the cursor
+  showing an hourglass and the app unresponsive until it lands
+- **Red Eye** (P): drag a rectangle over an eye and flash red inside it is
+  neutralised and darkened — scored by red DOMINANCE rather than a naive
+  R > G test (which every skin tone passes), so a specular catchlight comes
+  out untouched. Pupil Size rejects a red region wider than that fraction
+  of the rectangle's shorter side, and defaults to 100 % because its job is
+  to spare a red shirt caught by a sloppy rectangle, not to require a small
+  pupil; a red region that reaches all four sides of the rectangle is
+  refused whatever Pupil Size says, because a rectangle dropped inside
+  something red has no pupil in it to find — that rule is what gives the
+  default teeth, since a red region is clipped to the rectangle and on a
+  square one can never measure bigger than it.
+  Filters > Remove Red Eye does the whole picture automatically
+  through Vision's face landmarks; with no face in the frame it says so and
+  changes nothing — the tool's rectangle is then the way to do it
+- **Content-Aware Fill** (Edit > Content-Aware Fill…): fills the selection
+  from a ring around it by PatchMatch inpainting, then Poisson-blends the
+  result to the surrounding light. The sheet has the sampling ring width,
+  Sample All Layers and a seed (the fill is reproducible: the same seed
+  gives the same pixels), with a live preview computed on a reduced copy —
+  the structure is final, the finest texture is not, and the full-size
+  blend runs on Apply. A ring narrower than the region is widened
+  automatically, because a narrow ring tiles. Separate parts of the
+  selection are filled independently, each from its own surroundings, so a
+  scatter of blemishes costs no more than the sum of their own
+  neighbourhoods. It respects the selection's soft edge — a feathered
+  selection is filled and faded across the whole of its ramp, not cut at the
+  halfway line — leaves everything outside it untouched, and commits as one
+  undo step. On a selection of many small parts the live preview fills the
+  biggest 200 of them and leaves the rest showing the original, and it picks
+  how far to reduce from the working area the fill will cover rather than
+  from how many pixels are selected — so one 3 px scratch across a whole
+  scan previews as cheaply as a compact hole. The preview stays under a
+  second whatever you select. Bounded per call, with
+  every separate part of the selection counting together: at most
+  1 megapixel of selection, 4 megapixels for the selection plus its ring,
+  and 80 megapixels for the boxes the separate parts sit in — refused with a
+  message naming the limit, and a refusal is cheap: 90,000 specks of dust
+  are turned down in 7 ms, before a single working buffer is allocated. A
+  scatter of small parts reaches the later limits long before the
+  1-megapixel one, because every part carries its own ring and its own box;
+  the ring is narrowed for the whole selection at once to fit, and only
+  refused when even the narrowest will not. The sampling
+  ring starts at 48 px in the sheet (the MCP tool defaults to automatic,
+  which widens it to the region's own radius; anything under 21 px — three
+  patch widths — is raised to it), and what drives the cost is the region
+  PLUS its ring and the boxes its parts sit in, not the number of pixels
+  selected and not where in the frame it sits: a 300 × 300 region is half a
+  second and a megapixel selection about five, but one 3 px scratch across a
+  5000 × 5000 canvas selects 15,000 pixels and costs four seconds. The most
+  a permitted fill can cost is about twelve seconds, with the cursor showing
+  an hourglass and the app unresponsive while it runs. To make a fill
+  cheaper, shorten the region or select fewer separate parts rather than
+  thinning it — a narrow ring buys nothing, since it is widened from below
+  anyway
 - **Shape layers** (R — repeated presses cycle Rectangle, Ellipse, Line):
   drag out a shape (Shift constrains squares, circles and 45° lines) and
   it lands as its own parametric layer — fill, stroke, weight and corner
@@ -486,7 +585,7 @@ model defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 75 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 81 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG — `render`'s `channel` shows ONE plane as a grayscale PNG
 instead — and `sample_color` reads single pixels off the flattened
@@ -521,7 +620,13 @@ paint through the layer blend-mode set, and a
 `target` choosing the layer's pixels, its mask, one of its colour planes or
 an alpha channel — `apply_filter`, `fill` and `gradient` take the same
 `target` minus `mask`, filters and fills on a layer mask not being part of
-this build), shape layers
+this build), retouching (`heal_stroke` and `spot_heal_stroke` mirror the two
+healing brushes — the second inpaints its own source — `patch_region` the
+Patch tool from a polygon or the current selection, `content_aware_fill` the
+Edit-menu command over the selection, and `red_eye` / `red_eye_auto` the Red
+Eye tool's rectangle and its Vision pass, which reports "no face was found"
+rather than changing nothing silently and takes an explicit `eyes` array to
+skip the detector), shape layers
 (`add_shape_layer` / `edit_shape_layer`, the parametric rect / ellipse /
 line layers the shape tools drag out and reopen, with an optional
 `transform`), text — `add_text_layer` and `edit_text_layer` for re-editable

@@ -20,6 +20,14 @@ enum EditorTool: Int, CaseIterable {
     case crop
     case clone
     case dodge
+    // The retouching group: the two healing brushes, the Patch tool and Red
+    // Eye. Appended rather than slotted beside `clone` because the raw value
+    // is a stable order (a `.rz`-independent but persisted-in-defaults
+    // number); the rail puts them where they belong (see `railGroups`).
+    case heal
+    case spotHeal
+    case patch
+    case redEye
     case shapeRect
     case shapeEllipse
     case shapeLine
@@ -44,6 +52,10 @@ enum EditorTool: Int, CaseIterable {
         case .crop: return "Crop"
         case .clone: return "Clone Stamp"
         case .dodge: return "Dodge / Burn"
+        case .heal: return "Healing Brush"
+        case .spotHeal: return "Spot Healing Brush"
+        case .patch: return "Patch"
+        case .redEye: return "Red Eye"
         case .shapeRect: return "Rectangle"
         case .shapeEllipse: return "Ellipse"
         case .shapeLine: return "Line"
@@ -72,6 +84,10 @@ enum EditorTool: Int, CaseIterable {
         case .crop: return "crop"
         case .clone: return "square.fill.on.square"
         case .dodge: return "circle.righthalf.filled"
+        case .heal: return "bandage"
+        case .spotHeal: return "bandage.fill"
+        case .patch: return "lasso.badge.sparkles"
+        case .redEye: return "eye.trianglebadge.exclamationmark"
         case .shapeRect: return "rectangle"
         case .shapeEllipse: return "circle"
         case .shapeLine: return "line.diagonal"
@@ -101,6 +117,13 @@ enum EditorTool: Int, CaseIterable {
         case .crop: return "C"
         case .clone: return "J"
         case .dodge: return "D"
+        // H (Hand) and S (Rectangle Select) are taken, so the two healing
+        // brushes take the next distinctive letter of their own names —
+        // bAndage and spot healiNg — the way Subject took U.
+        case .heal: return "A"
+        case .spotHeal: return "N"
+        case .patch: return "P"
+        case .redEye: return "Y"
         case .shapeRect: return "R"
         case .shapeEllipse: return "E"
         case .shapeLine: return "/"
@@ -129,6 +152,10 @@ enum EditorTool: Int, CaseIterable {
         case .crop: return #selector(EditorViewController.selectCropTool(_:))
         case .clone: return #selector(EditorViewController.selectCloneTool(_:))
         case .dodge: return #selector(EditorViewController.selectDodgeTool(_:))
+        case .heal: return #selector(EditorViewController.selectHealTool(_:))
+        case .spotHeal: return #selector(EditorViewController.selectSpotHealTool(_:))
+        case .patch: return #selector(EditorViewController.selectPatchTool(_:))
+        case .redEye: return #selector(EditorViewController.selectRedEyeTool(_:))
         case .shapeRect: return #selector(EditorViewController.selectShapeRectTool(_:))
         case .shapeEllipse: return #selector(EditorViewController.selectShapeEllipseTool(_:))
         case .shapeLine: return #selector(EditorViewController.selectShapeLineTool(_:))
@@ -143,7 +170,8 @@ enum EditorTool: Int, CaseIterable {
     var cursor: NSCursor {
         switch self {
         case .select, .ellipseSelect, .lasso, .wand, .subject, .fill, .gradient, .brush,
-            .eraser, .eyedropper, .crop, .clone, .dodge, .shapeRect, .shapeEllipse, .shapeLine:
+            .eraser, .eyedropper, .crop, .clone, .dodge, .heal, .spotHeal, .patch, .redEye,
+            .shapeRect, .shapeEllipse, .shapeLine:
             return .crosshair
         case .move, .hand:
             return .openHand
@@ -186,6 +214,9 @@ enum EditorTool: Int, CaseIterable {
         case .crop: return "c"
         case .clone: return "j"
         case .dodge: return "d"
+        // Photoshop's healing slot shares one key; repeated presses cycle
+        // the four, exactly as R cycles the shape tools.
+        case .heal, .spotHeal, .patch, .redEye: return "p"
         case .shapeRect, .shapeEllipse, .shapeLine: return "r"
         case .zoom: return "z"
         case .hand: return "h"
@@ -202,6 +233,45 @@ enum EditorTool: Int, CaseIterable {
             return nil
         }
         self = tool
+    }
+
+    /// The smallest brush this tool can do anything with, in px — the floor
+    /// its Size field, its `[` key and its agent mirror all clamp to.
+    ///
+    /// One for every paint tool but the two healing brushes, and three for
+    /// those, because `doc_heal`'s rule makes anything smaller inert: the
+    /// solve keeps the destination at every covered pixel that touches an
+    /// uncovered one, so the healed footprint is always the brush eroded by a
+    /// pixel and a footprint one or two pixels across is entirely boundary.
+    /// Confirmed against the built app: `heal_stroke` at size 1 and 2 changes
+    /// nothing while 3 and 4 heal. Left un-floored, a retoucher stepping the
+    /// brush down with `[` to chase a thin scratch watched the clone land for
+    /// the whole drag and then vanish with a beep.
+    var minimumBrushSize: Double {
+        switch self {
+        case .heal, .spotHeal:
+            return 3
+        case .brush, .eraser, .clone, .dodge, .select, .ellipseSelect, .lasso, .wand,
+            .subject, .move, .fill, .gradient, .text, .eyedropper, .crop, .patch, .redEye,
+            .shapeRect, .shapeEllipse, .shapeLine, .zoom, .hand:
+            return 1
+        }
+    }
+
+    /// True for the tools whose stroke is a BRUSH TIP: the ones the bare
+    /// `[` / `]` keys resize, whose options bar carries the tip cluster, and
+    /// whose paint is clipped to the active layer's extent. Lives here rather
+    /// than as a `||` chain repeated in the canvas — a per-tool fact belongs
+    /// on the enum. Exhaustive on purpose: a new tool must answer it.
+    var usesBrushTip: Bool {
+        switch self {
+        case .brush, .eraser, .clone, .dodge, .heal, .spotHeal:
+            return true
+        case .select, .ellipseSelect, .lasso, .wand, .subject, .move, .fill, .gradient,
+            .text, .eyedropper, .crop, .patch, .redEye, .shapeRect, .shapeEllipse,
+            .shapeLine, .zoom, .hand:
+            return false
+        }
     }
 
     /// True while a tool's behavior hasn't landed: it stays visible in the
@@ -222,6 +292,8 @@ enum EditorTool: Int, CaseIterable {
         [.crop],
         [.move],
         [.brush, .eraser, .clone, .dodge],
+        // Photoshop's own healing slot, immediately below the paint group.
+        [.spotHeal, .heal, .patch, .redEye],
         [.fill],
         [.gradient],
         [.shapeRect, .shapeEllipse, .shapeLine],

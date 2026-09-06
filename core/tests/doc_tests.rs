@@ -17,6 +17,7 @@ use rasterize_core::ffi_adjust::*;
 use rasterize_core::ffi_channel::*;
 use rasterize_core::ffi_color::*;
 use rasterize_core::ffi_doc::*;
+use rasterize_core::ffi_heal::*;
 use rasterize_core::ffi_style::*;
 use rasterize_core::RzImage;
 use tempfile::TempDir;
@@ -1829,6 +1830,72 @@ fn null_safety_sweep() {
                 .is_null()
         );
 
+        // Retouching: healing, inpainting and red-eye (ffi_heal). A NULL
+        // document is a refusal, not an error, so the three exports with an
+        // err_out leave it NULL; each also takes a NULL buffer.
+        let mut err: *mut c_char = ptr::null_mut();
+        assert!(rz_doc_heal_layer(null_doc, 0, overlay.as_ptr(), 2, 2, 1.0, &mut err).is_null());
+        assert!(err.is_null());
+        assert!(
+            rz_doc_heal_layer(null_doc, 0, overlay.as_ptr(), 2, 2, 1.0, ptr::null_mut()).is_null()
+        );
+        assert!(rz_doc_heal_layer(null_doc, 0, ptr::null(), 2, 2, 1.0, ptr::null_mut()).is_null());
+        assert!(rz_doc_spot_heal_layer(
+            null_doc,
+            0,
+            overlay.as_ptr(),
+            2,
+            2,
+            1.0,
+            0,
+            7,
+            false,
+            false,
+            ptr::null_mut()
+        )
+        .is_null());
+        assert!(rz_doc_spot_heal_layer(
+            null_doc,
+            0,
+            ptr::null(),
+            2,
+            2,
+            1.0,
+            0,
+            7,
+            false,
+            false,
+            ptr::null_mut()
+        )
+        .is_null());
+        assert!(rz_doc_content_aware_fill(
+            null_doc,
+            0,
+            plane.as_ptr(),
+            2,
+            2,
+            0,
+            7,
+            false,
+            false,
+            ptr::null_mut()
+        )
+        .is_null());
+        assert!(rz_doc_content_aware_fill(
+            null_doc,
+            0,
+            ptr::null(),
+            2,
+            2,
+            0,
+            7,
+            false,
+            false,
+            ptr::null_mut()
+        )
+        .is_null());
+        assert!(rz_doc_red_eye_layer(null_doc, 0, 0, 0, 2, 2, 1.0, 0.5).is_null());
+
         // Geometry.
         assert!(rz_doc_rotate90(null_doc).is_null());
         assert!(rz_doc_rotate180(null_doc).is_null());
@@ -2148,6 +2215,34 @@ fn null_safety_sweep() {
         assert!(rz_doc_with_layer_plane(doc, 0, PLANE_RED, ptr::null(), 2, 2).is_null());
         assert!(rz_doc_painting_channel(doc, 0, ptr::null(), 2, 2).is_null());
         assert!(rz_doc_painting_layer_plane(doc, 0, PLANE_RED, ptr::null(), 2, 2).is_null());
+        assert!(rz_doc_heal_layer(doc, 0, ptr::null(), 2, 2, 1.0, ptr::null_mut()).is_null());
+        assert!(rz_doc_spot_heal_layer(
+            doc,
+            0,
+            ptr::null(),
+            2,
+            2,
+            1.0,
+            0,
+            7,
+            false,
+            false,
+            ptr::null_mut()
+        )
+        .is_null());
+        assert!(rz_doc_content_aware_fill(
+            doc,
+            0,
+            ptr::null(),
+            2,
+            2,
+            0,
+            7,
+            false,
+            false,
+            ptr::null_mut()
+        )
+        .is_null());
         let mut err: *mut c_char = ptr::null_mut();
         assert!(!rz_doc_save_native(doc, ptr::null(), &mut err));
         assert!(!take_err_string(err).is_empty());

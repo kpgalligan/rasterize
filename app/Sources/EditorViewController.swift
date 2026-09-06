@@ -69,14 +69,18 @@ final class EditorViewController: NSViewController {
     // Every stroke tick repaints the whole overlay onto this base, so the
     // live projection always shows the committed result. Mask strokes leave
     // it nil — they never live-edit, they commit once on mouse-up.
-    private var strokeBase: RasterDocument?
+    // private(set), not private: EditorViewController+Heal.commitHealOverlay
+    // solves against this pre-stroke handle at mouse-up.
+    private(set) var strokeBase: RasterDocument?
     // …and which coverage target it commits to. Internal, like the panels
     // above: EditorViewController+Channels.commitCoverageOverlay switches
     // on it at mouse-up.
     var strokeTarget: PaintTarget = .layer
     // The tool the stroke began with, so ticks route to the right op
     // (dodge/burn is a retouch op, everything else paints the overlay).
-    private var strokeTool: EditorTool = .brush
+    // private(set) for the same reason: +Heal dispatches .heal vs .spotHeal
+    // on the tool the stroke began with.
+    private(set) var strokeTool: EditorTool = .brush
     // The Blend option, latched at stroke begin (brush and clone only):
     // non-Normal ticks composite through the core's blend-mode paint op.
     private var strokeBlendMode = RZ_BLEND_NORMAL
@@ -213,7 +217,8 @@ final class EditorViewController: NSViewController {
             // is nothing left to paint — refuse (the canvas beeps). Clone
             // and dodge rewrite pixels, which an adjustment layer hasn't
             // got, so they refuse outright.
-            if self.strokeTool == .clone || self.strokeTool == .dodge, isAdjustment {
+            if self.strokeTool == .clone || self.strokeTool == .dodge
+                || self.strokeTool == .heal || self.strokeTool == .spotHeal, isAdjustment {
                 return false
             }
             if isAdjustment, !doc.layerHasMask(idx), !onChannel { return false }
@@ -269,6 +274,11 @@ final class EditorViewController: NSViewController {
             }
         }
         canvas.onCommitMaskOverlay = { [weak self] data, _ in self?.commitCoverageOverlay(data) }
+        canvas.onCommitStrokeOverlay = { [weak self] d, n in self?.commitHealOverlay(d, n) }
+        canvas.onStrokeSourceImage = { [weak self] in self?.strokeSourceImage() }
+        canvas.onPatchSourceImage = { [weak self] in self?.patchSourceImage() }
+        canvas.onPatchCommit = { [weak self] result in self?.patchCommitted(result) }
+        canvas.onRedEyeCommit = { [weak self] rect in self?.redEyeRectDragged(rect) }
         canvas.onStrokeEnd = { [weak self] actionName in
             guard let self = self, let document = self.document else { return }
             let wasMask = self.strokeTarget != .layer
@@ -744,6 +754,7 @@ final class EditorViewController: NSViewController {
             canvas.brushSmoothing = CGFloat(min(max(paint.smoothing, 0), 100) / 100)
             canvas.brushPressureSize = paint.pressureSize
             canvas.brushAirbrush = paint.airbrush
+            canvas.strokeAligned = currentTool == .heal && paint.aligned // heal-only option
         }
         let modes: [SelectionCombineMode] = [.replace, .add, .subtract, .intersect]
         canvas.selectionCombineBase = modes[min(max(store.select.modeIndex, 0), 3)]
@@ -758,7 +769,10 @@ final class EditorViewController: NSViewController {
         guard var paint = ToolOptionsStore.shared.paintOptions(for: currentTool) else { return }
         paint.size = Double(newSize)
         ToolOptionsStore.shared.setPaintOptions(paint, for: currentTool)
-        canvas.brushSize = newSize
+        // Re-read rather than trusting `newSize`: the store floors each tool's
+        // size at what that tool can actually do something with, and stepping
+        // a healing brush below three must show the size that was stored.
+        syncCanvasPaintState()
         optionsBar.refreshValues()
     }
 
@@ -862,6 +876,10 @@ final class EditorViewController: NSViewController {
     @objc func selectCropTool(_ sender: Any?) { selectTool(.crop) }
     @objc func selectCloneTool(_ sender: Any?) { selectTool(.clone) }
     @objc func selectDodgeTool(_ sender: Any?) { selectTool(.dodge) }
+    @objc func selectHealTool(_ sender: Any?) { selectTool(.heal) }
+    @objc func selectSpotHealTool(_ sender: Any?) { selectTool(.spotHeal) }
+    @objc func selectPatchTool(_ sender: Any?) { selectTool(.patch) }
+    @objc func selectRedEyeTool(_ sender: Any?) { selectTool(.redEye) }
     @objc func selectShapeRectTool(_ sender: Any?) { selectTool(.shapeRect) }
     @objc func selectShapeEllipseTool(_ sender: Any?) { selectTool(.shapeEllipse) }
     @objc func selectShapeLineTool(_ sender: Any?) { selectTool(.shapeLine) }
@@ -2566,6 +2584,10 @@ extension EditorViewController: NSUserInterfaceValidations {
         #selector(selectCropTool(_:)): .crop,
         #selector(selectCloneTool(_:)): .clone,
         #selector(selectDodgeTool(_:)): .dodge,
+        #selector(selectHealTool(_:)): .heal,
+        #selector(selectSpotHealTool(_:)): .spotHeal,
+        #selector(selectPatchTool(_:)): .patch,
+        #selector(selectRedEyeTool(_:)): .redEye,
         #selector(selectShapeRectTool(_:)): .shapeRect,
         #selector(selectShapeEllipseTool(_:)): .shapeEllipse,
         #selector(selectShapeLineTool(_:)): .shapeLine,
@@ -2698,6 +2720,15 @@ extension EditorViewController: NSUserInterfaceValidations {
             // targeted they rewrite that channel instead of any layer, so
             // the active layer's kind is irrelevant (§0.4).
             return paintTarget.isChannel || !activeLayerIsAdjustment
+        case #selector(contentAwareFill(_:)):
+            // Fills the SELECTION on the active layer's own pixels, so it
+            // needs one — and, like Clear, must not stand on an adjustment
+            // layer, a colour plane or a channel.
+            return !canvas.quickMaskActive && canvas.selection != nil
+                && !activeLayerIsAdjustment && !paintTarget.targetsPlaneOrChannel
+        case #selector(removeRedEye(_:)):
+            // Vision's automatic pass rewrites the active layer's pixels.
+            return !activeLayerIsAdjustment && !paintTarget.targetsPlaneOrChannel
         case #selector(selectLivePhotoFrame(_:)):
             // Only a layer that still says which Live Photo it came from can
             // show a different frame of it; a missing clip is reported when

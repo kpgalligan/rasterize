@@ -1,6 +1,6 @@
 # From Compositor to Photo Editor: a Gap Review
 
-**Status: in progress (updated 5 September 2026) — phases 1 to 5 of the order in section 4 have shipped; section 0 records what landed, what was decided along the way, and where to restart.** A
+**Status: in progress (updated 5 September 2026) — phases 1 to 6 of the order in section 4 have shipped; section 0 records what landed, what was decided along the way, and where to restart.** A
 fresh-eyes review of the shipped feature set against what a working
 photographer actually reaches for in Photoshop, followed by a large, sized
 catalog of what to build. Companion to `next-features.md` (whose open
@@ -475,11 +475,240 @@ Adjustment-layer ops: 9 → **21**. Decisions worth knowing:
   resizing as rows collapse; Photo Filter's popup snapping to Custom;
   and footnote widths against the Cancel/Apply row at 420 pt.
 
+### Phase 6 — healing brush and Content-Aware Fill (§3C rows 1–4 + red-eye): shipped
+
+The first four rows of §3C plus red-eye: the **Healing Brush**, the **Spot
+Healing Brush**, the **Patch tool**, **Content-Aware Fill** and **Red Eye**
+(the drag rectangle and a Vision automatic pass). The Smudge / Blur /
+Sharpen / Sponge brushes, the frequency-separation helper and Liquify are the
+NEXT retouching phase — no code, no stubs, no enum cases. MCP: 75 → **81**
+tools. Decisions worth knowing:
+
+- **Two algorithms, each written once.** `poisson.rs` is the ONE membrane
+  solver (the correction form `Δũ = 0`, `ũ|∂Ω = dest − source`, so the
+  right-hand side is zero and the seam is exact by construction) and
+  `patchmatch.rs`/`patchmatch_nnf.rs` the ONE PatchMatch search, masked
+  pyramid and Wexler vote. Every tool is a composition of those two with a
+  different source: the Healing Brush and the Patch tool hand the solver
+  sampled pixels, Spot Healing and Content-Aware Fill hand it an inpaint.
+  `doc_heal::heal_window_into_pixels` is the single write-back all four go
+  through, and `doc_heal::components` the single walk all four split their
+  coverage with.
+- **The solver's schedule is fixed and its accuracy does not decay with the
+  region's size.** The plan's cascade (40/48/32 sweeps, 96 updates per
+  unknown) was measured to leave 3.0 code values of error at the seam at
+  n = 1000 — banding is visible at 1 — so what shipped is red-black
+  multigrid: a short cascade for the initial guess, then four V(2,2) cycles.
+  It is three times CHEAPER (32 updates per unknown) and a thousand times
+  more accurate: 0.0018 code values at the seam at n = 300, 0.0024 at
+  n = 1000. Two details had to be measured to get there, and both are in
+  `poisson.rs`'s module doc: coarsening the CLASSIFICATION rather than the
+  coverage (the obvious rule swallows the one-pixel Dirichlet ring and makes
+  the cycle diverge), and a coarse right-hand side scaled by 4 (the stencil
+  is the unscaled 5-point Laplacian). There is no convergence test at all —
+  a fixed sweep count is the whole stopping rule, so cost is bounded and the
+  result deterministic.
+- **One overlay currency.** Every healing caller — UI and agent alike —
+  builds the same canvas-sized premultiplied RGBA overlay
+  `rz_doc_painting_layer` already takes: alpha is the footprint's coverage,
+  RGB the already-aligned source. The Healing Brush therefore IS the Clone
+  Stamp with a different op at commit, and no offset crosses the FFI. Spot
+  Healing is the exception on purpose: its overlay carries coverage only,
+  because the core generates the source.
+- **The write-back is a hard cut at the α = 128 contour, not the overlay's
+  alpha.** Weighting by a soft alpha outside the solved set would blend in
+  the *uncorrected* clone — the illumination mismatch the op exists to
+  remove — as a fringe around every stroke. The join needs no feather
+  because the solution equals the destination on ∂Ω exactly. The visible
+  consequence: Hardness SHRINKS the healed footprint rather than fading the
+  heal, and Flow is forced to 1 for both healing brushes (a flowed-down dab
+  would leave nothing above the threshold to solve), with Opacity carrying
+  the strength — the dodge/burn precedent.
+- **A SELECTION's soft edge is not a brush dab's, and Content-Aware Fill
+  takes its region out to the far edge of the ramp.** The hole was
+  `coverage >= 128` for both callers with the write weight taken from the
+  byte inside it, so a feathered selection got nothing at coverage 127 and
+  half the fill's own effect at 128 — a hard edge exactly on the 50 %
+  contour of an edge the user asked to be soft, measured at 9 code values.
+  `Caller::hole_threshold` is the one-line distinction: a fill inpaints every
+  pixel the selection touches, so the weight rises continuously from 0; a
+  brush dab keeps the hard cut above.
+- **Caps bound the work of ONE CALL, not the bounding box and not one
+  component.** `MAX_INPAINT_HOLE_PIXELS` (1 M) counts the covered pixels of
+  the whole selection, `MAX_INPAINT_TARGET_PIXELS` (4 M) bounds the hole
+  dilated by its ring, `MAX_INPAINT_PLAN_PIXELS` (80 M) bounds the SUM of
+  every part's working window, and `MAX_SOLVE_WINDOW_PIXELS` (32 M) is a
+  memory bound on one component's window — that last one per component on
+  purpose, because those buffers are freed before the next one starts. A bbox
+  cap PER COMPONENT would have refused the tool's most common use — a
+  scratch, a wire, a hair — whose box is the whole photo and whose area is a
+  few thousand pixels; that case now fills in 0.47 s and has its own test.
+  Their SUM still has to be bounded, because the dilated cap cannot see it:
+  twenty such scratches on one canvas are 2.7 M dilated and 99 megapixels of
+  window, and measured 14.1 s.
+- **The measured cost, and the number that turned out to be an artifact.** A
+  300 × 300 hole in a 2000 × 1500 photograph is 0.53 s in the core and 0.75 s
+  through the app; at the megapixel cap the fill is **~5 s, at every ring** —
+  5.4 s at a requested 48 (rule 1 widens it to 282), 5.2 s at 512 — and,
+  since the pyramid defect below was fixed, the same wherever in the frame
+  the selection sits. The worst PERMITTED call found is about twelve seconds,
+  which is what the caps are sized to, and inside the 15 s budget §0.3 set.
+  An earlier pass recorded 32–41 s at the automatic ring and concluded "the
+  ring, not the hole, drives the cost", which put a false five-fold ring
+  effect into the module doc, the catalog entry, the sheet footnote and the
+  README, together with the advice to pass a ring explicitly for a large
+  fill. Both halves were wrong: the slow numbers were measured in an
+  App-Napped app (next bullet), and rule 1 widens a small explicit ring from
+  below anyway, so on a megapixel hole a requested 21, 48, 100 and 282 are
+  all the same 282.
+  **Cost follows the region DILATED by its sampling ring, plus the bounding
+  boxes the separate parts are worked in — never the selected count**; a
+  linear fit over the measured shapes is 0.1 s per megapixel of window plus
+  1.2 s per megapixel of dilated region, and a 3 px scratch selecting 6 k
+  pixels costs more than a compact 90 k selection. To make a fill cheaper,
+  shorten the region or select fewer separate parts — thinning it buys
+  nothing. A pass that recorded "cost is the SELECTION's area" here had
+  generalized one 2000 × 1500 scratch measurement, which the 5000 × 5000 rows
+  in `doc_inpaint`'s own table falsify by a factor of ten; sizing a cap from
+  that model would bound the one quantity that does not drive the time.
+  Rule 1 is unchanged: it is a quality rule, and it costs nothing — and,
+  since the ring the caller passes now sizes nothing (the ring the NARROWING
+  settles on does), that is true of a scattered selection too, where a
+  requested 512 used to cost 26× a requested 21.
+- **A refusal is decided from the components' BOUNDING BOXES, before a
+  window exists.** `inpaint_plan` climbs its ladder twice. The first pass is
+  arithmetic over the boxes — every component dilates to at least a
+  quarter-disc of its ring, and to at least `bw·(ring+1)` and `bh·(ring+1)`,
+  since a 4-connected run occupies every column and row of its own box — and
+  it answers both "could this fit at all" and "which ring is worth measuring
+  exactly". Only then does the exact pass run a distance transform per
+  component, and its windows are sized from the ring the NARROWING settled
+  on rather than the one the caller asked for. The pass exists because
+  neither was true before: 90 000 one-pixel specks cost 2.4 s to refuse and a
+  million cost 28.7 s (7 ms and 15 ms now), and `ring: 512` on a scattered
+  selection multiplied every window by 26 — 78.9 s against 3.0 s — on a
+  parameter the schema calls free.
+- **A preview is bounded by the PART COUNT as well as by the reduction.** A
+  component's window is at least `2·RING_MIN` on a side, so a small part
+  cannot be reduced at all, and it still costs ~3.4 ms — its planes, its
+  transform, its pyramid, its integral image and a membrane solve. A dust
+  selection is nothing but small parts, so the "reduced" preview cost what
+  the fill cost (2.3 s for 900 specks, and 9.8 s for the largest speck
+  selection the caps admit) with the sheet's Cancel blocking on it. It now
+  fills the biggest 200 parts and leaves the rest showing the original:
+  0.28-0.80 s on every shape measured.
+- **App Nap demotes the app after its first multi-second op, and does not
+  undo it** — the phase's most useful measurement, and the thing that made
+  the fill look 5x slower than it is. On a freshly launched app a 300 × 300
+  fill measures 0.75 s four times running; run one megapixel fill (7 s of
+  solid main-thread compute) and the same 300 × 300 fill measures 3.4–3.9 s
+  for the rest of the session, whatever is frontmost and however long the app
+  then idles. The process burns CPU throughout (CPU time tracks wall time),
+  the identical core call in a command-line process is unaffected before and
+  after, and `-NSAppSleepDisabled YES` removes the effect entirely. The fix
+  is one assertion, `AppActivity.userInitiated`, held around every tool call
+  by both agent trampolines (`AgentServer.swift`, `Assistant.swift`) — a tool
+  call is user-initiated work by definition. It applies to every heavy op the
+  agent drives, not only this one; the UI's own edits do not need it, since a
+  foreground app is not napped.
+- **Red-eye scores red DOMINANCE, not `R > G`.** `doc_redeye.rs`'s module doc
+  carries the fifteen-colour table that is the proof — every skin tone passes
+  `R > G` — and the shipped gate is the ratio `R/((G+B)/2)` times HSV
+  saturation times hue proximity. A specular catchlight scores zero and comes
+  out bit-identical, which is the quality difference and has a test.
+  `pupil_size` defaults to **100 %** of the rectangle's SHORTER side, not 50:
+  its job is to spare a red shirt caught by a sloppy rectangle, not to
+  require a small pupil — at 50 the tool refused its own documented gesture.
+  That default alone was a no-op, though, and the end-to-end pass caught it:
+  a component is clipped to the rectangle, so on a square one its larger side
+  can never exceed the rectangle's shorter side, and a 70 × 70 rectangle
+  dragged over a red cloud desaturated all 4900 of its pixels into a
+  hard-edged square. A second rule now runs beside the size gate — **a
+  component that reaches all four sides of the rectangle is rejected** — which
+  refuses exactly that case (the rectangle is inside the red, with no pupil in
+  it to find) and cannot reject a plausible drag, since a pupil that touches
+  all four sides means the rectangle is inside the pupil. It is deliberately
+  the weakest form of the test: a red region filling most but not all of the
+  rectangle still passes at 100 %, and turning Pupil Size down is how the user
+  says so. Two tests hold both ends of it.
+- **Vision's face landmarks are the second platform-model seam**
+  (`RedEye.swift`, beside `SubjectSelection.swift`), and they are NOT flat in
+  image size the way segmentation is: 3–5 ms warm at 1 MP, 29–30 ms at
+  48 MP, plus ~3 ms per face for the landmark stage, so the whole automatic
+  pass stays on the main thread with no new queue. No repo sample holds a
+  face Vision will find, so the detector is verified by probes only and
+  `red_eye_auto` takes an explicit `eyes` array to drive the rest end to end
+  — the phase-3 auxiliary-mattes precedent. With no face it says so and
+  changes nothing.
+- **Deliberately left out, and said so everywhere**: the Healing Brush's
+  Replace mode (in this build it would be exactly the Clone Stamp), and Spot
+  Healing's Proximity Match and Create Texture (Content-Aware is the only
+  type). The Patch tool's default direction is Source, Photoshop's.
+- **Verified end to end over MCP** on the built app: 81 tools; a blemish
+  healed out of an exactly linear gradient comes back **byte-identical to the
+  pristine gradient**, and one undo restores the blemish; the same seed twice
+  gives byte-identical fills and spot heals, a different seed differs; every
+  pixel outside a selection is untouched by Content-Aware Fill; the cap
+  refusals name their limits; a patch whose source falls off-canvas refuses
+  with a sentence; (220,40,45) corrects to (26,24,27) with the catchlight
+  bit-identical, and `pupil_size` 50 refuses the same disc. Each of the six
+  tools is exactly one undo step. That pass is also what found the two
+  defects the bullets above record; both are fixed and re-verified on the
+  built app — three megapixel fills in ONE session at 7.2 / 7.3 / 7.3 s with
+  no drift, and the 70 × 70 rectangle over a red cloud in `plasma.jpg`
+  refused with the sentence that names the rule, while a tight rectangle over
+  the synthetic eye still corrects.
+- **Seven defects the second review pass found, all fixed and re-verified.**
+  Four were the same root cause in different clothes and one was a crash:
+  (1) `patchmatch::should_coarsen` took the NARROWEST of the window's four
+  margins, and the window is clamped to the canvas — so any selection
+  touching a border built no pyramid and ran the coarsest level's schedule at
+  full resolution: 1.66 s against 0.71 s and 2.9x the error for a 300 × 300
+  hole, 19.4 s against 8.5 s at the megapixel cap. It is the widest margin
+  now, and a ratio test holds it. (2) Both work caps were tested per
+  connected COMPONENT, so four disjoint 620 × 620 squares — half again the
+  documented megapixel — were accepted and cost the sum, with nothing
+  bounding the component count; they bound the call now. (3) Spot healing
+  passed the brush dab's raw alpha as the write weight, so a soft tip faded
+  the heal instead of shrinking the footprint and left a visible ghost of the
+  blemish — the exact opposite of the hard-cut bullet above, which is now
+  true of every caller but Content-Aware Fill. (4) `RasterDocument.redEyeLayer`
+  converted an unbounded `Double` with `Int(_:)`, which TRAPS rather than
+  saturating: `red_eye {"x": 1e300, …}` killed the process and every open
+  document's unsaved work. It clamps in Double space now, and both red-eye
+  handlers wall their arguments at ±100,000 px like `parsePoints` and
+  `patch_region`. (5) The inpaint driver cloned the whole layer buffer per
+  component — 20 s of pure `memcpy` for a thousand-speck dust selection on a
+  100 MP canvas — and now threads one clone, `heal_layer`'s rule. (6) The
+  precomputed finest-level distance transform was consumed on the coarsest
+  iteration and discarded, so every multi-level fill paid two full-resolution
+  exact EDTs. (7) The C header and both MCP schemas said the ring clamps to
+  `[7, 512]`; the floor is `3·PATCH` = 21, and every value from 1 to 20
+  silently produced the same result. Three Swift ones came with them: the
+  Content-Aware Fill sheet previewed the layer it captured but filled
+  whatever was active at Apply (an MCP `set_active_layer` behind a sheet is
+  enough); the Patch tool's close-the-outline threshold was 8 CANVAS px where
+  the Lasso's identical gesture uses 8 SCREEN px, so the same click behaved
+  differently at every zoom; and the canvas cancelled the patch session on
+  ANY image swap, so the patch's own commit destroyed the region it had just
+  placed and "a second patch from the same outline is one more drag" never
+  held.
+- Not exercised on screen (worth one manual pass): the four tools' drags
+  themselves — the Healing Brush's raw-clone preview being replaced at
+  mouse-up, Spot Healing's blue footprint ghost, the Patch outline and its
+  drag feedback (click-a-polygon, double-click or Return to close), the Red
+  Eye marquee — the Content-Aware Fill sheet with its live preview and
+  Cancel/Apply, the options-bar rows (Aligned, Sample All Layers, Pupil Size,
+  Darken, Direction), the rail's new fifth slot and `p` cycling its four
+  tools, and Filters > Remove Red Eye on a real photograph of a face.
+
 ### Remaining order
 
-Section 4's steps 6–8 in order — healing brush and Content-Aware Fill is
-next, then groups, lock, multi-select, guides and snapping; RAW develop
-and Actions — then the breadth of section 3. Kevin asked on 3 September
+Section 4's steps 7–8 in order — groups, lock, multi-select, guides and
+snapping is next, then RAW develop and Actions — then the breadth of
+section 3. The rest of §3C (the Smudge / Blur / Sharpen / Sponge brushes,
+frequency separation and Liquify) is a phase of its own whenever it is
+reached. Kevin asked on 3 September
 for this to run through the whole list without stopping between phases:
 finish, commit, start the next.
 
@@ -873,8 +1102,8 @@ a **command palette** (⌘K-style fuzzy search over the whole menu).
 5. ✅ **The adjustment batch** (§3B) plus the histogram and info panels —
    two weeks of S items that make the Adjustments menu look like a photo
    editor's.
-6. ▶ **Healing brush and Content-Aware Fill** (§3C) — the retouching gap.
-7. **Groups, lock, multi-select** (§3F) and **guides / rulers / snapping**
+6. ✅ **Healing brush and Content-Aware Fill** (§3C) — the retouching gap.
+7. ▶ **Groups, lock, multi-select** (§3F) and **guides / rulers / snapping**
    (§3H) — the workflow layer that 20-layer documents demand.
 8. **RAW develop** (§3A) and **Actions** (§3J) — the two features that
    would make this app a reason to leave Photoshop rather than a

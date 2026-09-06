@@ -720,3 +720,107 @@ pub fn feathered_plane(plane: &[u8], w: u32, h: u32, radius: f32) -> Vec<u8> {
     }
     out
 }
+
+// ------------------------------------------- the content-aware fixtures --
+//
+// Shared by `content_aware_tests` (what the fill puts on screen) and
+// `content_aware_cost_tests` (what it costs and when it refuses), which are
+// two files for the same reason every area is: one of them is about pixels
+// and the other about caps, and neither should carry the other's fixtures.
+
+/// Runs `rz_doc_content_aware_fill` through its FFI entry point on a copy of
+/// `doc`: the new document (NULL = a refusal) and the error message, if any.
+pub fn fill(
+    doc: &RzDocument,
+    idx: usize,
+    mask: &[u8],
+    (w, h): (u32, u32),
+    (ring, seed): (u32, u64),
+    (sample_all, preview): (bool, bool),
+) -> (Option<RzDocument>, Option<String>) {
+    let handle = Box::into_raw(Box::new(doc.clone()));
+    let mut err: *mut c_char = ptr::null_mut();
+    let out = unsafe {
+        rasterize_core::ffi_heal::rz_doc_content_aware_fill(
+            handle,
+            idx,
+            mask.as_ptr(),
+            w,
+            h,
+            ring,
+            seed,
+            sample_all,
+            preview,
+            &mut err,
+        )
+    };
+    unsafe { rz_doc_free(handle) };
+    take_doc(out, err)
+}
+
+/// Unpacks an FFI document/error pair into owned Rust values.
+pub fn take_doc(out: *mut RzDocument, err: *mut c_char) -> (Option<RzDocument>, Option<String>) {
+    let message = if err.is_null() {
+        None
+    } else {
+        Some(take_err_string(err))
+    };
+    let document = if out.is_null() {
+        None
+    } else {
+        Some(*unsafe { Box::from_raw(out) })
+    };
+    (document, message)
+}
+
+/// The layer's own pixel bytes, read back through the FFI.
+pub fn layer_bytes(doc: &RzDocument, idx: usize) -> Vec<u8> {
+    let handle = Box::into_raw(Box::new(doc.clone()));
+    let out = layer_pixels(handle, idx);
+    unsafe { rz_doc_free(handle) };
+    out
+}
+
+/// A single-layer opaque document whose pixels come from `f`.
+pub fn doc_of(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> RzDocument {
+    RzDocument::from_pixels(RgbaImage::from_fn(w, h, |x, y| {
+        let c = f(x, y);
+        Rgba([c[0], c[1], c[2], 255])
+    }))
+}
+
+/// A canvas-sized coverage mask from a predicate: 255 inside, 0 outside.
+pub fn mask_of(w: u32, h: u32, f: impl Fn(u32, u32) -> bool) -> Vec<u8> {
+    (0..w * h)
+        .map(|i| if f(i % w, i / w) { 255u8 } else { 0 })
+        .collect()
+}
+
+/// A deterministic, structured, NON-periodic field: smooth ridges plus a
+/// fixed hash of the pixel, so neither a constant nor a tiling can pass a
+/// test written against it.
+pub fn plasma(x: u32, y: u32) -> [u8; 3] {
+    let fx = x as f32 * 0.11;
+    let fy = y as f32 * 0.13;
+    let base = 128.0 + 60.0 * (fx.sin() + (fy * 0.7).cos());
+    let hash = ((x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503)) >> 8) & 15;
+    let v = (base + hash as f32 - 8.0).clamp(0.0, 255.0) as u8;
+    [v, v.saturating_sub(7), v / 2 + 40]
+}
+
+/// Overwrites the masked pixels with a flat colour: the "damage" a fill is
+/// asked to repair.
+pub fn punch(doc: &RzDocument, mask: &[u8], colour: [u8; 3]) -> RzDocument {
+    let (w, h) = (doc.width, doc.height);
+    let mut pixels = doc.layer_canvas_image(0).expect("layer 0");
+    for y in 0..h {
+        for x in 0..w {
+            if mask[(y * w + x) as usize] < 128 {
+                continue;
+            }
+            let px = pixels.get_pixel_mut(x, y);
+            px.0[..3].copy_from_slice(&colour);
+        }
+    }
+    doc.with_layer_pixels(0, pixels).expect("layer 0")
+}

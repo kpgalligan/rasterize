@@ -44,7 +44,8 @@ extension EditorViewController {
 
     /// Drops a target the CURRENT TOOL cannot reach back to the layer.
     ///
-    /// Only brush and eraser paint COVERAGE. Text, clone and dodge rewrite
+    /// Only brush and eraser paint COVERAGE. Text, clone, dodge and the four
+    /// retouching tools (the two healing brushes, Patch, Red Eye) rewrite
     /// whole pixels, so a mask or a colour-plane target means nothing to
     /// them; fill and gradient DO reach a colour plane and a channel
     /// (EditorViewController+PlanePaint), so they drop only a mask target. A
@@ -52,9 +53,9 @@ extension EditorViewController {
     /// property of the layer these tools rewrite, so its row stays selected —
     /// with its Duplicate / Delete / Options / Invert commands live —
     /// whatever tool is picked, and the edit is REFUSED rather than
-    /// redirected: `onStrokeBegin` for a clone or dodge stroke,
-    /// `refuseChannelTargetEdit` for a text session, which never goes through
-    /// a stroke at all.
+    /// redirected: `onStrokeBegin` for a clone, dodge or healing stroke,
+    /// `refuseChannelTargetEdit` for a text session and for the Patch and Red
+    /// Eye commits, none of which go through a stroke at all.
     ///
     /// The rule applies on BOTH edges, the TOOL changing (`selectTool`) and
     /// the TARGET changing (`setPaintTarget`, the one writer of
@@ -68,7 +69,9 @@ extension EditorViewController {
     func toolReachableTarget(_ target: PaintTarget) -> PaintTarget {
         guard !target.isChannel else { return target }
         if target.isCoverage,
-           currentTool == .text || currentTool == .clone || currentTool == .dodge {
+           currentTool == .text || currentTool == .clone || currentTool == .dodge
+               || currentTool == .heal || currentTool == .spotHeal
+               || currentTool == .patch || currentTool == .redEye {
             return .layer
         }
         if target == .mask, currentTool == .fill || currentTool == .gradient {

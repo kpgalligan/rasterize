@@ -171,6 +171,13 @@ final class AgentServer {
         // Retouch strokes (AgentServer+Retouch.swift)
         "clone_stamp": { $0.cloneStamp },
         "dodge_burn": { $0.dodgeBurn },
+        // Retouching (AgentServer+Heal / +Patch / +ContentAwareFill / +RedEye.swift)
+        "heal_stroke": { $0.healStroke },
+        "spot_heal_stroke": { $0.spotHealStroke },
+        "patch_region": { $0.patchRegion },
+        "content_aware_fill": { $0.contentAwareFill },
+        "red_eye": { $0.redEye },
+        "red_eye_auto": { $0.redEyeAuto },
         // Text layers (AgentServer+Text.swift)
         "add_text_layer": { $0.addTextLayer },
         "edit_text_layer": { $0.editTextLayer },
@@ -2165,6 +2172,11 @@ private func agentToolTrampoline(
     let name = String(cString: toolName)
     let arguments = String(cString: argumentsJSON)
     let run = { server.execute(tool: name, argumentsJSON: arguments) }
-    let result = Thread.isMainThread ? run() : DispatchQueue.main.sync(execute: run)
+    // Held for the whole call: without it App Nap demotes the app after its
+    // first multi-second tool and every later one runs ~5x slower for the
+    // rest of the session (`AppActivity` carries the measurements).
+    let result = AppActivity.userInitiated("running the \(name) tool") {
+        Thread.isMainThread ? run() : DispatchQueue.main.sync(execute: run)
+    }
     return result.withCString { rz_agent_string_create($0) }
 }
