@@ -702,7 +702,7 @@ tools. Decisions worth knowing:
   Darken, Direction), the rail's new fifth slot and `p` cycling its four
   tools, and Filters > Remove Red Eye on a real photograph of a face.
 
-### Phase 7a — layer groups, locks, multi-select, link/align/distribute, the workflow commands and Move auto-select (§3F rows 1–6): shipped on `refactor`
+### Phase 7a — layer groups, locks, multi-select, link/align/distribute, the workflow commands and Move auto-select (§3F rows 1–6): shipped, commit `dbe8382` on `refactor`
 
 The first six rows of §3F. Guides, rulers, grid and snapping (§3H) are the
 NEXT phase — no code, no stubs, no menu items, no enum cases for them here.
