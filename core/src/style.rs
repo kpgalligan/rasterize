@@ -387,6 +387,11 @@ impl Layer {
     /// a style is present and the meta does not parse as an adjustment
     /// (adjustment layers have no shape and ignore styles). Identity styles
     /// are never stored, so `Some` means "renders something".
+    ///
+    /// A GROUP may carry a style; an adjustment layer may not. A group's shape
+    /// is its own rendered projection — `doc_group::rendered_group` hands the
+    /// style to the SYNTHETIC layer, so `Shape::of_layer` gets real pixels and
+    /// nothing here needs a group branch.
     pub(crate) fn renders_style(&self) -> Option<&LayerStyle> {
         let style = self.style.as_deref()?;
         if self

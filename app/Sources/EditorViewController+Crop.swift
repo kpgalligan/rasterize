@@ -163,10 +163,23 @@ extension EditorViewController {
                 let matrix = CGAffineTransform(translationX: center.x, y: center.y)
                     .rotated(by: CGFloat(-angle) * .pi / 180)
                     .translatedBy(x: -center.x, y: -center.y)
-                let count = current?.layerCount ?? 0
-                for idx in 0..<count {
-                    current = current?.transformingLayer(idx, matrix, sampler: sampler)
-                }
+                // ONE core call over the whole stack rather than a host loop,
+                // exactly as the agent's crop does. A GROUP entry has no
+                // pixels to resample — what follows the matrix is its
+                // CANVAS-sized mask, which rides the channel path — and the
+                // single-layer transform refuses a group outright, so a loop
+                // would nil the entire straighten the moment the document
+                // held one. It is also all-or-nothing, which a half-rotated
+                // stack never is.
+                //
+                // `straightenLayers`, not `transformLayers` over every index:
+                // that call is all-or-nothing under per-entry POSITION locks,
+                // so one locked layer refused the whole crop with nothing but
+                // a beep — after the user had already agreed to rasterize.
+                // Straightening re-frames the picture rather than moving a
+                // layer within it, which is why `cropped` beside it consults
+                // no lock either.
+                current = current?.straightenLayers(matrix, sampler: sampler)
                 // The alpha channels are saved selections OF this picture, so
                 // they ride the same matrix inside the same edit — otherwise
                 // every one of them silently stops lining up with what it was

@@ -453,8 +453,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // Photo Frame… below then scrubs that layer's timeline.
         menu.addItem(
             item("Place Live Photo…", #selector(EditorViewController.placeLivePhoto(_:))))
-        menu.addItem(item("Duplicate Layer", #selector(EditorViewController.duplicateLayer(_:)), "j"))
+        // ⌘J moves to Layer Via Copy below, which is where Photoshop has
+        // it; Duplicate Layer keeps its item and the panel's button. The
+        // ACTION behind ⌘J routes back here for a group, an adjustment
+        // layer, a described layer, several layers selected, or no selection
+        // (EditorViewController+MergeStamp.swift) — layer_via is a
+        // single-entry op, so acting on the primary alone would silently
+        // drop the rest of a multi-selection.
+        menu.addItem(item("Duplicate Layer", #selector(EditorViewController.duplicateLayer(_:))))
         menu.addItem(item("Delete Layer", #selector(EditorViewController.deleteLayer(_:))))
+        menu.addItem(.separator())
+        // Layer groups. ⌘G / ⇧⌘G are Photoshop's; ⌥⌘G (Create Clipping
+        // Mask, below) is untouched.
+        menu.addItem(item("New Group", #selector(EditorViewController.groupLayers(_:)), "g"))
+        menu.addItem(
+            item(
+                "Ungroup Layers", #selector(EditorViewController.ungroupLayers(_:)), "g",
+                [.command, .shift]))
+        menu.addItem(.separator())
+        menu.addItem(item("Layer Via Copy", #selector(EditorViewController.layerViaCopy(_:)), "j"))
+        menu.addItem(
+            item(
+                "Layer Via Cut", #selector(EditorViewController.layerViaCut(_:)), "j",
+                [.command, .shift]))
+        menu.addItem(.separator())
+        menu.addItem(submenuItem(arrangeMenu()))
+        menu.addItem(submenuItem(alignMenu()))
+        menu.addItem(submenuItem(distributeMenu()))
+        menu.addItem(submenuItem(lockMenu()))
+        menu.addItem(.separator())
+        menu.addItem(item("Link Layers", #selector(EditorViewController.linkLayers(_:))))
+        menu.addItem(item("Unlink Layers", #selector(EditorViewController.unlinkLayers(_:))))
         menu.addItem(.separator())
         // Modal on-canvas session, not a tool: Return commits, Escape cancels.
         menu.addItem(item("Free Transform", #selector(EditorViewController.freeTransform(_:)), "t"))
@@ -480,9 +509,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 "Select Live Photo Frame…",
                 #selector(EditorViewController.selectLivePhotoFrame(_:))))
         menu.addItem(.separator())
+        // Retitled "Merge Layers" by the editor's validation when several
+        // entries are selected (Photoshop's own retitle).
         menu.addItem(
             item("Merge Down", #selector(EditorViewController.mergeDown(_:)), "e", [.command, .shift]))
+        // Deliberately no key equivalent: Photoshop's ⇧⌘E is this build's
+        // Merge Down and its ⌘E is File ▸ Export, and renegotiating either
+        // silently would break a habit that already exists here.
+        menu.addItem(item("Merge Visible", #selector(EditorViewController.mergeVisible(_:))))
+        menu.addItem(
+            item(
+                "Stamp Visible", #selector(EditorViewController.stampVisible(_:)), "e",
+                [.command, .shift, .option]))
         menu.addItem(item("Flatten Image", #selector(EditorViewController.flattenImage(_:))))
+        return menu
+    }
+
+    /// Layer ▸ Arrange. Each item moves the entry among its SIBLINGS only —
+    /// never into or out of a group; a drag in the panel, or reorder_layer
+    /// with a depth, is how an entry changes level.
+    private func arrangeMenu() -> NSMenu {
+        let menu = NSMenu(title: "Arrange")
+        menu.addItem(
+            item(
+                "Bring to Front", #selector(EditorViewController.bringToFront(_:)), "]",
+                [.command, .shift]))
+        menu.addItem(
+            item("Bring Forward", #selector(EditorViewController.bringForward(_:)), "]"))
+        menu.addItem(
+            item("Send Backward", #selector(EditorViewController.sendBackward(_:)), "["))
+        menu.addItem(
+            item(
+                "Send to Back", #selector(EditorViewController.sendToBack(_:)), "[",
+                [.command, .shift]))
+        return menu
+    }
+
+    /// Layer ▸ Align. Aligns the selection's CONTENT bounds — the box of
+    /// actually opaque pixels, which for a canvas-sized layer is nothing
+    /// like its pixel rect.
+    private func alignMenu() -> NSMenu {
+        let menu = NSMenu(title: "Align")
+        menu.addItem(item("Left Edges", #selector(EditorViewController.alignLeft(_:))))
+        menu.addItem(
+            item("Horizontal Centers", #selector(EditorViewController.alignCenterX(_:))))
+        menu.addItem(item("Right Edges", #selector(EditorViewController.alignRight(_:))))
+        menu.addItem(.separator())
+        menu.addItem(item("Top Edges", #selector(EditorViewController.alignTop(_:))))
+        menu.addItem(item("Vertical Centers", #selector(EditorViewController.alignCenterY(_:))))
+        menu.addItem(item("Bottom Edges", #selector(EditorViewController.alignBottom(_:))))
+        return menu
+    }
+
+    /// Layer ▸ Distribute. Equalizes the GAPS between adjacent entries, so
+    /// it needs three of them (validation in the editor).
+    private func distributeMenu() -> NSMenu {
+        let menu = NSMenu(title: "Distribute")
+        menu.addItem(
+            item(
+                "Horizontal Spacing",
+                #selector(EditorViewController.distributeHorizontally(_:))))
+        menu.addItem(
+            item("Vertical Spacing", #selector(EditorViewController.distributeVertically(_:))))
+        return menu
+    }
+
+    /// Layer ▸ Lock. Each item toggles its own bit over the selection, with
+    /// the checkmark showing the active layer's state; Lock All is the three
+    /// bits together (PSD's own spelling), on ⌘/.
+    private func lockMenu() -> NSMenu {
+        let menu = NSMenu(title: "Lock")
+        menu.addItem(
+            item("Transparency", #selector(EditorViewController.lockTransparency(_:))))
+        menu.addItem(item("Pixels", #selector(EditorViewController.lockPixels(_:))))
+        menu.addItem(item("Position", #selector(EditorViewController.lockPosition(_:))))
+        menu.addItem(.separator())
+        menu.addItem(item("Lock All", #selector(EditorViewController.lockAll(_:)), "/"))
         return menu
     }
 

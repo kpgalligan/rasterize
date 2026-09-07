@@ -86,8 +86,9 @@ fn rzdc_v6_round_trips_the_profile_packets_and_resolution() {
     assert_eq!(&bytes[..4], b"RZDC");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        6,
-        "the colour profile and the packets bumped the format to 6"
+        7,
+        "the writer always writes the current version (the colour profile and \
+         the packets bumped it to 6, groups and locks to 7)"
     );
     // The tail is at the very END of the file: the four blobs in order,
     // each preceded by its present byte and length.

@@ -19,6 +19,7 @@ use image::imageops::FilterType;
 use std::sync::Arc;
 
 use crate::doc::RzDocument;
+use crate::doc_lock::EditKind;
 use crate::doc_transform::{
     bounds_of_corners, resample_mask, resample_rgba, Affine, Sampler, SourceMap, EXACT_EPSILON,
     MIN_DETERMINANT,
@@ -204,7 +205,20 @@ impl RzDocument {
         quad: [f64; 8],
         filter: FilterType,
     ) -> Option<Self> {
-        let layer = self.layers.get(idx)?;
+        self.under_locks(idx, EditKind::Position, |doc| {
+            doc.perspective_layer_unlocked(idx, quad, filter)
+        })
+    }
+
+    /// The body of [`Self::perspective_layer`], outside the lock gate. Split
+    /// out only so the gate is one line; that method is its only caller.
+    fn perspective_layer_unlocked(
+        &self,
+        idx: usize,
+        quad: [f64; 8],
+        filter: FilterType,
+    ) -> Option<Self> {
+        let layer = self.raster_layer(idx)?;
         if !quad.iter().all(|v| v.is_finite()) {
             return None;
         }

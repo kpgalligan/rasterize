@@ -609,6 +609,14 @@ extension AgentServer {
 
     /// A source layer argument: an index, or nil for "merged" (the
     /// flattened composite) — the default when the key is absent.
+    ///
+    /// A GROUP index is legal here and means its PROJECTION: the layers
+    /// inside it composited together, canvas-sized, without the group's own
+    /// opacity, blend mode, mask or style. Reading a group is not editing
+    /// one, so there is no kind guard — the core answers every plane of a
+    /// group from that projection (`layer_plane`), and a group is therefore
+    /// the cheapest way to say "everything in this part of the stack" without
+    /// first merging it.
     func sourceLayer(
         _ a: [String: Any], _ doc: RasterDocument, key: String
     ) throws -> Int? {
@@ -645,6 +653,12 @@ extension AgentServer {
 
     /// Where load_selection reads its plane from. `prefix` lets a tool with
     /// two source blocks spell them apart; load_selection passes "".
+    ///
+    /// Both layer forms accept a GROUP index. `layer_alpha` on a group is the
+    /// alpha of its projection — the combined silhouette of everything inside
+    /// it, which is exactly what "select this group's shape" means — and
+    /// `layer_mask` is the group's own mask, which unlike a raster layer's is
+    /// CANVAS-sized to begin with and so needs no placement.
     func selectionSource(
         _ a: [String: Any], _ document: ImageDocument, prefix: String = ""
     ) throws -> SelectionSource {

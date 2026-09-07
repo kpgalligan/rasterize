@@ -471,8 +471,11 @@ final class ImageCanvasView: NSView {
     var onTransformNudge: ((_ dx: CGFloat, _ dy: CGFloat) -> Void)?
 
     // Move tool: the view only reports gestures; the view controller owns
-    // the active layer's offset and the document's live-edit session.
-    var onMoveBegin: (() -> Void)?
+    // the selected entries' offsets and the document's live-edit session.
+    // The BEGIN carries the click point and its modifiers, because
+    // Auto-Select decides which entry the drag moves from where the press
+    // landed (EditorViewController+Groups.swift).
+    var onMoveBegin: ((_ point: CGPoint, _ modifiers: NSEvent.ModifierFlags) -> Void)?
     var onMoveUpdate: ((_ dx: Int, _ dy: Int) -> Void)?
     var onMoveEnd: (() -> Void)?
     var onMoveNudge: ((_ dx: Int, _ dy: Int) -> Void)?
@@ -1486,7 +1489,7 @@ final class ImageCanvasView: NSView {
             // Unclamped: deltas stay honest when the drag leaves the canvas.
             moveDragOrigin = convert(event.locationInWindow, from: nil)
             NSCursor.closedHand.set()
-            onMoveBegin?()
+            onMoveBegin?(point, event.modifierFlags)
         case .brush, .eraser:
             beginStroke(at: point, pressure: Self.tabletPressure(of: event))
         case .text:

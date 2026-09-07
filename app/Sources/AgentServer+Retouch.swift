@@ -89,17 +89,42 @@ extension AgentServer {
     }
 
     /// The optional `blend_mode` argument: a blend-mode display name,
-    /// matched case-insensitively against the layer set (the exact
-    /// vocabulary set_layer_properties speaks), nil when absent. Internal:
-    /// brush_stroke, clone_stamp and set_layer_properties share it.
-    func blendModeArg(_ a: [String: Any]) throws -> RzBlendMode? {
+    /// matched case-insensitively, nil when absent. Internal: brush_stroke,
+    /// clone_stamp, apply_image, calculations and set_layer_properties all
+    /// share it.
+    ///
+    /// `allowPassThrough` picks the vocabulary, and it is off by default
+    /// because Pass Through is a GROUP's declaration, not a mode: it says
+    /// "do not composite this level as a unit". Painting with it would be
+    /// meaningless — the core maps it to Normal for any leaf that somehow
+    /// carries it — so a brush or a clone stamp naming it must get a refusal
+    /// that lists the vocabulary it really speaks, exactly as before this
+    /// phase. Only `set_layer_properties` passes true, since only it can
+    /// address a group entry.
+    ///
+    /// Naming Pass Through for a RASTER entry is not caught here: the check
+    /// belongs to the core's `with_layer_blend_mode`, which refuses it, and
+    /// the sentence below tells a model which half of the pair was wrong
+    /// before it retries.
+    func blendModeArg(_ a: [String: Any], allowPassThrough: Bool = false) throws -> RzBlendMode? {
         guard let name = stringArg(a, "blend_mode") else { return nil }
-        guard let mode = RzBlendMode.allBlendModes.first(where: {
+        let vocabulary = allowPassThrough ? RzBlendMode.groupBlendModes : RzBlendMode.allBlendModes
+        guard let mode = vocabulary.first(where: {
             $0.1.caseInsensitiveCompare(name) == .orderedSame
         })?.0
         else {
-            let names = RzBlendMode.allBlendModes.map { $0.1 }.joined(separator: ", ")
-            throw ToolError(message: "Unknown blend mode \"\(name)\". One of: \(names)")
+            let names = vocabulary.map { $0.1 }.joined(separator: ", ")
+            var message = "Unknown blend mode \"\(name)\". One of: \(names)"
+            // The one near-miss worth naming: a model that has read
+            // get_document's "Pass Through" on a group row and reached for it
+            // on a paint tool. Without this it reads the long list and
+            // guesses again.
+            if !allowPassThrough,
+               "Pass Through".caseInsensitiveCompare(name) == .orderedSame {
+                message += ". Pass Through applies to GROUPS only — set it with "
+                    + "set_layer_properties on a group entry."
+            }
+            throw ToolError(message: message)
         }
         return mode
     }
@@ -394,11 +419,19 @@ extension AgentServer {
         // that changes nothing, so chaining it would nil out the whole edit.
         let fullCanvas = x == 0 && y == 0 && w == doc.width && h == doc.height
         try performGroupedEdit(document, "Crop") { base in
-            var current: RasterDocument? = base
-            for idx in 0..<base.layerCount {
-                current = current?.transformingLayer(
-                    idx, matrix, sampler: RZ_FILTER_CATMULL_ROM)
-            }
+            // ONE core call over the whole stack rather than a host loop.
+            // A GROUP entry has no pixels to resample — what follows the
+            // matrix is its CANVAS-sized mask, which rides the channel path —
+            // and the single-layer transform refuses a group outright, so a
+            // loop would nil the entire straighten the moment the document
+            // held one. It is also all-or-nothing, which a half-rotated
+            // stack never is.
+            //
+            // `straightenLayers`, not `transformLayers` over every index: the
+            // set form is all-or-nothing under per-entry POSITION locks, so a
+            // single locked layer refused the whole crop (the UI's twin has
+            // the same note).
+            var current = base.straightenLayers(matrix, sampler: RZ_FILTER_CATMULL_ROM)
             // The channels ride the straighten too (the UI's commit does the
             // same): a saved selection that stayed put would no longer line
             // up with the picture it was saved from. nil = no channels.

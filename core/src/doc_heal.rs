@@ -105,6 +105,7 @@ use image::RgbaImage;
 use std::collections::VecDeque;
 
 use crate::doc::RzDocument;
+use crate::doc_lock::EditKind;
 use crate::poisson::{solve_membrane, Region, COVERED_THRESHOLD};
 
 /// Memory bound on ONE component's solve window. The window carries dense
@@ -177,7 +178,25 @@ impl RzDocument {
         h: u32,
         strength: f32,
     ) -> Result<Option<Self>, String> {
-        let Some(layer) = self.layers.get(idx) else {
+        self.under_locks_fallible(idx, EditKind::Pixels, |doc| {
+            doc.heal_layer_unlocked(idx, overlay, w, h, strength)
+        })
+    }
+
+    /// The body of [`Self::heal_layer`], outside the lock gate. Split out
+    /// only so the gate is one line; that method is its only caller. It takes
+    /// `under_locks_fallible` rather than `under_locks` because it reports
+    /// through `Result`, and a lock refusal comes back as `Ok(None)` — a
+    /// domain refusal, not an error string.
+    fn heal_layer_unlocked(
+        &self,
+        idx: usize,
+        overlay: &[u8],
+        w: u32,
+        h: u32,
+        strength: f32,
+    ) -> Result<Option<Self>, String> {
+        let Some(layer) = self.raster_layer(idx) else {
             return Ok(None);
         };
         if w != self.width || h != self.height || !strength.is_finite() {
@@ -257,6 +276,16 @@ impl RzDocument {
 /// `Err` when the window exceeds [`MAX_SOLVE_WINDOW_PIXELS`]; `Ok(None)`
 /// when the index is out of range, `strength` is not finite, a buffer is
 /// short, the window is empty, or no byte moved.
+///
+/// Deliberately NOT gated by `doc_lock` and deliberately reading
+/// `layers.get` rather than `raster_layer`, which `doc_lock`'s module doc
+/// also records so nobody "fixes" it: this is a module-level free function,
+/// not an `impl RzDocument` method, so `under_locks` cannot wrap it, and its
+/// only caller (`doc_inpaint`'s reduced-resolution preview) hands it an
+/// internal ONE-LAYER TEMP document whose single raster layer carries no
+/// locks. The locks and the group guard are applied one level up, at
+/// `heal_layer` / `spot_heal_layer` / `content_aware_fill`, which is where a
+/// caller's real layer index enters.
 pub fn heal_window_into_layer(
     doc: &RzDocument,
     idx: usize,

@@ -380,7 +380,23 @@ extension RzBlendMode {
     ]
 
     /// Flat menu-order list for callers that don't care about grouping.
+    /// Deliberately WITHOUT Pass Through: this list feeds the brush, clone
+    /// and Apply Image menus and the agent catalog's shared blend vocabulary,
+    /// where a group's declaration has no meaning (the inverse of the
+    /// gray-degenerate rule below, which subtracts from this list instead).
     static let allBlendModes: [(RzBlendMode, String)] = blendModeGroups.flatMap { $0 }
+
+    /// The vocabulary a GROUP entry offers: Pass Through — Photoshop's
+    /// default for a new group, and the mode that lets an adjustment layer
+    /// inside the group reach the layers below it — ahead of every ordinary
+    /// mode. The layers-panel header popup and `set_layer_properties` use
+    /// this when the entry is a group; nothing else does, because the core
+    /// refuses Pass Through on a raster layer.
+    static let groupBlendModes: [(RzBlendMode, String)] =
+        [(RZ_BLEND_PASS_THROUGH, "Pass Through")] + allBlendModes
+
+    /// `groupBlendModes`' names alone, in the same order.
+    static let groupBlendNames: [String] = groupBlendModes.map { $0.1 }
 
     /// The four HSL modes, which carry NO information on a SINGLE 8-bit
     /// plane: the W3C defines them over an RGB triple, and a gray triple has
@@ -401,8 +417,15 @@ extension RzBlendMode {
     }
 
     /// Display name for a mode (status bar, layer-row meta lines).
+    ///
+    /// Pass Through is answered AHEAD of the table lookup: it is absent from
+    /// `allBlendModes` on purpose, and the lookup's `?? "Normal"` fallback
+    /// would otherwise report a pass-through group as Normal — which is the
+    /// one thing it is not, and would make `get_document` contradict the
+    /// core.
     static func displayName(for mode: RzBlendMode) -> String {
-        allBlendModes.first { $0.0 == mode }?.1 ?? "Normal"
+        if mode == RZ_BLEND_PASS_THROUGH { return "Pass Through" }
+        return allBlendModes.first { $0.0 == mode }?.1 ?? "Normal"
     }
 }
 
@@ -464,16 +487,35 @@ final class RasterDocument {
     var canvasSize: NSSize { NSSize(width: width, height: height) }
     var layerCount: Int { Int(rz_doc_layer_count(ptr)) }
 
-    /// Value snapshot of one layer's metadata (index 0 = bottom layer).
+    /// Value snapshot of one ENTRY's metadata (index 0 = bottom entry). An
+    /// entry is a raster layer or a GROUP; the structure fields are read here
+    /// rather than one call at a time so the layers panel's per-row FFI count
+    /// does not grow with the feature.
     struct LayerInfo {
         let name: String
         let opacity: Double
         let blendMode: RzBlendMode
         let visible: Bool
+        /// The PIXEL BUFFER rect: a raster layer's offset and dimensions,
+        /// and for a group — which has no buffer of its own — the union of
+        /// its raster descendants' buffer rects. The CONTENT box (the opaque
+        /// pixels) is `layerBounds`, which is a different rectangle and is
+        /// asked for by name.
         let offsetX: Int
         let offsetY: Int
         let width: Int
         let height: Int
+        let kind: RzLayerKind
+        /// 0 at the top level, one more inside each enclosing group.
+        let depth: Int
+        /// An `RzLockFlags` bitmask; see `LayerLocks.swift`.
+        let locks: UInt32
+        /// Link-group id; 0 when unlinked.
+        let link: UInt32
+        /// Whether a GROUP is shown expanded. Always true on a raster entry.
+        let open: Bool
+
+        var isGroup: Bool { kind == RZ_LAYER_GROUP }
     }
 
     private func isValidIndex(_ idx: Int) -> Bool {
@@ -504,7 +546,12 @@ final class RasterDocument {
             offsetX: Int(rz_doc_layer_offset_x(ptr, i)),
             offsetY: Int(rz_doc_layer_offset_y(ptr, i)),
             width: Int(rz_doc_layer_width(ptr, i)),
-            height: Int(rz_doc_layer_height(ptr, i)))
+            height: Int(rz_doc_layer_height(ptr, i)),
+            kind: rz_doc_layer_is_group(ptr, i) ? RZ_LAYER_GROUP : RZ_LAYER_RASTER,
+            depth: Int(rz_doc_layer_depth(ptr, i)),
+            locks: rz_doc_layer_locks(ptr, i),
+            link: rz_doc_layer_link(ptr, i),
+            open: rz_doc_layer_open(ptr, i))
     }
 
     /// Copy of a layer's pixels at the layer's own size.
@@ -569,6 +616,17 @@ final class RasterDocument {
     func withLayerVisible(_ idx: Int, _ visible: Bool) -> RasterDocument? {
         guard isValidIndex(idx) else { return nil }
         return wrap(rz_doc_with_layer_visible(ptr, idx, visible))
+    }
+
+    /// `withLayerVisible(idx, false)` for the sweeps that hide a set of
+    /// entries to compose a plate — the transform preview's below/above
+    /// plates, the histogram's backdrop. An entry that is ALREADY hidden
+    /// answers nil, because an op that changes nothing returns nothing (the
+    /// core's purity rule), and that is not a failure here: it is the state
+    /// the sweep asked for. Keeping the document instead of collapsing the
+    /// chain is what stops one hidden layer from emptying a whole plate.
+    func hidingLayer(_ idx: Int) -> RasterDocument {
+        withLayerVisible(idx, false) ?? self
     }
 
     func withLayerOffset(_ idx: Int, _ x: Int, _ y: Int) -> RasterDocument? {
@@ -746,6 +804,317 @@ final class RasterDocument {
         return wrap(
             rz_doc_dodge_burn_layer(
                 ptr, idx, data, UInt32(w), UInt32(h), Float(exposure), UInt8(range), burn))
+    }
+
+    // MARK: - Layer groups, locks, links and structure
+
+    /// The half-open range of entry `idx`'s subtree: the entry alone for a
+    /// raster layer, the whole group for a group. nil for an out-of-range
+    /// index.
+    func layerSubtree(_ idx: Int) -> (start: Int, end: Int)? {
+        guard isValidIndex(idx) else { return nil }
+        var start = 0
+        var end = 0
+        guard rz_doc_layer_subtree(ptr, idx, &start, &end) else { return nil }
+        return (start, end)
+    }
+
+    /// Where a new entry inserted ABOVE `idx` lands — the ONE answer every
+    /// "select what I just made" site asks for, because `idx + 1` is the
+    /// wrong index the moment `idx` names a group. Falls back to `idx + 1`
+    /// only for an index the core does not recognize, where nothing was
+    /// inserted anyway.
+    func insertionIndex(above idx: Int) -> Int {
+        layerSubtree(idx)?.end ?? idx + 1
+    }
+
+    /// True when entry `idx` is a GROUP.
+    func layerIsGroup(_ idx: Int) -> Bool {
+        guard isValidIndex(idx) else { return false }
+        return rz_doc_layer_is_group(ptr, idx)
+    }
+
+    /// Entry `idx`'s nesting depth; 0 at the top level.
+    func layerDepth(_ idx: Int) -> Int {
+        guard isValidIndex(idx) else { return 0 }
+        return Int(rz_doc_layer_depth(ptr, idx))
+    }
+
+    /// Entry `idx`'s lock flags as the raw `RzLockFlags` bitmask.
+    func layerLocks(_ idx: Int) -> UInt32 {
+        guard isValidIndex(idx) else { return 0 }
+        return rz_doc_layer_locks(ptr, idx)
+    }
+
+    func withLayerLocks(_ idx: Int, _ locks: UInt32) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_with_layer_locks(ptr, idx, locks))
+    }
+
+    /// Which of entry `idx`'s lock bits would block an edit of `kind`
+    /// (0 = allowed) — what a refusal alert reads to NAME the lock. The core
+    /// ops refuse regardless, so a path that forgets to ask still cannot
+    /// write.
+    func lockBlocking(_ idx: Int, kind: RzEditKind) -> UInt32 {
+        guard isValidIndex(idx) else { return 0 }
+        return rz_doc_lock_block(ptr, idx, kind)
+    }
+
+    /// Entry `idx`'s link-group id; 0 when unlinked.
+    func layerLink(_ idx: Int) -> UInt32 {
+        guard isValidIndex(idx) else { return 0 }
+        return rz_doc_layer_link(ptr, idx)
+    }
+
+    /// Whether GROUP `idx` is shown expanded.
+    func layerOpen(_ idx: Int) -> Bool {
+        guard isValidIndex(idx) else { return false }
+        return rz_doc_layer_open(ptr, idx)
+    }
+
+    func withLayerOpen(_ idx: Int, _ open: Bool) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_with_layer_open(ptr, idx, open))
+    }
+
+    /// Entry `idx`'s CONTENT bounds — the canvas box of its opaque pixels,
+    /// mask applied, and for a group the union over its descendants. This is
+    /// what align and distribute act on, and it is NOT `LayerInfo`'s
+    /// offset/width/height, which are a raster layer's pixel buffer rect.
+    /// nil when nothing in the entry is opaque.
+    func layerBounds(_ idx: Int) -> (x: Int, y: Int, width: Int, height: Int)? {
+        guard isValidIndex(idx) else { return nil }
+        var xywh = [Int32](repeating: 0, count: 4)
+        guard xywh.withUnsafeMutableBufferPointer({ rz_doc_layer_bounds(ptr, idx, $0.baseAddress) })
+        else { return nil }
+        return (Int(xywh[0]), Int(xywh[1]), Int(xywh[2]), Int(xywh[3]))
+    }
+
+    /// The entry a click at canvas `point` activates: the topmost one whose
+    /// own coverage there is at least half, adjustment layers skipped. With
+    /// `topLevel` the answer is that entry's top-level ancestor
+    /// (Auto-Select: Group). nil when nothing is hit — the caller then leaves
+    /// its selection alone rather than emptying it.
+    func layerAt(_ point: CGPoint, topLevel: Bool) -> Int? {
+        guard point.x.isFinite, point.y.isFinite else { return nil }
+        var idx = 0
+        guard rz_doc_layer_at(ptr, Self.canvasCoordinate(point.x),
+                              Self.canvasCoordinate(point.y), topLevel, &idx)
+        else { return nil }
+        return idx
+    }
+
+    /// A caller-supplied canvas coordinate narrowed to the `int32_t` the core
+    /// takes. The clamp is done in DOUBLE arithmetic and never through `Int`:
+    /// `Int(1e30)` traps ("Double value cannot be converted to Int because
+    /// the result would be greater than Int.max") and kills the process, and
+    /// this is reached from `auto_select_layer` with any finite number a
+    /// model cares to send. Any coordinate that far out is off-canvas
+    /// whichever extreme it lands on, so clamping answers the same "nothing
+    /// there" the core would.
+    private static func canvasCoordinate(_ v: CGFloat) -> Int32 {
+        let floored = v.rounded(.down)
+        if floored <= CGFloat(Int32.min) { return Int32.min }
+        if floored >= CGFloat(Int32.max) { return Int32.max }
+        return Int32(floored)
+    }
+
+    /// Every set op takes an explicit index list, validated here the way the
+    /// core validates it: non-empty, in range and without repeats, since a
+    /// repeat means the caller has miscounted and a silent dedupe would hide
+    /// it. Ascending on the way through, which is the order the core wants.
+    private func withIndices<T>(
+        _ indices: [Int], _ body: (UnsafePointer<Int>?, Int) -> T?
+    ) -> T? {
+        let sorted = indices.sorted()
+        guard !sorted.isEmpty, sorted.allSatisfy(isValidIndex),
+              Set(sorted).count == sorted.count
+        else { return nil }
+        return sorted.withUnsafeBufferPointer { body($0.baseAddress, $0.count) }
+    }
+
+    /// Wraps `indices` — which must all share one parent — in a new group.
+    /// Alongside the new document come the group's index and the two things
+    /// the caller has to be able to report: the entries whose clipped flag
+    /// was CLEARED (the bottom-most grouped entry loses a base that stayed
+    /// outside) and the entries whose relative ORDER changed (a
+    /// non-contiguous set gathers its subtrees into the topmost slot). Both
+    /// are NEW indices.
+    func groupLayers(
+        _ indices: [Int], name: String
+    ) -> (document: RasterDocument, group: Int, clearedClip: [Int], reordered: [Int])? {
+        let cap = layerCount + 1
+        var group = 0
+        var cleared = [Int](repeating: 0, count: cap)
+        var clearedLen = 0
+        var reordered = [Int](repeating: 0, count: cap)
+        var reorderedLen = 0
+        let handle: OpaquePointer? = withIndices(indices) { buffer, count in
+            cleared.withUnsafeMutableBufferPointer { clearedBuffer in
+                reordered.withUnsafeMutableBufferPointer { reorderedBuffer in
+                    rz_doc_group_layers(
+                        ptr, buffer, count, name, &group,
+                        clearedBuffer.baseAddress, &clearedLen,
+                        reorderedBuffer.baseAddress, &reorderedLen, cap)
+                }
+            }
+        }
+        guard let document = wrap(handle) else { return nil }
+        return (
+            document, group,
+            Array(cleared.prefix(min(clearedLen, cap))),
+            Array(reordered.prefix(min(reorderedLen, cap)))
+        )
+    }
+
+    /// Dissolves group `idx`; its children take its depth and its slot. The
+    /// group's own mask, style, opacity, blend mode and clipped flag are
+    /// discarded, so a caller reporting the loss must read them first.
+    ///
+    /// `clearedClip` is the mirror of `groupLayers`': the bottom-most child
+    /// was baseless inside the group, so if it would gain a clip base out at
+    /// the parent level its clipped flag is released instead — and the entry
+    /// is named here (a NEW index) so the caller can report it.
+    func ungroupLayer(
+        _ idx: Int
+    ) -> (document: RasterDocument, clearedClip: [Int])? {
+        guard isValidIndex(idx) else { return nil }
+        let cap = layerCount
+        var cleared = [Int](repeating: 0, count: max(cap, 1))
+        var clearedLen = 0
+        let handle: OpaquePointer? = cleared.withUnsafeMutableBufferPointer { buffer in
+            rz_doc_ungroup_layer(ptr, idx, buffer.baseAddress, &clearedLen, cap)
+        }
+        guard let document = wrap(handle) else { return nil }
+        return (document, Array(cleared.prefix(min(clearedLen, cap))))
+    }
+
+    /// The structural move: entry `from` and its subtree land at `to` at
+    /// `depth` — how a layer moves into or out of a group. `movingLayer`
+    /// stays the drag-onto-a-row form that takes the destination's depth.
+    func moveLayerTo(from: Int, to: Int, depth: Int) -> RasterDocument? {
+        guard isValidIndex(from), isValidIndex(to), depth >= 0 else { return nil }
+        return wrap(rz_doc_move_layer_to(ptr, from, to, UInt32(clamping: depth)))
+    }
+
+    /// Moves entry `idx` among its SIBLINGS only — never into or out of a
+    /// group.
+    func arrangeLayer(_ idx: Int, to how: RzArrange) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        return wrap(rz_doc_arrange_layer(ptr, idx, how))
+    }
+
+    /// Links the given entries under one id; unlink clears theirs.
+    func linkLayers(_ indices: [Int]) -> RasterDocument? {
+        withIndices(indices) { buffer, count in wrap(rz_doc_link_layers(ptr, buffer, count)) }
+    }
+
+    func unlinkLayers(_ indices: [Int]) -> RasterDocument? {
+        withIndices(indices) { buffer, count in wrap(rz_doc_unlink_layers(ptr, buffer, count)) }
+    }
+
+    /// Translates every given entry by (dx, dy) — the ONE move-a-set op, so
+    /// subtrees and link groups follow and a position lock refuses the whole
+    /// call.
+    func moveLayers(_ indices: [Int], dx: Int, dy: Int) -> RasterDocument? {
+        withIndices(indices) { buffer, count in
+            wrap(rz_doc_move_layers(
+                ptr, buffer, count, Int32(clamping: dx), Int32(clamping: dy)))
+        }
+    }
+
+    /// The same affine applied to every given entry, each deriving its own
+    /// destination extent; all or nothing.
+    func transformLayers(
+        _ indices: [Int], _ transform: CGAffineTransform, sampler: RzResizeFilter
+    ) -> RasterDocument? {
+        guard let affine = Self.affineElements(transform) else { return nil }
+        return withIndices(indices) { buffer, count in
+            affine.withUnsafeBufferPointer { elements in
+                wrap(rz_doc_transform_layers(
+                    ptr, buffer, count, elements.baseAddress, sampler))
+            }
+        }
+    }
+
+    /// The same affine applied to the WHOLE stack — the Crop tool's
+    /// straighten, and the agent `crop` tool's.
+    ///
+    /// Not `transformLayers(Array(0..<layerCount), …)`: that call is
+    /// all-or-nothing under per-entry POSITION locks, so one locked layer
+    /// (the Background, which is the layer a Photoshop user locks by habit)
+    /// refused an entire document-wide crop. Straightening re-frames the
+    /// picture rather than moving a layer within it, which is why `cropped`,
+    /// `rotated90`, `canvasResized` and `resized` do not consult a layer
+    /// lock either. nil when nothing would change or an entry's transform
+    /// refuses.
+    func straightenLayers(
+        _ transform: CGAffineTransform, sampler: RzResizeFilter
+    ) -> RasterDocument? {
+        guard let affine = Self.affineElements(transform) else { return nil }
+        return affine.withUnsafeBufferPointer { elements in
+            wrap(rz_doc_straighten_layers(ptr, elements.baseAddress, sampler))
+        }
+    }
+
+    func duplicateLayers(_ indices: [Int]) -> RasterDocument? {
+        withIndices(indices) { buffer, count in wrap(rz_doc_duplicate_layers(ptr, buffer, count)) }
+    }
+
+    func removeLayers(_ indices: [Int]) -> RasterDocument? {
+        withIndices(indices) { buffer, count in wrap(rz_doc_remove_layers(ptr, buffer, count)) }
+    }
+
+    /// Photoshop's Merge Layers over a multi-selection: one raster entry at
+    /// the lowest member's slot, through the projection's own kernel.
+    func mergeLayers(_ indices: [Int]) -> RasterDocument? {
+        withIndices(indices) { buffer, count in wrap(rz_doc_merge_layers(ptr, buffer, count)) }
+    }
+
+    /// Aligns the given entries' CONTENT bounds to `edge` of the selection's
+    /// union, or of the canvas with `toCanvas`.
+    func alignLayers(_ indices: [Int], edge: RzAlign, toCanvas: Bool) -> RasterDocument? {
+        withIndices(indices) { buffer, count in
+            wrap(rz_doc_align_layers(ptr, buffer, count, edge, toCanvas))
+        }
+    }
+
+    /// Spaces the given entries evenly: the outermost two keep their places
+    /// and the gaps between adjacent content bounds are equalized.
+    func distributeLayers(_ indices: [Int], vertical: Bool) -> RasterDocument? {
+        withIndices(indices) { buffer, count in
+            wrap(rz_doc_distribute_layers(ptr, buffer, count, vertical))
+        }
+    }
+
+    /// Replaces every entry that CONTRIBUTES to the projection with one
+    /// canvas-sized raster entry holding it. A visible layer inside a hidden
+    /// group contributes nothing and therefore SURVIVES.
+    func mergeVisible() -> RasterDocument? { wrap(rz_doc_merge_visible(ptr)) }
+
+    /// Adds the visible projection as a new entry above `above`'s subtree,
+    /// leaving the rest of the stack alone.
+    func stampVisible(above: Int, name: String) -> RasterDocument? {
+        guard isValidIndex(above) else { return nil }
+        return wrap(rz_doc_stamp_visible(ptr, above, name))
+    }
+
+    /// Layer Via Copy / Via Cut. This op RASTERIZES — it keeps neither the
+    /// layer's metadata nor its style and refuses a group or an adjustment
+    /// layer — so a caller whose target is a described layer wants
+    /// `duplicatingLayer` instead. `mask` is a canvas-sized coverage buffer,
+    /// or nil for the whole layer.
+    func layerVia(_ idx: Int, mask: [UInt8]?, cut: Bool, name: String) -> RasterDocument? {
+        guard isValidIndex(idx) else { return nil }
+        guard let mask = mask else {
+            return wrap(rz_doc_layer_via(
+                ptr, idx, nil, UInt32(width), UInt32(height), cut, name))
+        }
+        guard mask.count == width * height else { return nil }
+        return mask.withUnsafeBufferPointer { coverage in
+            wrap(rz_doc_layer_via(
+                ptr, idx, coverage.baseAddress, UInt32(width), UInt32(height), cut, name))
+        }
     }
 
     // MARK: - Retouching

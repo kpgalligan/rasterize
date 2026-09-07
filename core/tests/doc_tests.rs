@@ -17,6 +17,7 @@ use rasterize_core::ffi_adjust::*;
 use rasterize_core::ffi_channel::*;
 use rasterize_core::ffi_color::*;
 use rasterize_core::ffi_doc::*;
+use rasterize_core::ffi_group::*;
 use rasterize_core::ffi_heal::*;
 use rasterize_core::ffi_style::*;
 use rasterize_core::RzImage;
@@ -46,8 +47,11 @@ fn blended_pixel(
         &solid(2, 2, top),
         "Top",
     );
-    let doc = apply(doc, |d| unsafe { rz_doc_with_layer_blend_mode(d, 1, mode) });
-    let doc = apply(doc, |d| unsafe { rz_doc_with_layer_opacity(d, 1, opacity) });
+    // `apply_or_keep`, not `apply`: a property setter handed the value the
+    // layer already holds answers NULL (the purity rule), and Normal at
+    // opacity 1 is exactly what a fresh layer carries.
+    let doc = apply_or_keep(doc, |d| unsafe { rz_doc_with_layer_blend_mode(d, 1, mode) });
+    let doc = apply_or_keep(doc, |d| unsafe { rz_doc_with_layer_opacity(d, 1, opacity) });
     let flat = flat_pixels(doc);
     unsafe { rz_doc_free(doc) };
     pixel(&flat, 2, 0, 0)
@@ -407,12 +411,17 @@ fn rzdc_round_trip_preserves_all_blend_modes() {
         });
     }
     for mode in 0..BLEND_MODE_COUNT {
-        doc = apply(doc, |d| unsafe {
+        // Layer 0 is asked for Normal, which it already carries: a setter
+        // handed the stored value answers NULL (the purity rule).
+        doc = apply_or_keep(doc, |d| unsafe {
             rz_doc_with_layer_blend_mode(d, mode as usize, mode)
         });
     }
-    // The first value past the end of the enum is rejected.
-    assert!(unsafe { rz_doc_with_layer_blend_mode(doc, 0, BLEND_MODE_COUNT) }.is_null());
+    // The first value past the end of the enum is rejected...
+    assert!(unsafe { rz_doc_with_layer_blend_mode(doc, 0, BLEND_PASS_THROUGH + 1) }.is_null());
+    // ...and so is Pass Through, which is a GROUP's declaration that it has no
+    // footprint of its own and has no meaning on a raster layer.
+    assert!(unsafe { rz_doc_with_layer_blend_mode(doc, 0, BLEND_PASS_THROUGH) }.is_null());
 
     let path = dir.path().join("modes.rzdc");
     let c = cpath(&path);
@@ -501,13 +510,17 @@ fn setters_are_pure_and_validate() {
     );
     unsafe { rz_doc_free(changed) };
 
-    // Clamping.
-    let hi = unsafe { rz_doc_with_layer_opacity(doc, 0, 3.0) };
+    // Clamping, watched from a layer that is NOT already at the clamped
+    // value — a setter handed the value it already holds answers NULL, which
+    // the latch block below pins.
+    let quarter = unsafe { rz_doc_with_layer_opacity(doc, 0, 0.25) };
+    let hi = unsafe { rz_doc_with_layer_opacity(quarter, 0, 3.0) };
     assert_eq!(unsafe { rz_doc_layer_opacity(hi, 0) }, 1.0);
     unsafe { rz_doc_free(hi) };
-    let lo = unsafe { rz_doc_with_layer_opacity(doc, 0, -0.5) };
+    let lo = unsafe { rz_doc_with_layer_opacity(quarter, 0, -0.5) };
     assert_eq!(unsafe { rz_doc_layer_opacity(lo, 0) }, 0.0);
     unsafe { rz_doc_free(lo) };
+    unsafe { rz_doc_free(quarter) };
 
     // Name, blend, visible, offset round-trips leave the original untouched.
     let name = CString::new("Étage 层").unwrap();
@@ -530,6 +543,24 @@ fn setters_are_pure_and_validate() {
     assert_eq!(layer_offset(moved, 0), (-7, 9));
     assert_eq!(layer_offset(doc, 0), (0, 0));
     unsafe { rz_doc_free(moved) };
+
+    // The NO-OP LATCH, one assertion per setter: an op that would change
+    // nothing answers NULL rather than an identical copy, so a host reading a
+    // row and writing it straight back adds no undo step and does not dirty
+    // the document. The value compared is the one that would be STORED, so a
+    // clamped opacity latches against the clamped number.
+    let stored = CString::new("Background").unwrap();
+    unsafe {
+        assert!(rz_doc_with_layer_name(doc, 0, stored.as_ptr()).is_null());
+        assert!(rz_doc_with_layer_opacity(doc, 0, 1.0).is_null());
+        assert!(
+            rz_doc_with_layer_opacity(doc, 0, 4.0).is_null(),
+            "4.0 clamps onto the stored 1.0"
+        );
+        assert!(rz_doc_with_layer_blend_mode(doc, 0, BLEND_NORMAL).is_null());
+        assert!(rz_doc_with_layer_visible(doc, 0, true).is_null());
+        assert!(rz_doc_with_layer_offset(doc, 0, 0, 0).is_null());
+    }
 
     // with_layer_pixels replaces pixels (any size), keeps properties.
     let tiny = open_image(&dir, "tiny.png", &solid(2, 3, [9, 8, 7, 255]));
@@ -568,6 +599,154 @@ fn setters_are_pure_and_validate() {
         assert!(rz_doc_layer_image(doc, 5).is_null());
         assert!(rz_doc_layer_canvas_image(doc, 5).is_null());
         assert!(rz_doc_layer_thumbnail(doc, 5, 10).is_null());
+        // Layer groups, locks and links (ffi_group).
+        assert!(!rz_doc_layer_is_group(doc, 5));
+        assert_eq!(rz_doc_layer_depth(doc, 5), 0);
+        assert_eq!(rz_doc_layer_locks(doc, 5), 0);
+        assert_eq!(rz_doc_layer_link(doc, 5), 0);
+        assert!(!rz_doc_layer_open(doc, 5));
+        assert_eq!(rz_doc_lock_block(doc, 5, 0), 0);
+        assert_eq!(
+            rz_doc_lock_block(doc, 0, 99),
+            0,
+            "an unknown edit kind blocks nothing"
+        );
+        let mut start = 7usize;
+        let mut end = 7usize;
+        assert!(!rz_doc_layer_subtree(doc, 5, &mut start, &mut end));
+        assert_eq!((start, end), (7, 7), "nothing is written on a refusal");
+        let mut xywh = [7i32; 4];
+        assert!(!rz_doc_layer_bounds(doc, 5, xywh.as_mut_ptr()));
+        assert_eq!(xywh, [7; 4]);
+        assert!(rz_doc_with_layer_locks(doc, 5, 1).is_null());
+        assert!(rz_doc_with_layer_open(doc, 5, false).is_null());
+        assert!(
+            rz_doc_with_layer_open(doc, 0, false).is_null(),
+            "not a group"
+        );
+        assert!(rz_doc_ungroup_layer(doc, 5, ptr::null_mut(), ptr::null_mut(), 0).is_null());
+        assert!(
+            rz_doc_ungroup_layer(doc, 0, ptr::null_mut(), ptr::null_mut(), 0).is_null(),
+            "not a group"
+        );
+        assert!(rz_doc_move_layer_to(doc, 5, 0, 0).is_null());
+        assert!(rz_doc_move_layer_to(doc, 0, 5, 0).is_null());
+        assert!(
+            rz_doc_move_layer_to(doc, 0, 0, 99).is_null(),
+            "past the depth cap"
+        );
+        // An index list is refused WHOLE: empty, out of range, or repeating.
+        let cname = CString::new("G").unwrap();
+        let mut group_out = 0usize;
+        for indices in [vec![], vec![5usize], vec![0usize, 0]] {
+            assert!(
+                rz_doc_group_layers(
+                    doc,
+                    indices.as_ptr(),
+                    indices.len(),
+                    cname.as_ptr(),
+                    &mut group_out,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                )
+                .is_null(),
+                "group_layers({indices:?})"
+            );
+        }
+        let ok = [0usize];
+        assert!(
+            rz_doc_group_layers(
+                doc,
+                ok.as_ptr(),
+                1,
+                ptr::null(),
+                &mut group_out,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+            )
+            .is_null(),
+            "a NULL name is refused"
+        );
+        // The SET ops take the same index list and refuse it whole.
+        let affine = [1.0f64, 0.0, 0.0, 1.0, 0.0, 0.0];
+        for indices in [vec![], vec![5usize], vec![0usize, 0]] {
+            let (p, n) = (indices.as_ptr(), indices.len());
+            assert!(rz_doc_link_layers(doc, p, n).is_null(), "link {indices:?}");
+            assert!(
+                rz_doc_unlink_layers(doc, p, n).is_null(),
+                "unlink {indices:?}"
+            );
+            assert!(
+                rz_doc_move_layers(doc, p, n, 1, 1).is_null(),
+                "move {indices:?}"
+            );
+            assert!(
+                rz_doc_transform_layers(doc, p, n, affine.as_ptr(), FILTER_BILINEAR).is_null(),
+                "transform {indices:?}"
+            );
+            assert!(
+                rz_doc_duplicate_layers(doc, p, n).is_null(),
+                "duplicate {indices:?}"
+            );
+            assert!(
+                rz_doc_remove_layers(doc, p, n).is_null(),
+                "remove {indices:?}"
+            );
+            assert!(
+                rz_doc_merge_layers(doc, p, n).is_null(),
+                "merge {indices:?}"
+            );
+            assert!(
+                rz_doc_align_layers(doc, p, n, ALIGN_LEFT, false).is_null(),
+                "align {indices:?}"
+            );
+            assert!(
+                rz_doc_distribute_layers(doc, p, n, false).is_null(),
+                "distribute {indices:?}"
+            );
+        }
+        let ok2 = [0usize, 1];
+        assert!(
+            rz_doc_transform_layers(doc, ok2.as_ptr(), 2, ptr::null(), FILTER_BILINEAR).is_null(),
+            "a NULL affine is refused"
+        );
+        assert!(
+            rz_doc_transform_layers(doc, ok2.as_ptr(), 2, affine.as_ptr(), 99).is_null(),
+            "an unknown sampler is refused"
+        );
+        assert!(
+            rz_doc_straighten_layers(doc, ptr::null(), FILTER_BILINEAR).is_null(),
+            "straighten: a NULL affine is refused"
+        );
+        assert!(
+            rz_doc_straighten_layers(doc, affine.as_ptr(), 99).is_null(),
+            "straighten: an unknown sampler is refused"
+        );
+
+        assert!(
+            rz_doc_align_layers(doc, ok2.as_ptr(), 2, 99, false).is_null(),
+            "an unknown edge is refused"
+        );
+        for how in [0, 1, 2, 3] {
+            assert!(
+                rz_doc_arrange_layer(doc, 5, how).is_null(),
+                "arrange out of range"
+            );
+        }
+        assert!(
+            rz_doc_arrange_layer(doc, 0, 99).is_null(),
+            "an unknown arrangement is refused"
+        );
+        assert!(rz_doc_stamp_visible(doc, 5, cname.as_ptr()).is_null());
+        assert!(rz_doc_stamp_visible(doc, 0, ptr::null()).is_null());
+        assert!(rz_doc_layer_via(doc, 5, ptr::null(), 2, 2, false, cname.as_ptr()).is_null());
+        assert!(rz_doc_layer_via(doc, 0, ptr::null(), 2, 2, false, ptr::null()).is_null());
     }
     unsafe { rz_doc_free(doc) };
 }
@@ -1752,6 +1931,8 @@ fn null_safety_sweep() {
     let null_img: *const RzImage = ptr::null();
     let name = CString::new("x").unwrap();
     let overlay = [0u8; 16];
+    // A 2x2 canvas-sized coverage mask, for the selection-shaped exports.
+    let mask = [255u8; 4];
     // A 2x2 canvas-sized plane and its read-back buffer, for the channel
     // exports below.
     let plane = [0u8; 4];
@@ -1811,6 +1992,97 @@ fn null_safety_sweep() {
         assert!(rz_doc_moving_layer(null_doc, 0, 0).is_null());
         assert!(rz_doc_merging_down(null_doc, 1).is_null());
         assert!(rz_doc_flattening(null_doc).is_null());
+
+        // Layer groups, locks, links and structure (ffi_group).
+        assert!(!rz_doc_layer_is_group(null_doc, 0));
+        assert_eq!(rz_doc_layer_depth(null_doc, 0), 0);
+        assert_eq!(rz_doc_layer_locks(null_doc, 0), 0);
+        assert_eq!(rz_doc_layer_link(null_doc, 0), 0);
+        assert!(!rz_doc_layer_open(null_doc, 0));
+        assert_eq!(rz_doc_lock_block(null_doc, 0, 0), 0);
+        let mut a = 0usize;
+        let mut b = 0usize;
+        assert!(!rz_doc_layer_subtree(null_doc, 0, &mut a, &mut b));
+        assert!(!rz_doc_layer_subtree(
+            null_doc,
+            0,
+            ptr::null_mut(),
+            ptr::null_mut()
+        ));
+        let mut xywh = [0i32; 4];
+        assert!(!rz_doc_layer_bounds(null_doc, 0, xywh.as_mut_ptr()));
+        assert!(!rz_doc_layer_bounds(null_doc, 0, ptr::null_mut()));
+        assert!(!rz_doc_layer_at(null_doc, 0, 0, false, &mut a));
+        assert!(!rz_doc_layer_at(null_doc, 0, 0, true, ptr::null_mut()));
+        assert!(rz_doc_with_layer_locks(null_doc, 0, 1).is_null());
+        assert!(rz_doc_with_layer_open(null_doc, 0, true).is_null());
+        assert!(rz_doc_ungroup_layer(null_doc, 0, ptr::null_mut(), ptr::null_mut(), 0).is_null());
+        assert!(rz_doc_move_layer_to(null_doc, 0, 0, 0).is_null());
+        let indices = [0usize];
+        assert!(rz_doc_group_layers(
+            null_doc,
+            indices.as_ptr(),
+            1,
+            name.as_ptr(),
+            &mut a,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0,
+        )
+        .is_null());
+        assert!(rz_doc_group_layers(
+            null_doc,
+            ptr::null(),
+            0,
+            name.as_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0,
+        )
+        .is_null());
+        let affine = [1.0f64, 0.0, 0.0, 1.0, 0.0, 0.0];
+        assert!(rz_doc_arrange_layer(null_doc, 0, 0).is_null());
+        assert!(rz_doc_link_layers(null_doc, indices.as_ptr(), 1).is_null());
+        assert!(rz_doc_link_layers(null_doc, ptr::null(), 0).is_null());
+        assert!(rz_doc_unlink_layers(null_doc, indices.as_ptr(), 1).is_null());
+        assert!(rz_doc_unlink_layers(null_doc, ptr::null(), 0).is_null());
+        assert!(rz_doc_move_layers(null_doc, indices.as_ptr(), 1, 1, 1).is_null());
+        assert!(rz_doc_move_layers(null_doc, ptr::null(), 0, 1, 1).is_null());
+        assert!(rz_doc_transform_layers(
+            null_doc,
+            indices.as_ptr(),
+            1,
+            affine.as_ptr(),
+            FILTER_BILINEAR
+        )
+        .is_null());
+        assert!(
+            rz_doc_transform_layers(null_doc, ptr::null(), 0, ptr::null(), FILTER_BILINEAR)
+                .is_null()
+        );
+        assert!(rz_doc_straighten_layers(null_doc, affine.as_ptr(), FILTER_BILINEAR).is_null());
+        assert!(rz_doc_straighten_layers(null_doc, ptr::null(), FILTER_BILINEAR).is_null());
+        assert!(rz_doc_duplicate_layers(null_doc, indices.as_ptr(), 1).is_null());
+        assert!(rz_doc_duplicate_layers(null_doc, ptr::null(), 0).is_null());
+        assert!(rz_doc_remove_layers(null_doc, indices.as_ptr(), 1).is_null());
+        assert!(rz_doc_remove_layers(null_doc, ptr::null(), 0).is_null());
+        assert!(rz_doc_merge_layers(null_doc, indices.as_ptr(), 1).is_null());
+        assert!(rz_doc_merge_layers(null_doc, ptr::null(), 0).is_null());
+        assert!(rz_doc_align_layers(null_doc, indices.as_ptr(), 1, ALIGN_LEFT, true).is_null());
+        assert!(rz_doc_align_layers(null_doc, ptr::null(), 0, ALIGN_LEFT, true).is_null());
+        assert!(rz_doc_distribute_layers(null_doc, indices.as_ptr(), 1, true).is_null());
+        assert!(rz_doc_distribute_layers(null_doc, ptr::null(), 0, true).is_null());
+        assert!(rz_doc_merge_visible(null_doc).is_null());
+        assert!(rz_doc_stamp_visible(null_doc, 0, name.as_ptr()).is_null());
+        assert!(rz_doc_stamp_visible(null_doc, 0, ptr::null()).is_null());
+        assert!(rz_doc_layer_via(null_doc, 0, ptr::null(), 2, 2, false, name.as_ptr()).is_null());
+        assert!(rz_doc_layer_via(null_doc, 0, mask.as_ptr(), 2, 2, true, name.as_ptr()).is_null());
+        assert!(rz_doc_layer_via(null_doc, 0, ptr::null(), 2, 2, false, ptr::null()).is_null());
         assert!(
             rz_doc_painting_layer(null_doc, 0, overlay.as_ptr(), 2, 2, COMPOSITE_OVER, 1.0)
                 .is_null()

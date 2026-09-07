@@ -298,6 +298,7 @@ use crate::doc::RzDocument;
 use crate::doc_heal::{
     components, heal_window_into_layer, heal_window_into_pixels, Component, MAX_SOLVE_WINDOW_PIXELS,
 };
+use crate::doc_lock::EditKind;
 use crate::inpaint_em::{hole_distance, inpaint_plane};
 use crate::inpaint_plan::{plan, ComponentPlan, RING_MIN};
 use crate::inpaint_preview::{
@@ -480,26 +481,28 @@ impl RzDocument {
         sample_all: bool,
         preview: bool,
     ) -> Result<Option<Self>, String> {
-        let Some(n) = canvas_len(self, w, h) else {
-            return Ok(None);
-        };
-        if overlay.len() < n * 4 {
-            return Ok(None);
-        }
-        let coverage: Vec<u8> = (0..n).map(|i| overlay[i * 4 + 3]).collect();
-        inpaint(
-            self,
-            idx,
-            &coverage,
-            Fill {
-                strength,
-                ring,
-                seed,
-                sample_all,
-                preview,
-                caller: Caller::SpotHeal,
-            },
-        )
+        self.under_locks_fallible(idx, EditKind::Pixels, |doc| {
+            let Some(n) = canvas_len(doc, w, h) else {
+                return Ok(None);
+            };
+            if overlay.len() < n * 4 {
+                return Ok(None);
+            }
+            let coverage: Vec<u8> = (0..n).map(|i| overlay[i * 4 + 3]).collect();
+            inpaint(
+                doc,
+                idx,
+                &coverage,
+                Fill {
+                    strength,
+                    ring,
+                    seed,
+                    sample_all,
+                    preview,
+                    caller: Caller::SpotHeal,
+                },
+            )
+        })
     }
 
     /// Content-Aware Fill: PatchMatch-inpaints the region a canvas-sized u8
@@ -531,25 +534,27 @@ impl RzDocument {
         sample_all: bool,
         preview: bool,
     ) -> Result<Option<Self>, String> {
-        let Some(n) = canvas_len(self, w, h) else {
-            return Ok(None);
-        };
-        if mask.len() < n {
-            return Ok(None);
-        }
-        inpaint(
-            self,
-            idx,
-            &mask[..n],
-            Fill {
-                strength: 1.0,
-                ring,
-                seed,
-                sample_all,
-                preview,
-                caller: Caller::Fill,
-            },
-        )
+        self.under_locks_fallible(idx, EditKind::Pixels, |doc| {
+            let Some(n) = canvas_len(doc, w, h) else {
+                return Ok(None);
+            };
+            if mask.len() < n {
+                return Ok(None);
+            }
+            inpaint(
+                doc,
+                idx,
+                &mask[..n],
+                Fill {
+                    strength: 1.0,
+                    ring,
+                    seed,
+                    sample_all,
+                    preview,
+                    caller: Caller::Fill,
+                },
+            )
+        })
     }
 }
 
@@ -592,7 +597,7 @@ fn inpaint(
     coverage: &[u8],
     fill: Fill,
 ) -> Result<Option<RzDocument>, String> {
-    let Some(layer) = doc.layers.get(idx) else {
+    let Some(layer) = doc.raster_layer(idx) else {
         return Ok(None);
     };
     if !fill.strength.is_finite() {

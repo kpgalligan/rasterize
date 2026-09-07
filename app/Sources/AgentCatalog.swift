@@ -103,8 +103,21 @@ extension AgentServer {
         let docID = Self.docIDProperty
         let index: [String: Any] = [
             "type": "integer",
-            "description": "Layer index (0 = bottom); omit for the active layer.",
+            "description": "Layer index (0 = bottom); omit for the active layer. An index "
+                + "may name a layer GROUP — get_document says which, and a group has no "
+                + "pixels of its own.",
         ]
+        // A set of entries is always EXPLICIT: none of these tools falls back
+        // to the app's panel selection, which an agent cannot see. Same shape
+        // as `points` and `corners`; no maxItems, because the document's
+        // layer count is not knowable when the catalog is built — the
+        // handler is what enforces the range.
+        func layerList(_ description: String, minItems: Int = 1) -> [String: Any] {
+            [
+                "type": "array", "items": ["type": "integer"], "minItems": minItems,
+                "description": description,
+            ]
+        }
         let selectionMode: [String: Any] = [
             "type": "string",
             "enum": ["replace", "add", "subtract", "intersect"],
@@ -294,7 +307,16 @@ extension AgentServer {
                 "get_document",
                 "Full state of one document: canvas size and every layer's name, size, offset, "
                     + "opacity, blend mode, visibility, layer mask (has_mask, mask_enabled), "
-                    + "and clipped flag (see set_layer_clipped). A STYLED layer reports a "
+                    + "and clipped flag (see set_layer_clipped). STRUCTURE is reported on "
+                    + "every row: kind (\"layer\" or \"group\"), depth, parent, and — on a "
+                    + "group — children and open. The array stays flat and bottom-first, "
+                    + "with a group's children BEFORE it. content_x/y/width/height is the "
+                    + "box of actually opaque pixels (what align_layers and "
+                    + "distribute_layers act on); offset/width/height is the pixel BUFFER "
+                    + "rect, which is usually a different rectangle, and on a group row is "
+                    + "the union of its layers' buffers. locks and linked "
+                    + "appear when set; pixel_layer_count counts leaves, layer_count counts "
+                    + "entries. A STYLED layer reports a "
                     + "style object — its whole effect stack and blending options as the "
                     + "canonical JSON set_layer_style takes back — and the document reports "
                     + "global_light (angle, altitude). "
@@ -503,40 +525,95 @@ extension AgentServer {
                 "Adds an empty transparent layer above the active layer and selects it.",
                 ["name": ["type": "string"], "document_id": docID]),
             tool(
-                "duplicate_layer", "Duplicates a layer.",
-                ["index": index, "document_id": docID]),
+                "duplicate_layer",
+                "Duplicates a layer, or every layer in layers, in ONE step. A GROUP "
+                    + "duplicates with everything inside it. The reply reports the new "
+                    + "layer_count — every structural edit renumbers the stack, so re-read "
+                    + "get_document before addressing layers again.",
+                [
+                    "index": index,
+                    "layers": layerList("Layers to duplicate, instead of index."),
+                    "document_id": docID,
+                ]),
             tool(
-                "delete_layer", "Deletes a layer (the last layer cannot be deleted).",
-                ["index": index, "document_id": docID]),
+                "delete_layer",
+                "Deletes a layer, or every layer in layers, in ONE step (a group takes its "
+                    + "children with it). Refused only when it would leave the document "
+                    + "with no layers at all.",
+                [
+                    "index": index,
+                    "layers": layerList("Layers to delete, instead of index."),
+                    "document_id": docID,
+                ]),
             tool(
-                "merge_down", "Merges a layer into the one below it.",
-                ["index": index, "document_id": docID]),
+                "merge_down",
+                "Merges a layer into the previous one AMONG ITS SIBLINGS, so a merge "
+                    + "inside a group never reaches out of it. With layers (two or more, "
+                    + "all sharing one parent) it is Photoshop's Merge Layers: they become "
+                    + "one raster layer at the lowest one's position. Masks, styles and "
+                    + "adjustment descriptions are baked in and dropped. The merge REPLACES "
+                    + "the lower layer's pixels, so its transparency or pixel lock refuses "
+                    + "the call; the upper one's locks do not, since it is only removed.",
+                [
+                    "index": index,
+                    "layers": layerList("Layers to merge together, instead of index.", minItems: 2),
+                    "document_id": docID,
+                ]),
             tool(
                 "flatten_image", "Flattens all layers into one.",
                 ["document_id": docID]),
             tool(
-                "reorder_layer", "Moves a layer to a new stack position.",
+                "reorder_layer",
+                "Moves a layer (and, for a group, everything inside it) to a new stack "
+                    + "position. Omit depth and it lands at the destination's own level, "
+                    + "which is what dragging a row onto another means; give a depth to "
+                    + "move it INTO or OUT OF a group. `to` numbers the stack with this "
+                    + "layer's own subtree ALREADY taken out, so naming that subtree's own "
+                    + "start at the same depth puts the layer back where it started and is "
+                    + "refused as a no-op. A (to, depth) pair that would not make a "
+                    + "well-formed tree is refused too.",
                 [
                     "from": ["type": "integer"], "to": ["type": "integer"],
+                    "depth": [
+                        "type": "integer", "minimum": 0, "maximum": 10,
+                        "description": "Nesting level at the destination: 0 is the top "
+                            + "level, and one more than a group's own depth puts the layer "
+                            + "inside that group.",
+                    ],
                     "document_id": docID,
                 ], required: ["from", "to"]),
             tool(
                 "set_layer_properties",
                 "Changes any of a layer's name, opacity (0-1), blend mode, visibility, or "
-                    + "pixel offset in one undoable step.",
+                    + "pixel offset in one undoable step. Pass Through applies to GROUPS "
+                    + "only — it is a new group's default, and it is what lets an adjustment "
+                    + "layer inside the group reach the layers below it; naming it for a "
+                    + "raster layer is refused. A field already holding the value you pass "
+                    + "is simply left alone rather than failing the call, so echoing a "
+                    + "get_document row back is safe; when NOTHING in the call would "
+                    + "change, the reply is changed:false and no undo step is added.",
                 [
                     "index": index,
                     "name": ["type": "string"],
                     "opacity": ["type": "number", "minimum": 0, "maximum": 1],
-                    "blend_mode": ["type": "string", "enum": blendNames],
+                    // The GROUP vocabulary, which is the shared one plus Pass
+                    // Through. `blendNames` itself must NOT be widened: it
+                    // also feeds brush_stroke, clone_stamp and apply_image,
+                    // where Pass Through has no meaning.
+                    "blend_mode": ["type": "string", "enum": RzBlendMode.groupBlendNames],
                     "visible": ["type": "boolean"],
                     "offset_x": ["type": "integer"],
                     "offset_y": ["type": "integer"],
+                    "open": [
+                        "type": "boolean",
+                        "description": "GROUPS only: whether the panel shows it expanded. "
+                            + "Saved with the document; it changes no pixel.",
+                    ],
                     "document_id": docID,
                 ]),
             tool(
                 "transform_layer",
-                "Rotates, scales and/or moves ONE layer's pixels in a single resample — the "
+                "Rotates, scales and/or moves a layer's pixels in a single resample — the "
                     + "same pipeline as the app's Free Transform (⌘T). The rotation and the "
                     + "scales act around a pivot (by default the centre of the layer's CURRENT "
                     + "bounds — for a re-editable text, shape or Live Photo layer the exact "
@@ -545,8 +622,12 @@ extension AgentServer {
                     + "the layer is resampled once "
                     + "into the outward-rounded bounding box of its transformed corners, so "
                     + "its offset AND size both change, and it may end up extending past the "
-                    + "canvas. The canvas and every other layer are untouched, and a layer "
-                    + "mask rides along, resampled identically. Pass at least one of rotate, "
+                    + "canvas. The canvas is untouched, and a layer mask rides along, "
+                    + "resampled identically. Two entries OTHER than the named layer do "
+                    + "follow the same matrix, because a person dragging the box would "
+                    + "expect them to: everything inside it when the layer is a GROUP, and "
+                    + "every layer LINKED to it (link_layers). Nothing else moves. Pass at "
+                    + "least one of rotate, "
                     + "scale, scale_x, scale_y, translate_x, translate_y; the result reports "
                     + "the layer's new bounds so you can verify placement. For whole-document "
                     + "geometry use rotate / flip / image_size instead. On a re-editable TEXT, "
@@ -556,7 +637,10 @@ extension AgentServer {
                     + "transform and origin). Only a layer whose source cannot be rendered "
                     + "right now (a text family not installed here, a Live Photo whose files "
                     + "are gone) is resampled as pixels and drops its description, reported "
-                    + "as before with the reason (undo restores it).",
+                    + "as before with the reason (undo restores it). A transform over a SET "
+                    + "— a group, or a linked layer — always resamples instead, so every "
+                    + "described layer it carries loses its description too; those are "
+                    + "listed in rasterized_layers.",
                 [
                     "layer": index,
                     "rotate": [
@@ -639,7 +723,16 @@ extension AgentServer {
                     + "untouched. A true perspective quad rewrites pixels, so a described "
                     + "layer drops its description (rasterized_text / _shape / _live_photo: "
                     + "true; undo restores it). The result reports the layer's new bounds "
-                    + "for verification.",
+                    + "for verification. On a GROUP the rect the corners are the "
+                    + "destinations OF is its CONTENT box — get_document's "
+                    + "content_x/y/width/height, NOT the group row's offset/width/height, "
+                    + "which are the union of its layers' pixel buffers — the quad must be "
+                    + "a parallelogram, and every described layer inside is resampled and "
+                    + "loses its description (reported in rasterized_layers). LINKED layers "
+                    + "transform together, so a linked layer carries its partners (listed as "
+                    + "linked_layers) and, like a group, takes a parallelogram only — a "
+                    + "perspective quad has no single meaning for a set and is refused; "
+                    + "unlink_layers first to distort one member on its own.",
                 [
                     "layer": index,
                     "corners": [
@@ -669,9 +762,13 @@ extension AgentServer {
                 "Gives a layer a mask: a grayscale coverage channel that gates the layer's "
                     + "alpha without touching its pixels (white shows, black hides, grays are "
                     + "partial), so hiding is non-destructive and reversible. The mask is the "
-                    + "layer's size and moves with it. Replaces any existing mask and enables "
-                    + "it. Paint it afterwards with brush_stroke / eraser_stroke and "
-                    + "target: \"mask\".",
+                    + "layer's size and moves, transforms and crops with it. Replaces any "
+                    + "existing mask and enables it. Paint it afterwards with brush_stroke / "
+                    + "eraser_stroke and target: \"mask\". A GROUP takes a mask too: its mask "
+                    + "is CANVAS-sized, it gates everything inside the group per pixel — "
+                    + "including an adjustment layer's reach over the layers BELOW the group, "
+                    + "which is the \"group the adjustment layers and mask the group\" "
+                    + "workflow — and it does not make the group composite as a unit.",
                 [
                     "layer": index,
                     "kind": [
@@ -691,7 +788,9 @@ extension AgentServer {
                     + "the layer's alpha — permanent, pixels lost, and it bakes regardless of "
                     + "whether the mask was enabled — so what the mask hid becomes really "
                     + "erased. With apply: false (the default) the mask is simply discarded "
-                    + "and the layer is revealed in full again, pixels untouched.",
+                    + "and the layer is revealed in full again, pixels untouched. Because "
+                    + "apply rewrites the alpha channel, a transparency lock refuses it; "
+                    + "every other mask operation is gated only by Lock All.",
                 [
                     "layer": index,
                     "apply": [
@@ -715,18 +814,26 @@ extension AgentServer {
                 "set_layer_clipped",
                 "Clips a layer to the one below it (a Photoshop clipping mask) or releases "
                     + "it. A clipped layer only shows where the first UNCLIPPED layer "
-                    + "beneath it has content — that base layer's alpha footprint gates the "
-                    + "whole group, and the group blends as one unit with the base's blend "
-                    + "mode and opacity. Grouping is positional: consecutive clipped layers "
-                    + "above a base all clip to it, and reordering re-derives the groups "
-                    + "with no extra bookkeeping. Hiding the base hides its group. "
+                    + "beneath it AMONG ITS SIBLINGS has content — that base layer's alpha "
+                    + "footprint gates the whole group, and the group blends as one unit "
+                    + "with the base's blend mode and opacity. Grouping is positional and "
+                    + "re-derived WITHIN a level: consecutive clipped layers above a base "
+                    + "all clip to it, a clipped layer that is first in its group has no "
+                    + "base and composites as if unclipped — a GROUP in that position keeps "
+                    + "PASSING THROUGH, since a flag the compositor ignores never forces "
+                    + "isolation — and reordering re-derives the groups with no extra "
+                    + "bookkeeping. Hiding the base hides its group. "
+                    + "CLIPPING A LAYER TO A GROUP makes that group composite as a unit, so "
+                    + "an adjustment layer inside it stops reaching the layers below the "
+                    + "group — a clip base needs its own alpha footprint, which a "
+                    + "pass-through group does not have. "
                     + "Non-destructive and reversible: pixels are untouched either way.",
                 [
                     "layer": index,
                     "clipped": [
                         "type": "boolean",
-                        "description": "true clips the layer to the one below; false "
-                            + "releases it.",
+                        "description": "true clips the layer to the one below it in the "
+                            + "same group; false releases it.",
                     ],
                     "document_id": docID,
                 ], required: ["clipped"]),
@@ -820,7 +927,14 @@ extension AgentServer {
                     + "selection when one exists (which stays active), else reveal-all; "
                     + "brush/eraser strokes on the layer paint that mask. A colour in an "
                     + "adjustment's params is in the DOCUMENT's numbers, not authored sRGB "
-                    + "\u{2014} an adjustment transforms the pixels it sits over. Ops and their "
+                    + "\u{2014} an adjustment transforms the pixels it sits over. INSIDE A "
+                    + "GROUP: in an isolated group (any blend mode but Pass Through, or a "
+                    + "style) it recolors everything below it IN THAT GROUP; in a "
+                    + "pass-through group — the default — it reaches the layers below the "
+                    + "group too, unless some layer is clipped to that group, which isolates "
+                    + "it. A mask or an opacity on a pass-through group does NOT isolate it: "
+                    + "it restricts the adjustment to where the mask is white and scales it "
+                    + "by the opacity. Ops and their "
                     + "params: " + Self.adjustmentOps,
                 [
                     "op": [
@@ -1006,7 +1120,10 @@ extension AgentServer {
                             + "layer that already has one (add_layer_mask). On an "
                             + "ADJUSTMENT layer a layer or colour-plane stroke paints the "
                             + "mask instead, whatever this says — a channel target is "
-                            + "document state and is never rerouted.",
+                            + "document state and is never rerouted. A GROUP has no pixels "
+                            + "of its own, so \"layer\" and the colour planes are refused "
+                            + "on one, but its canvas-sized MASK is paintable exactly like "
+                            + "any other and so is a channel.",
                     ],
                     "document_id": docID,
                 ], required: ["points"]),
@@ -2301,6 +2418,216 @@ extension AgentServer {
                     ],
                     "document_id": docID,
                 ], required: ["width", "height"]),
+            // Layer structure: groups, locks, links, align/distribute and the
+            // workflow commands (AgentServer+Groups.swift). Every one of them
+            // takes an EXPLICIT set and reports the NEW indices back, because
+            // a structural edit renumbers the stack.
+            tool(
+                "group_layers",
+                "Wraps the given layers in a new GROUP and selects it. They must all sit "
+                    + "in the same group already (get_document reports each layer's "
+                    + "parent), and a group cannot be grouped with one of its own "
+                    + "children. The new group is Pass Through at 100 %, so its children "
+                    + "keep compositing against the layers below it exactly as before — "
+                    + "grouping alone never changes the picture. The reply carries the "
+                    + "group's index, its children's NEW indices, and two things the "
+                    + "operation had to change: cleared_clip (the bottom layer's clipping "
+                    + "mask was released, because the layer it clipped to stayed outside) "
+                    + "and reordered (a non-contiguous set is gathered together, so layers "
+                    + "left between them change their relative order).",
+                [
+                    "layers": layerList("The layers to group."),
+                    "name": ["type": "string", "description": "Group name; default \"Group N\"."],
+                    "document_id": docID,
+                ], required: ["layers"]),
+            tool(
+                "ungroup_layers",
+                "Dissolves a group: its children take its place at its level, in order, "
+                    + "and the group entry disappears. A group's own mask, style, opacity, "
+                    + "blend mode and clipped flag cannot be expressed on its children, so "
+                    + "they are DISCARDED — the reply's discarded array names whichever of "
+                    + "them was set, and undo restores the group. The reply also carries "
+                    + "cleared_clip: the bottom layer of the group was clipped to nothing "
+                    + "inside it, so its clipping mask is RELEASED rather than silently "
+                    + "re-pointed at the layer below the group (the mirror of "
+                    + "group_layers' own cleared_clip).",
+                ["index": index, "document_id": docID]),
+            tool(
+                "set_layer_lock",
+                "Sets a layer's locks, replacing whatever it had. transparency freezes the "
+                    + "ALPHA channel — paint lands at full strength but the layer's shape "
+                    + "cannot change and an eraser cannot punch a hole; pixels refuses "
+                    + "every pixel edit (the layer's MASK can still be painted); position "
+                    + "refuses moves, offsets and transforms; all is the three together "
+                    + "and additionally freezes the mask. A transform is a POSITION edit, "
+                    + "never a pixel one: a transparency-locked layer still transforms. "
+                    + "Locks never block delete, duplicate, reorder, group, rename, "
+                    + "opacity, blend mode, visibility or styles.",
+                [
+                    "layer": index,
+                    "locks": [
+                        "type": "array",
+                        "items": [
+                            "type": "string",
+                            "enum": ["transparency", "pixels", "position", "all", "none"],
+                        ],
+                        "description": "The locks to set; [] or [\"none\"] unlocks.",
+                    ],
+                    "document_id": docID,
+                ], required: ["locks"]),
+            tool(
+                "align_layers",
+                "Aligns the given layers' CONTENT bounds — content_x/y/width/height in "
+                    + "get_document, the box of actually opaque pixels, NOT the pixel "
+                    + "buffer rect — to one edge of the selection's union (to: layers, the "
+                    + "default) or of the canvas (to: canvas). A layer with nothing opaque "
+                    + "in it is skipped. Linked layers and a group's children follow the "
+                    + "move; a position lock anywhere in that expanded set refuses the "
+                    + "whole call BY NAME, even on a layer this alignment would not have "
+                    + "moved. A pixel selection is never the reference here.",
+                [
+                    "layers": layerList("The layers to align."),
+                    "edge": [
+                        "type": "string",
+                        "enum": [
+                            "left", "horizontal_center", "right",
+                            "top", "vertical_center", "bottom",
+                        ],
+                    ],
+                    "to": [
+                        "type": "string", "enum": ["layers", "canvas"],
+                        "description": "What to align to; default layers (their union).",
+                    ],
+                    "document_id": docID,
+                ], required: ["layers", "edge"]),
+            tool(
+                "distribute_layers",
+                "Spaces the given layers evenly along one axis: the two outermost keep "
+                    + "their positions and the GAPS between adjacent CONTENT bounds are "
+                    + "made equal (Photoshop's distribute spacing, not distribute centers). "
+                    + "Needs at least three layers with opaque pixels. A gap can come out "
+                    + "negative when the content is wider than the span; that is "
+                    + "arithmetic, not an error. Like align_layers it moves through the "
+                    + "expanded set — linked layers and a group's children — and a "
+                    + "position lock anywhere in it refuses the whole call by name.",
+                [
+                    "layers": layerList("The layers to distribute.", minItems: 3),
+                    "axis": ["type": "string", "enum": ["horizontal", "vertical"]],
+                    "document_id": docID,
+                ], required: ["layers", "axis"]),
+            tool(
+                "link_layers",
+                "Links the given layers: from now on each of them moves and transforms "
+                    + "with the others whatever the call targets. Linking is not a group — "
+                    + "the stack is unchanged and nothing composites differently. "
+                    + "get_document reports the link id as linked.",
+                [
+                    "layers": layerList("The layers to link.", minItems: 2),
+                    "document_id": docID,
+                ], required: ["layers"]),
+            tool(
+                "unlink_layers",
+                "Clears the given layers' link. A link group left with a single member is "
+                    + "cleared too, since a link of one is not a link.",
+                [
+                    "layers": layerList("The layers to unlink."),
+                    "document_id": docID,
+                ], required: ["layers"]),
+            tool(
+                "layer_via_copy",
+                "Copies the current selection out of a layer into a NEW layer directly "
+                    + "above it, at the same canvas position (Photoshop's Layer Via Copy, "
+                    + "\u{2318}J). With no selection the whole layer is copied. This op "
+                    + "RASTERIZES: the new layer keeps neither a text/shape/Live Photo "
+                    + "description nor a layer style, and a group or an adjustment layer is "
+                    + "refused — use duplicate_layer, which keeps all of them. (The app's "
+                    + "\u{2318}J routes those cases, and a multi-selection, to Duplicate "
+                    + "Layer for exactly this reason: this tool takes ONE layer, so a set "
+                    + "would silently lose all but the first.)",
+                [
+                    "layer": index,
+                    "name": ["type": "string"],
+                    "document_id": docID,
+                ]),
+            tool(
+                "layer_via_cut",
+                "Layer Via Copy that also CLEARS the selection from the source layer "
+                    + "(\u{21e7}\u{2318}J). Same rasterizing rules, and the source layer's "
+                    + "own locks apply to the clear half — a pixel-locked source refuses "
+                    + "the whole call. On a text, shape or Live Photo layer the description "
+                    + "is dropped and the reply says so.",
+                [
+                    "layer": index,
+                    "name": ["type": "string"],
+                    "document_id": docID,
+                ]),
+            tool(
+                "merge_visible",
+                "Replaces every layer that CONTRIBUTES to the picture — visible, with every "
+                    + "enclosing group visible — with one flat layer holding the current "
+                    + "composite. Everything that does not contribute SURVIVES untouched, "
+                    + "including a visible layer inside a hidden group. Needs at least two "
+                    + "contributing layers.",
+                ["document_id": docID]),
+            tool(
+                "stamp_visible",
+                "Adds the current composite as a NEW layer and leaves every existing layer "
+                    + "alone (\u{21e7}\u{2325}\u{2318}E). The new layer is canvas-sized and "
+                    + "lands directly above the given one.",
+                [
+                    "above": index,
+                    "name": ["type": "string", "description": "Layer name; default \"Stamp\"."],
+                    "document_id": docID,
+                ]),
+            tool(
+                "arrange_layer",
+                "Moves a layer within its own group: to the front, one step forward, one "
+                    + "step backward, or to the back AMONG ITS SIBLINGS. It never moves a "
+                    + "layer into or out of a group — reorder_layer with a depth does that. "
+                    + "The reply gives the layer's new index.",
+                [
+                    "layer": index,
+                    "to": [
+                        "type": "string", "enum": ["front", "forward", "backward", "back"],
+                    ],
+                    "document_id": docID,
+                ], required: ["to"]),
+            tool(
+                "auto_select_layer",
+                "Which layer a Move-tool click at (x, y) would activate: the topmost one "
+                    + "whose own coverage there is at least half, skipping hidden layers "
+                    + "and adjustment layers. With group: true the answer is that layer's "
+                    + "top-level GROUP instead. Answers layer: null when nothing opaque is "
+                    + "under the point — a miss, not an error. Activates the layer it found "
+                    + "unless activate is false.",
+                [
+                    "x": ["type": "number"], "y": ["type": "number"],
+                    "group": [
+                        "type": "boolean",
+                        "description": "Answer the top-level group instead of the layer.",
+                    ],
+                    "activate": [
+                        "type": "boolean",
+                        "description": "Make the found layer active (default true).",
+                    ],
+                    "document_id": docID,
+                ], required: ["x", "y"]),
+            tool(
+                "set_selected_layers",
+                "Selects several layers at once — what the app's \u{21e7}/\u{2318}-click "
+                    + "multi-selection does. It only retargets the app's own set-aware "
+                    + "commands and adds no undo step; the tools here always take their "
+                    + "own explicit layers array, so a script never needs this except to "
+                    + "leave the app in a particular state.",
+                [
+                    "layers": layerList("The layers to select."),
+                    "primary": [
+                        "type": "integer",
+                        "description": "Which of them becomes the active layer; default "
+                            + "the topmost.",
+                    ],
+                    "document_id": docID,
+                ], required: ["layers"]),
             tool("undo", "Undoes the most recent edit.", ["document_id": docID]),
             tool("redo", "Redoes the most recently undone edit.", ["document_id": docID]),
             tool(

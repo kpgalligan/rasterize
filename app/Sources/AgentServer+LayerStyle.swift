@@ -11,10 +11,17 @@ extension AgentServer {
     /// clears, and so does an identity style (the core's rule). The core
     /// validates and canonicalizes; a refused style comes back in-band with
     /// the core's message, which names the offending key.
+    ///
+    /// A GROUP may carry a style, so this takes `structuralLayerIndex` rather
+    /// than the pixel-only helper: the shape the effects hang off is the
+    /// group's own rendered projection, which the compositor hands to the
+    /// synthetic layer it composites the group as (`Layer::renders_style`).
+    /// A styled group also composites as a UNIT — the style is one of the
+    /// things that makes a Pass Through group isolate.
     func setLayerStyle(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
-        let index = try paintLayerIndex(a, document)
+        let index = try structuralLayerIndex(a, document)
         // Mirrors the UI's validation: the compositor ignores a style on an
         // adjustment layer (it has no shape), so storing one would only
         // mislead.

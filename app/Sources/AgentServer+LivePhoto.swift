@@ -33,12 +33,16 @@ extension AgentServer {
             throw ToolError(message: "Layer \(below) is out of range (0..\(doc.layerCount - 1))")
         }
         let name = stringArg(a, "name") ?? LivePhoto.layerName(for: source)
+        // Where the new layer will land, from the stack BEFORE the edit:
+        // above a GROUP a new entry goes above the whole subtree, so
+        // `below + 1` would name the group's topmost CHILD.
+        let landing = doc.insertionIndex(above: below)
         try performGroupedEdit(document, "Place Live Photo") {
             $0.addingLivePhotoLayer(above: below, payload, name: name)
         }
         // The new layer becomes the active one, as every other adding tool
         // leaves it.
-        let index = min(below + 1, (document.doc?.layerCount ?? 1) - 1)
+        let index = min(landing, (document.doc?.layerCount ?? 1) - 1)
         document.activeLayerIndex = index
         // Reported from the committed document, so the reply's transform
         // and origin are what get_document will say — the identity at the
@@ -95,6 +99,14 @@ extension AgentServer {
         // description back from the committed document rather than echoing
         // `updated`, so a transformed layer reports the transform that
         // actually landed.
+        // A new frame REWRITES the layer's pixels, so it answers to the same
+        // locks every other pixel tool does; without it a lock refusal was
+        // reported as the generic "check the parameters".
+        try rejectLockedEdit(document, index, RZ_EDIT_PIXELS)
+        // No `rejectLockedRerender` here, unlike text and shape: a new FRAME
+        // renders through the same map at the same size, so a TRANSPARENCY
+        // lock never refuses one, and attributing an unrelated refusal (a
+        // missing video file) to it would name the wrong cause.
         try performGroupedEdit(document, "Select Live Photo Frame") {
             $0.settingLivePhotoFrame(index, seconds: seconds)
         }

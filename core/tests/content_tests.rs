@@ -258,3 +258,76 @@ fn set_layer_content_pairs_with_transform_layer_for_a_re_render() {
     unsafe { rz_doc_free(rerendered) };
     unsafe { rz_doc_free(turned) };
 }
+
+/// Grouping is a pure RE-PARENT, so a described layer must come out of it with
+/// its description byte for byte — the host's whole re-render contract rests on
+/// the meta describing the CURRENT pixels, and a group that quietly rasterized
+/// or re-rendered its children would break it silently. And a GROUP is never a
+/// described layer, so the re-render primitive refuses one outright rather than
+/// writing pixels a group does not have.
+#[test]
+fn grouping_a_described_layer_keeps_its_description_and_a_group_has_none() {
+    let dir = TempDir::new().unwrap();
+    let doc = masked_fixture(&dir, "grouped", 4);
+    let before_pixels = layer_pixels(doc, 1);
+    let before_mask = ffi_mask_bytes(doc, 1);
+    assert_eq!(ffi_meta(doc, 1).as_deref(), Some(TEXT_META));
+
+    let set = [1usize];
+    let cname = std::ffi::CString::new("G").unwrap();
+    let mut group_idx = usize::MAX;
+    let grouped = apply(doc, |d| unsafe {
+        rasterize_core::ffi_group::rz_doc_group_layers(
+            d,
+            set.as_ptr(),
+            1,
+            cname.as_ptr(),
+            &mut group_idx,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0,
+        )
+    });
+    assert_eq!(group_idx, 2, "the group closes its child's run");
+    assert_eq!(
+        ffi_meta(grouped, 1).as_deref(),
+        Some(TEXT_META),
+        "the description survives the re-parent unchanged"
+    );
+    assert_eq!(layer_pixels(grouped, 1), before_pixels, "so do the pixels");
+    assert_eq!(ffi_mask_bytes(grouped, 1), before_mask, "and the mask");
+    assert_eq!(
+        ffi_meta(grouped, group_idx),
+        None,
+        "the group itself carries no description"
+    );
+    assert!(
+        !unsafe { rz_doc_layer_is_adjustment(grouped, group_idx) },
+        "and the core never reads a group's metadata as an adjustment"
+    );
+
+    // The re-render primitive refuses the group: it has no pixels to replace.
+    let green = solid(3, 2, GREEN).into_raw();
+    assert!(
+        unsafe {
+            rz_doc_set_layer_content(grouped, group_idx, green.as_ptr(), 3, 2, 0, 0, ptr::null())
+        }
+        .is_null(),
+        "set_layer_content refuses a group index"
+    );
+    // ...and ungrouping gives the described layer back, still described.
+    let dissolved = apply(grouped, |d| unsafe {
+        rasterize_core::ffi_group::rz_doc_ungroup_layer(
+            d,
+            group_idx,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        )
+    });
+    assert_eq!(ffi_meta(dissolved, 1).as_deref(), Some(TEXT_META));
+    assert_eq!(layer_pixels(dissolved, 1), before_pixels);
+    unsafe { rz_doc_free(dissolved) };
+}

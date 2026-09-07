@@ -8,6 +8,7 @@
 //! layer alpha is never touched.
 
 use crate::doc::RzDocument;
+use crate::doc_lock::EditKind;
 
 /// One channel of dodge/burn in unit range: maps `v` in [0, 1] to its
 /// fully-exposed value for `range` (0 shadows, 1 midtones, 2 highlights).
@@ -63,7 +64,9 @@ impl RzDocument {
     /// size; `overlay` shorter than `w*h*4`; non-finite `exposure`;
     /// `range > 2`; a layer extent that misses the canvas; or no pixel
     /// actually changing (exposure 0, zero coverage, dodging pure white) —
-    /// an identical copy would register a phantom undo step in the app.
+    /// an identical copy would register a phantom undo step in the app — or a
+    /// GROUP index, which has no pixels of its own. A PIXELS edit under
+    /// `doc_lock`.
     // The parameter list deliberately mirrors `rz_doc_dodge_burn_layer`'s C
     // signature one-for-one; bundling them into a struct would only move
     // the count somewhere else.
@@ -78,7 +81,25 @@ impl RzDocument {
         range: u8,
         burn: bool,
     ) -> Option<Self> {
-        let layer = self.layers.get(idx)?;
+        self.under_locks(idx, EditKind::Pixels, |doc| {
+            doc.dodge_burn_layer_unlocked(idx, overlay, w, h, exposure, range, burn)
+        })
+    }
+
+    /// The body of [`Self::dodge_burn_layer`], outside the lock gate. Split
+    /// out only so the gate is one line; that method is its only caller.
+    #[allow(clippy::too_many_arguments)]
+    fn dodge_burn_layer_unlocked(
+        &self,
+        idx: usize,
+        overlay: &[u8],
+        w: u32,
+        h: u32,
+        exposure: f32,
+        range: u8,
+        burn: bool,
+    ) -> Option<Self> {
+        let layer = self.raster_layer(idx)?;
         if w != self.width || h != self.height || !exposure.is_finite() || range > 2 {
             return None;
         }

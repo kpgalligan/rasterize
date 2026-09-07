@@ -26,7 +26,12 @@ extension EditorViewController {
         // A canvas drag is outside menu validation's reach, so the adjustment
         // layer is refused here with the alert, exactly as a fill click is.
         guard !refuseAdjustmentPixelEdit() else { return }
+        // A GROUP has no pixels of its own, and a lock refuses the correction
+        // outright — both said HERE, before `applyRasterizingEdit` asks the
+        // user to give up a described layer for a refused edit.
+        guard !refuseGroupPixelEdit() else { return }
         let idx = document.activeLayerIndex
+        guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_PIXELS) else { return }
         let options = ToolOptionsStore.shared.redEye
         // The bar's two dials are percentages; the core takes fractions.
         let pupilSize = min(max(options.pupilSize, 1), 100) / 100
@@ -63,6 +68,9 @@ extension EditorViewController {
         // arrive, and both refusals are cheap.
         guard !refuseChannelTargetEdit() else { return }
         guard !refuseAdjustmentPixelEdit() else { return }
+        guard !refuseGroupPixelEdit() else { return }
+        guard !refuseLockedEdit(layer: document.activeLayerIndex, kind: RZ_EDIT_PIXELS)
+        else { return }
         let eyes: [RedEye.Eye]
         do {
             eyes = try doc.redEyes()

@@ -216,7 +216,10 @@ fn every_mode_matches_flattening_an_equivalent_layer() {
             let layered = apply(layered, |d| unsafe {
                 rz_doc_with_layer_blend_mode(d, 1, mode)
             });
-            let layered = apply(layered, |d| unsafe {
+            // alpha 1.0 is the opacity the fresh layer already carries, and
+            // a setter handed the stored value answers NULL (the core's
+            // purity rule).
+            let layered = apply_or_keep(layered, |d| unsafe {
                 rz_doc_with_layer_opacity(d, 1, alpha)
             });
 

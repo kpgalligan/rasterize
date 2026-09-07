@@ -30,6 +30,14 @@ extension EditorViewController {
         // and Cut already follow).
         if refuseAdjustmentPixelEdit() { return }
         if refusePlaneTargetEdit() { return }
+        // A GROUP has no pixels to fill, and a lock refuses the fill outright:
+        // said before the sheet opens, so the user is not asked to preview and
+        // then rasterize a described layer for an edit the core will refuse.
+        if refuseGroupPixelEdit() { return }
+        if let document = document,
+           refuseLockedEdit(layer: document.activeLayerIndex, kind: RZ_EDIT_PIXELS) {
+            return
+        }
         presentAsSheet(ContentAwareFillSheetController(editor: self))
     }
 
@@ -161,9 +169,19 @@ extension RasterDocument {
     ///
     /// nil for an index that is out of range, so a deleted top layer refuses
     /// on this test as well as on the range check.
+    ///
+    /// It carries the entry's DEPTH and its parent chain too: re-parenting a
+    /// layer into a group behind the sheet can leave the stack's height, the
+    /// layer's box and its name all identical while what it composites
+    /// against — and therefore what the preview showed — has changed
+    /// completely.
     func layerFingerprint(_ index: Int) -> String? {
         guard let info = layerInfo(index) else { return nil }
+        let tree = layerTree
+        let chain = ([index] + tree.ancestors(of: index))
+            .map { "\($0):\(tree.depth(of: $0))" }
+            .joined(separator: ">")
         return "\(layerCount)/\(info.offsetX),\(info.offsetY),\(info.width)x\(info.height)/"
-            + info.name
+            + "\(chain)/" + info.name
     }
 }

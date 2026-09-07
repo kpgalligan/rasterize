@@ -280,6 +280,10 @@ extension AgentServer {
         let anchor = DescribedLayer.placementAnchor(CGPoint(x: x, y: y), transform: transform)
         let below = document.activeLayerIndex
         let name = TextLayer.layerName(for: text)
+        // Where the new layer will land, from the stack BEFORE the edit:
+        // above a GROUP a new entry goes above the whole subtree, so
+        // `below + 1` would name the group's topmost CHILD.
+        let landing = document.doc?.insertionIndex(above: below) ?? below + 1
         do {
             try performGroupedEdit(document, "Add Text Layer") {
                 $0.addingDescribedLayer(above: below, .text(payload), anchor: anchor, name: name)
@@ -292,7 +296,7 @@ extension AgentServer {
                     + "numbers (a huge scale would pass the core's 100 megapixel ceiling for "
                     + "one layer).")
         }
-        let index = min(below + 1, (document.doc?.layerCount ?? 1) - 1)
+        let index = min(landing, (document.doc?.layerCount ?? 1) - 1)
         document.activeLayerIndex = index
         // The edit's own notification went out before the active layer
         // moved, so the panel and status bar need this one to catch up.
@@ -357,6 +361,11 @@ extension AgentServer {
         // The name follows the text only while it still IS the text: a name
         // somebody typed themselves survives the re-render.
         let nameFollowsText = info.name == TextLayer.layerName(for: current.string)
+        // Re-rendering a described layer REWRITES its pixels, so it answers to
+        // the same locks every other pixel tool does (performPixelEdit runs
+        // this one line for them). Without it the core's refusal surfaced as
+        // the typography error below and sent a model retrying sizes forever.
+        try rejectLockedEdit(document, index, RZ_EDIT_PIXELS)
         do {
             try performGroupedEdit(document, "Edit Text Layer") { doc in
                 guard let described = doc.rerenderingDescribedLayer(
@@ -366,6 +375,10 @@ extension AgentServer {
                 return described.withLayerName(index, name) ?? described
             }
         } catch is ToolError {
+            // A transparency lock refuses a re-render that resizes the raster,
+            // and it is not knowable up front — name it here rather than
+            // sending the model into the typography.
+            try rejectLockedRerender(document, index)
             throw ToolError(
                 message: "Could not lay the text out — check size, wrap_width, tracking, "
                     + "leading and transform.")

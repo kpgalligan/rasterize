@@ -170,6 +170,11 @@ extension EditorViewController {
             // The name follows the text only while it still IS the text: a
             // name the user typed themselves survives the re-edit.
             let nameFollowsText = info.name == TextLayer.layerName(for: old.string)
+            // A re-render REWRITES the layer's pixels, so it answers to the
+            // same locks every other pixel path does. Without this the core
+            // refused and `applyEdit` beeped with nothing said.
+            guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_PIXELS) else { return }
+            let beforeEdit = document.doc
             document.applyEdit("Edit Text Layer") { doc in
                 guard let described = doc.rerenderingDescribedLayer(
                     idx, .text(payload), anchor: anchor)
@@ -177,6 +182,10 @@ extension EditorViewController {
                 guard nameFollowsText else { return described }
                 return described.withLayerName(idx, name) ?? described
             }
+            // A TRANSPARENCY lock refuses a re-layout that resizes the raster,
+            // and only then — so it is named here, after the fact, instead of
+            // leaving `applyEdit`'s bare beep.
+            if document.doc === beforeEdit { refuseLockedRerender(layer: idx) }
             // The active layer is unchanged, so the change notification alone
             // refreshes the panel, the status bar and the layer boundary.
             return
@@ -185,12 +194,16 @@ extension EditorViewController {
         let anchor = DescribedLayer.placementAnchor(origin, transform: .identity)
         let below = document.activeLayerIndex
         let before = document.doc
+        // Where the new entry lands is the CORE's answer: above a GROUP it
+        // goes above the whole subtree, so `below + 1` would select the
+        // wrong row (§4.5's one definition).
+        let landing = before?.insertionIndex(above: below) ?? below + 1
         document.applyEdit("Add Text Layer") {
             $0.addingDescribedLayer(above: below, .text(payload), anchor: anchor, name: name)
         }
         guard document.doc !== before else { return }
         // The active layer moves to the new text layer; any mask paint target
         // goes with it.
-        setActiveLayer(min(below + 1, document.doc.layerCount - 1))
+        setActiveLayer(min(landing, document.doc.layerCount - 1))
     }
 }

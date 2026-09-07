@@ -103,11 +103,22 @@ enum HistogramSource: Equatable {
             // Nothing is below the bottom of the stack; the caller draws no
             // plot rather than an empty one.
             guard below >= 1, below <= doc.layerCount else { return nil }
+            let tree = doc.layerTree
             var scratch = doc
             for idx in below..<doc.layerCount {
-                // nil is the core's "nothing changed" (the layer is already
-                // hidden), which leaves the handle we have.
-                if let next = scratch.withLayerVisible(idx, false) { scratch = next }
+                // An ENCLOSING group — one whose subtree reaches BELOW the
+                // insertion point — is skipped, because hiding a group hides
+                // its whole subtree and would take the layers under the
+                // boundary down with it: an adjustment layer inside a group
+                // would then plot a backdrop missing the very layers it acts
+                // on. Left visible, the group renders exactly the children
+                // this sweep left alone, at its own opacity and mask, which
+                // is the backdrop the adjustment composites over. The same
+                // exception MultiLayerEdit.transformStackComposites makes for
+                // its `below` plate, and it covers both callers: the new
+                // layer's insertion point and an existing one's own index.
+                guard tree.subtree(of: idx).lowerBound >= below else { continue }
+                scratch = scratch.hidingLayer(idx)
             }
             return scratch.flattened()
         }

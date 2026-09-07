@@ -56,6 +56,10 @@ extension EditorViewController {
             }
             return
         }
+        // Choosing a frame REWRITES the layer's pixels, so it answers to the
+        // same locks every other pixel path does — said here, before the
+        // picker opens, rather than as a beep after a frame is chosen.
+        guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_PIXELS) else { return }
         presentAsSheet(
             LivePhotoFrameSheetController(
                 document: document, canvas: canvas, layer: idx, payload: payload))
@@ -114,10 +118,14 @@ extension EditorViewController {
         }
         let below = document.activeLayerIndex
         let before = doc
+        // Where the new entry lands is the CORE's answer: above a GROUP it
+        // goes above the whole subtree, so `below + 1` would select the
+        // wrong row (§4.5's one definition).
+        let landing = doc.insertionIndex(above: below)
         document.applyEdit("Place Live Photo") {
             $0.addingLivePhotoLayer(above: below, payload, name: LivePhoto.layerName(for: source))
         }
         guard document.doc !== before, let updated = document.doc else { return }
-        setActiveLayer(min(below + 1, updated.layerCount - 1))
+        setActiveLayer(min(landing, updated.layerCount - 1))
     }
 }

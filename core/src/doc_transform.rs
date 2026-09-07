@@ -26,6 +26,7 @@ use image::imageops::FilterType;
 use image::{GrayImage, RgbaImage};
 
 use crate::doc::{Geometry, Layer, RzDocument, MAX_PIXELS};
+use crate::doc_lock::EditKind;
 use crate::style::scaled_style;
 
 /// Smallest determinant magnitude that still counts as invertible. Anything
@@ -670,7 +671,24 @@ impl RzDocument {
     /// not one of the four `RzResizeFilter` values, or the destination extent
     /// is empty, outside the i32 offset range, or over [`MAX_PIXELS`].
     pub fn transform_layer(&self, idx: usize, m: Affine, filter: FilterType) -> Option<Self> {
-        let layer = self.layers.get(idx)?;
+        self.under_locks(idx, EditKind::Position, |doc| {
+            doc.transform_layer_unlocked(idx, m, filter)
+        })
+    }
+
+    /// The body of [`Self::transform_layer`], outside the lock gate.
+    ///
+    /// Two callers, and both decide the lock policy for a whole SET before
+    /// they get here: [`Self::transform_layers`] asks `movable_set`
+    /// all-or-nothing first, and `straighten_layers` is exempt by design (a
+    /// whole-document geometry op, like crop and resize). See `doc_align`.
+    pub(crate) fn transform_layer_unlocked(
+        &self,
+        idx: usize,
+        m: Affine,
+        filter: FilterType,
+    ) -> Option<Self> {
+        let layer = self.raster_layer(idx)?;
         if !m.is_finite() {
             return None;
         }

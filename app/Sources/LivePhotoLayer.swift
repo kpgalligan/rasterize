@@ -574,8 +574,11 @@ extension RasterDocument {
               let image = RasterImage.from(
                 rgba: raster.pixels, width: raster.width, height: raster.height),
               let doc = RasterDocument.from(image: image),
-              let named = doc.withLayerName(0, name),
-              let described = named.withLivePhotoPayload(0, payload)
+              // A rename to the name the fresh document's layer already
+              // carries answers nil (the core's no-op rule), which here means
+              // "already correct" — the same shape as the profile below.
+              let described = (doc.withLayerName(0, name) ?? doc)
+                .withLivePhotoPayload(0, payload)
         else { return nil }
         // assigningProfile refuses a profile the document already carries,
         // which is exactly the sRGB working space against a fresh

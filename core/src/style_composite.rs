@@ -677,16 +677,29 @@ fn clamp_alpha_to_shape(
 pub(crate) fn merge_extent(layer: &Layer, env: CompositeEnv<'_>) -> (i64, i64, i64, i64) {
     let (lw, lh) = layer.pixels.dimensions();
     let (x, y) = (i64::from(layer.offset.0), i64::from(layer.offset.1));
-    let Some(style) = layer.renders_style() else {
-        return (x, y, x + i64::from(lw), y + i64::from(lh));
-    };
+    let rect = (x, y, x + i64::from(lw), y + i64::from(lh));
+    match layer.renders_style() {
+        Some(style) => style_grown(rect, style, env),
+        None => rect,
+    }
+}
+
+/// `rect` grown by everything a rendered `style` draws OUTSIDE the thing it
+/// decorates: the pad on all four sides, plus the drop shadow's shifted rect
+/// clipped to the canvas.
+///
+/// Split out of [`merge_extent`] because a GROUP needs exactly the same
+/// arithmetic and has no `Layer` to hand it: `doc_group::extent_of_level`
+/// grows a nested group's subtree rect with this, so an enclosing isolated
+/// group sizes its buffer to hold the inner group's effects instead of
+/// clipping them away. One implementation, two callers.
+pub(crate) fn style_grown(
+    rect: (i64, i64, i64, i64),
+    style: &LayerStyle,
+    env: CompositeEnv<'_>,
+) -> (i64, i64, i64, i64) {
     let pad = i64::from(style.pad());
-    let (x0, y0, x1, y1) = (
-        x - pad,
-        y - pad,
-        x + i64::from(lw) + pad,
-        y + i64::from(lh) + pad,
-    );
+    let (x0, y0, x1, y1) = (rect.0 - pad, rect.1 - pad, rect.2 + pad, rect.3 + pad);
     let Some((dx, dy)) = style.shadow_shift(env.light) else {
         return (x0, y0, x1, y1);
     };

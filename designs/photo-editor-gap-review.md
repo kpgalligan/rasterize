@@ -1,6 +1,6 @@
 # From Compositor to Photo Editor: a Gap Review
 
-**Status: in progress (updated 5 September 2026) — phases 1 to 6 of the order in section 4 have shipped; section 0 records what landed, what was decided along the way, and where to restart.** A
+**Status: in progress (updated 7 September 2026) — phases 1 to 6 of the order in section 4 have shipped, and so has the first half of phase 7 (§3F rows 1–6); section 0 records what landed, what was decided along the way, and where to restart.** A
 fresh-eyes review of the shipped feature set against what a working
 photographer actually reaches for in Photoshop, followed by a large, sized
 catalog of what to build. Companion to `next-features.md` (whose open
@@ -702,16 +702,191 @@ tools. Decisions worth knowing:
   Darken, Direction), the rail's new fifth slot and `p` cycling its four
   tools, and Filters > Remove Red Eye on a real photograph of a face.
 
+### Phase 7a — layer groups, locks, multi-select, link/align/distribute, the workflow commands and Move auto-select (§3F rows 1–6): shipped on `refactor`
+
+The first six rows of §3F. Guides, rulers, grid and snapping (§3H) are the
+NEXT phase — no code, no stubs, no menu items, no enum cases for them here.
+The later §3F breadth (colour labels, filter-by-kind and search, linked image
+layers, layer comps, the History panel) is untouched. MCP: 81 → **95** tools;
+core tests 618 → **703**; `.rz` `RZDC_VERSION` 6 → **7**; 28 new `rz_*`
+exports and **no changed signature**. Decisions worth knowing:
+
+- **The model decision: the stack stays a FLAT `Vec<Layer>`, with structure
+  marked on the entry** — a `kind` (raster or group) and a `depth`, a group's
+  children being the run of entries immediately BELOW it at greater depth,
+  the group entry itself closing its own subtree. Both options were counted
+  before choosing, not guessed. A tree (`children: Vec<Layer>`) would have
+  changed **57 header signatures, 50 `RasterCore.swift` wrappers, 34 MCP
+  catalog entries, 118 Swift reads of `activeLayerIndex`** and the meaning of
+  every index in every existing `.rz` file, MCP script and undo snapshot;
+  flat-plus-depth changed **0 FFI signatures** and needed real recursion at
+  **10 crate sites**, with a group guard at 40 more. It is also exactly how
+  PSD stores a nested stack, so import maps across without reordering. What
+  it costs is written down: the invariant is a RELATION between records, not
+  a per-record value, so it lives in one function (`doc_group::
+  validate_structure`) and is a **hard runtime check** — at the two trust
+  boundaries (`rzdc::parse_native`, `psd::open_psd`, which refuse with a
+  message) and on **every structural op's own RESULT**, which returns `None`.
+  Deliberately not a `debug_assert!`: `make test` is `cargo test --release`
+  and `[profile.release]` sets only `lto = true`, so an assertion would be
+  compiled out of every test the project runs and out of the shipped
+  staticlib. It has to be a real check because `units` cannot report a
+  malformed input — a bad `(to, depth)` pair makes a child DISAPPEAR from
+  every projection, export and save with no error anywhere. Silent data loss,
+  not a crash.
+- **A group RENDERS TO A LAYER, and that is what keeps this small.** An
+  isolated group composites into a private f32 buffer over its own extent, is
+  quantized by the document's own `quantize`, and is wrapped in a synthetic
+  `Layer` carrying the group's name, opacity, blend mode, mask (cropped to
+  the extent), style and clipped flag — then handed to the existing,
+  unchanged `composite_layer_into` / `composite_clip_group_into` /
+  `composite_styled_into`. So a group's style, mask, blend mode, opacity,
+  Blend If and Dissolve dither mean exactly what they mean on a layer,
+  because they ARE what they mean on a layer: `style_composite.rs` was not
+  touched at all. The price is **one 8-bit quantization at each isolated
+  group boundary** — what "render the group and composite it once" means in
+  an 8-bit editor — with f32 chaining still preserved inside a group and
+  across the whole document when its groups are Pass Through.
+- **Pass Through is the CHEAP case, isolation the expensive one** — the
+  opposite of the naive intuition. A pass-through group allocates nothing;
+  its children composite straight onto the enclosing accumulator, which is
+  the only way an adjustment layer inside it reaches the layers below the
+  group. `is_isolated` is the whole rule: any blend mode but Pass Through, a
+  style, `clipped`, or a **visible** clipped member.
+- **A pass-through group's own MASK and OPACITY gate it; they do not isolate
+  it.** They are per-pixel weights on what the children contributed, so
+  `composite_gated_pass` composites the children onto a COPY of the real
+  backdrop and lerps the result back by `mask/255 × opacity` — exact at both
+  ends, so a reveal-all mask at opacity 1 is byte-identical to no mask. They
+  were originally isolation triggers, and that was wrong in the worst
+  direction: an adjustment layer inside a masked group then composited
+  against a fresh TRANSPARENT buffer, where the documented `bg[3] <= 0.0`
+  skip makes it a no-op, so the adjustment DISAPPEARED instead of being
+  restricted — an all-white mask, a semantic no-op, switched the group off.
+  "Group the adjustment layers and mask the group" is the standard workflow
+  this makes work. The cost is one accumulator-sized f32 copy, charged
+  against the same budget, and only a group that carries a mask or a sub-1
+  opacity pays it.
+- **The published clipping cost.** `clipped` and a visible clipped MEMBER
+  force isolation because both need the group's own alpha footprint. The
+  consequence is real and is stated rather than hidden: with
+  `[Photo, G(PassThrough){Curves}, Texture(clipped)]`, clipping `Texture` —
+  an unrelated sibling — isolates `G`, `Curves` then adjusts a transparent
+  private buffer (the documented `bg[3] <= 0.0` skip) and `Photo` is left
+  untouched. It is published in `doc_group`'s module doc, in the
+  `set_layer_clipped` and `add_adjustment_layer` catalog entries and in the
+  layers panel's Create Clipping Mask path, and pinned by
+  `group_tests::clipping_over_a_pass_through_group_isolates_it`. The
+  alternative — keeping pass-through when the group is only a clip base —
+  is a SECOND implementation of clipping, and is the named follow-up.
+- **A depth cap is not a memory bound, so there are two limits.**
+  `MAX_GROUP_DEPTH` (10, Photoshop's own practical ceiling) bounds the
+  compositor's RECURSION. It does not bound its ALLOCATION: a ~10 KB `.rz`
+  holding one 10000×10000 layer inside ten groups each at opacity 0.9 demands
+  roughly 20–56 GB, and Rust ABORTS on allocation failure so `catch_unwind`
+  cannot contain it. `MAX_GROUP_BUFFER_PIXELS` (4 × `MAX_PIXELS`) is charged
+  in `rendered_group` BEFORE every `vec!`; a refused level contributes
+  nothing, exactly like an empty group, with no panic and no partial
+  allocation. `parse_native` runs a cheap static pre-check as an earlier,
+  friendlier refusal, deliberately conservative in the safe direction — it is
+  not the guarantee, the runtime budget is.
+- **Byte-identity on a group-free document is proved, not asserted.** With
+  every depth 0 and every kind Raster the level walk performs exactly the
+  statements the old inline loop performed, in the same order. Beyond the
+  existing suite, `group_tests` pins it five ways, the load-bearing one being
+  that wrapping the WHOLE stack — clipping, a styled layer, a masked layer,
+  an adjustment layer and five blend modes — in one pass-through group
+  renders a byte-identical PNG, and the per-entry variant takes whole CLIP
+  RUNS as the atom (clipping is re-derived WITHIN a level, so wrapping a
+  clipped entry away from its base makes it baseless and would legitimately
+  change the picture). One rule inside the walk is subtle enough to name: an
+  invisible clipped MEMBER is preserved positionally, because
+  `composite_clip_group_into`'s `group.is_empty()` early-out is what chooses
+  between the private-buffer path and the direct one, and an adjustment clip
+  base under only-invisible clipped layers would otherwise flip from
+  contributing nothing to recolouring the whole backdrop — a regression on a
+  document with no groups in it.
+- **Group and ungroup are symmetric about the clip they can silently
+  re-bind.** A clipped entry at the BOTTOM of its level is baseless and
+  composites as if unclipped, so moving one across a group boundary changes
+  what it clips to. `group_layers` clears the flag on the bottom-most grouped
+  entry and reports it (`cleared_clip`); `ungroup_layer` does the same in the
+  other direction, releasing the flag when the entry would GAIN a base out at
+  the parent level, and leaving it alone when it stays baseless. Both report
+  in the MCP reply and in the app's alert, so this class of picture change
+  cannot happen without something saying so.
+- **A group's MASK travels with the group.** A move (`move_layers`,
+  `with_layer_offset`, the arrow nudge, align and distribute) slides the
+  canvas-sized mask by the same delta that shifts the raster descendants, and
+  a transform warps it through the same affine — one rule, so dragging a
+  masked group and typing the same translation into ⌘T give the same picture.
+- **Locks: transparency freezes the ALPHA CHANNEL, and a transform is a
+  POSITION edit.** Freezing alpha is Photoshop's actual behaviour and is
+  stronger and simpler than the roadmap's "multiply stroke coverage by the
+  existing alpha": at alpha 128 a stroke takes the new colour fully and keeps
+  its softness, and an eraser cannot punch a hole. Colour is restored with
+  the alpha in both directions (pixels already at zero alpha, and pixels the
+  op drove to zero), which is what lets the purity latch answer `None` to an
+  edit that only tried to remove coverage instead of minting a phantom undo
+  step. Making a transform Position-only was forced by that choice: a
+  transform derives its own extent and so almost always changes size and
+  offset, so "Pixels + Position" would have made a transparency-locked layer
+  UNtransformable — a regression against the very reference the frozen-alpha
+  rule cites. Lock All additionally freezes the mask; locks never block
+  delete, duplicate, reorder, group/ungroup, rename, opacity, blend mode,
+  visibility or style. `under_locks` is the ONE enforcement point and every
+  refusal names the lock that stopped it, in the app and over MCP alike.
+- **⌘J routes rather than rasterizes.** Layer Via Copy is a rasterizing op —
+  it keeps neither a description nor a style — so on a group, an adjustment
+  layer, a described (text / shape / Live Photo) layer, a MULTI-selection or
+  no selection at all, ⌘J performs Duplicate Layer instead. A re-editable
+  layer is never silently rasterized by the shortcut, and the agent's
+  `layer_via_copy` says so in its own description so a model can choose
+  between the two tools.
+- **PSD groups import; three PSD properties still do not.** Layer GROUPS
+  arrive with their structure and names, rebuilt from `parent_id()` and the
+  flat layer indices, and clipping flags now import too (the crate's
+  `is_clipping_mask()` is INVERTED — it answers true for a clipping BASE).
+  A group's own opacity, blend mode and visibility are NOT read, because
+  `psd` 0.3.5 builds its `PsdGroup` from the hidden bounding-section divider
+  it meets when it CLOSES the folder rather than from the folder record that
+  carries them, and the real blend key lives in an `lsct` sub-key it reads
+  into a discarded binding; `lspf` (locks) goes the same way through the
+  block walk's catch-all. So every imported group arrives at 100 %, Pass
+  Through and visible, and locks do not import — stated in the README's known
+  limits rather than left to be discovered. A PSD nested deeper than ten has
+  its over-deep GROUPS dissolved, keeping every layer's pixels and name.
+- **`get_document` stays flat and index-addressed; structure is additive
+  keys.** `kind`, `parent`, `depth`, `children`, `open`, `locks`, `linked`
+  and `content_*` were added the way `text`, `shape` and `style` were added —
+  every existing key survives on every existing row, no tool's schema loses
+  a key, and every range message is still `(0..layer_count-1)`. `content_*`
+  is on EVERY row because `align_layers` and `distribute_layers` act on
+  CONTENT bounds while a raster row's `offset_*`/`width`/`height` stay its
+  PIXEL RECT — a different rectangle for any pasted, text or shape layer, and
+  the one trap an agent computing an alignment by hand would fall into. Every
+  set-taking tool takes an EXPLICIT array: none falls back to the panel
+  selection, which an agent cannot see.
+- Not exercised on screen (worth one manual pass): the panel's ⇧/⌘-click
+  multi-select and its row menu over a set; the disclosure triangle,
+  including that toggling it and then closing the document PROMPTS TO SAVE;
+  dragging a multi-selection into and out of a group and onto a collapsed
+  one; the lock and link badge glyphs; the Move tool's Auto-Select with Layer
+  and with Group; Free Transform over two layers and over a layer INSIDE a
+  group; ⌘J on a text, shape, adjustment and group row; Distribute with
+  exactly three layers selected; and the two Distribute SF Symbols, which
+  fall back to "⇹"/"⇳" on an OS that lacks them.
+
 ### Remaining order
 
-Section 4's steps 7–8 in order — groups, lock, multi-select, guides and
-snapping is next, then RAW develop and Actions — then the breadth of
-section 3. The rest of §3C (the Smudge / Blur / Sharpen / Sponge brushes,
-frequency separation and Liquify) is a phase of its own whenever it is
-reached. Kevin asked on 3 September
-for this to run through the whole list without stopping between phases:
-finish, commit, start the next.
-
+Section 4's step 7 SECOND half next — guides, rulers, grid and snapping
+(§3H) — then step 8's RAW develop and Actions, then the breadth of
+section 3. The rest of §3F (layer colour labels, filter-by-kind and search,
+linked image layers, layer comps, the History panel) and the rest of §3C
+(the Smudge / Blur / Sharpen / Sponge brushes, frequency separation and
+Liquify) are each a phase of their own whenever they are reached. Kevin asked
+on 3 September for this to run through the whole list without stopping
+between phases: finish, commit, start the next.
 ---
 
 ## 1. Where the app stands
@@ -1003,16 +1178,16 @@ and an MCP op; each is **S** unless marked.
   `X` to swap and `D` to reset foreground/background, ⌥⌫ / ⌘⌫ fill with
   foreground/background. S.
 
-### 3F. Layer structure and workflow
+### 3F. Layer structure and workflow — rows 1–6 SHIPPED (§0, Phase 7a)
 
 | Feature | Size | Notes |
 |---|---|---|
-| **Layer groups** with opacity, blend mode, mask, and pass-through | L | The compositor recurses: a group renders its children into a private projection and composites once (GIMP §4). The stack becomes a tree; `.rz`, the panel, MCP `get_document`, and PSD import all follow. Photoshop's Knockout and clipping to a group ride on it. |
-| Lock: transparency, pixels, position, all | S | A flags field on `Layer`; the paint path honours transparency lock by multiplying stroke coverage by existing alpha. |
-| Multi-select layers; transform, move, delete, group, merge them together | M | Free Transform over a set of layers is the same matrix applied per layer. |
-| Link layers; Align and Distribute | S | |
-| Layer Via Copy (⌘J) / Via Cut (⇧⌘J); Merge Visible; Stamp Visible (⇧⌥⌘E); Bring/Send arrange shortcuts | S | |
-| Auto-Select with the Move tool (click a layer's pixels to activate it) | S | Hit-test alpha from the top down. |
+| ✅ **Layer groups** with opacity, blend mode, mask, and pass-through | L | The compositor recurses: an ISOLATED group renders its children into a private projection and composites once (GIMP §4); `.rz`, the panel, MCP `get_document` and PSD import all follow. Shipped with the stack still a FLAT `Vec<Layer>` marked with a kind and a depth rather than as a tree — §0's Phase 7a entry has the counts behind that choice. Photoshop's Knockout still rides on it and is not implemented. |
+| ✅ Lock: transparency, pixels, position, all | S | A flags field on `Layer`. Transparency lock shipped as Photoshop's own rule — the layer's ALPHA CHANNEL is frozen and restored after every pixel op — rather than as the coverage multiply sketched here, which halves the paint and softens what it should not; §0's Phase 7a entry says why, and why a transform is therefore a POSITION edit. |
+| ✅ Multi-select layers; transform, move, delete, group, merge them together | M | Free Transform over a set of layers is the same matrix applied per layer. |
+| ✅ Link layers; Align and Distribute | S | |
+| ✅ Layer Via Copy (⌘J) / Via Cut (⇧⌘J); Merge Visible; Stamp Visible (⇧⌥⌘E); Bring/Send arrange shortcuts | S | |
+| ✅ Auto-Select with the Move tool (click a layer's pixels to activate it) | S | Hit-test alpha from the top down. |
 | Layer colour labels, filter-by-kind, search | S | |
 | Linked image layers | M | `{type:"image", path}` in `meta` — the Live Photo layer's mechanism generalized: place a file, keep it re-renderable at any transform, Replace Contents. Most of what people use Smart Objects for, without the subsystem. |
 | Layer comps / snapshots | S | Named document handles; the pure model makes a snapshot one pointer. |
@@ -1103,8 +1278,9 @@ a **command palette** (⌘K-style fuzzy search over the whole menu).
    two weeks of S items that make the Adjustments menu look like a photo
    editor's.
 6. ✅ **Healing brush and Content-Aware Fill** (§3C) — the retouching gap.
-7. ▶ **Groups, lock, multi-select** (§3F) and **guides / rulers / snapping**
-   (§3H) — the workflow layer that 20-layer documents demand.
+7. ▶ **Groups, lock, multi-select** (§3F rows 1–6 ✅) and
+   **guides / rulers / snapping** (§3H, next) — the workflow layer that
+   20-layer documents demand.
 8. **RAW develop** (§3A) and **Actions** (§3J) — the two features that
    would make this app a reason to leave Photoshop rather than a
    replacement for it.

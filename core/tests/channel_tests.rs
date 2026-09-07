@@ -1411,8 +1411,9 @@ fn rzdc_v5_round_trips_channels_byte_for_byte() {
     assert_eq!(&bytes[..4], b"RZDC");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        6,
-        "channels bumped the format to 5, colour and metadata to 6"
+        7,
+        "channels bumped the format to 5, colour and metadata to 6, groups \
+         and locks to 7"
     );
 
     let mut err: *mut c_char = ptr::null_mut();
@@ -1455,19 +1456,25 @@ fn rzdc_v5_round_trips_channels_byte_for_byte() {
 }
 
 #[test]
-fn version_4_files_load_with_no_channels_and_version_7_is_refused() {
+fn version_4_files_load_with_no_channels_and_version_8_is_refused() {
     let dir = TempDir::new().unwrap();
     // A plain document written today ends with the 12-byte version-6
     // document tail (two 72 ppi floats and four "no blob" bytes) preceded by
-    // the four bytes of a zero channel count, so a v5 fixture is that file
-    // minus 12 bytes and a v4 fixture minus 16.
+    // the four bytes of a zero channel count. Version 7 broke the trick this
+    // test used to derive its older fixtures: its twelve bytes go INSIDE each
+    // layer record (after the style slot), not at the file's tail, so
+    // truncating the tail alone would leave a "v4" file with twelve stray
+    // bytes per record — which `parse_native` has no trailing-byte check to
+    // catch, so it would still parse, for the wrong reason. The per-record
+    // suffix has to come off as well, and with one layer it sits immediately
+    // before the channel count.
     let doc = doc_from(&dir, "v4.png", &opaque_pattern(5, 3));
-    let path = dir.path().join("v6-empty.rzdc");
+    let path = dir.path().join("v7-empty.rzdc");
     let c = cpath(&path);
     let mut err: *mut c_char = ptr::null_mut();
     assert!(unsafe { rz_doc_save_native(doc, c.as_ptr(), &mut err) });
-    let v6 = std::fs::read(&path).unwrap();
-    let tail = &v6[v6.len() - 12..];
+    let v7 = std::fs::read(&path).unwrap();
+    let tail = &v7[v7.len() - 12..];
     assert_eq!(
         f32::from_le_bytes(tail[0..4].try_into().unwrap()),
         72.0,
@@ -1484,10 +1491,33 @@ fn version_4_files_load_with_no_channels_and_version_7_is_refused() {
         "then four absent blobs — the built-in sRGB profile is elided"
     );
     assert_eq!(
-        &v6[v6.len() - 16..v6.len() - 12],
+        &v7[v7.len() - 16..v7.len() - 12],
         &0u32.to_le_bytes(),
         "an empty channel list is a u32 zero just before the tail"
     );
+    // The single layer record's version-7 suffix: no locks, no link, depth 0,
+    // kind raster, open.
+    let record_suffix = v7.len() - 28..v7.len() - 16;
+    assert_eq!(
+        &v7[record_suffix.clone()],
+        &[0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        "the record ends with locks, link, depth, kind and the open flag"
+    );
+    // A v6 file is this one with that suffix cut out of the record.
+    let mut v6 = v7[..record_suffix.start].to_vec();
+    v6.extend_from_slice(&v7[record_suffix.end..]);
+    v6[4..8].copy_from_slice(&6u32.to_le_bytes());
+    let v6_path = dir.path().join("v6.rzdc");
+    std::fs::write(&v6_path, &v6).unwrap();
+    let c6 = cpath(&v6_path);
+    let mut err: *mut c_char = ptr::null_mut();
+    let back6 = unsafe { rz_doc_open(c6.as_ptr(), &mut err) };
+    assert!(
+        !back6.is_null(),
+        "a v6 file must still load: {}",
+        take_err_string(err)
+    );
+    unsafe { rz_doc_free(back6) };
 
     let mut v4 = v6[..v6.len() - 16].to_vec();
     v4[4..8].copy_from_slice(&4u32.to_le_bytes());
@@ -1509,7 +1539,7 @@ fn version_4_files_load_with_no_channels_and_version_7_is_refused() {
         "and everything else is intact"
     );
 
-    // A v5 file is the same bytes minus the document tail alone.
+    // A v5 file is the v6 bytes minus the document tail alone.
     let mut v5 = v6[..v6.len() - 12].to_vec();
     v5[4..8].copy_from_slice(&5u32.to_le_bytes());
     let v5_path = dir.path().join("v5.rzdc");
@@ -1525,15 +1555,15 @@ fn version_4_files_load_with_no_channels_and_version_7_is_refused() {
     assert_eq!(channel_count(back5), 0);
 
     // A future version is refused by number.
-    let mut v7 = v6.clone();
-    v7[4..8].copy_from_slice(&7u32.to_le_bytes());
-    let v7_path = dir.path().join("v7.rzdc");
-    std::fs::write(&v7_path, &v7).unwrap();
-    let c7 = cpath(&v7_path);
+    let mut v8 = v7.clone();
+    v8[4..8].copy_from_slice(&8u32.to_le_bytes());
+    let v8_path = dir.path().join("v8.rzdc");
+    std::fs::write(&v8_path, &v8).unwrap();
+    let c8 = cpath(&v8_path);
     let mut err: *mut c_char = ptr::null_mut();
-    assert!(unsafe { rz_doc_open(c7.as_ptr(), &mut err) }.is_null());
+    assert!(unsafe { rz_doc_open(c8.as_ptr(), &mut err) }.is_null());
     let msg = take_err_string(err);
-    assert!(msg.contains("unsupported RZDC version 7"), "got: {msg}");
+    assert!(msg.contains("unsupported RZDC version 8"), "got: {msg}");
 
     unsafe {
         rz_doc_free(back5);

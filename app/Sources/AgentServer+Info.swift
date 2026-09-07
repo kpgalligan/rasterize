@@ -17,9 +17,15 @@ extension AgentServer {
         case "composite":
             source = .composite
         case "layer":
-            let index = try paintLayerIndex(a, document)
+            // A GROUP is a legitimate source — reading it is not editing it —
+            // so this takes the structural helper. Its plane is the group's
+            // own projection: its children composited together, WITHOUT the
+            // group's opacity, blend mode, mask or style, which is the same
+            // "deliberately raw" reading render gives a group.
+            let index = try structuralLayerIndex(a, document)
             source = .layer(index)
             reported["layer"] = index
+            if doc.layerIsGroup(index) { reported["kind"] = "group" }
         default:
             throw ToolError(
                 message: "source must be \"composite\" or \"layer\" (got \"\(sourceName)\")")
@@ -41,11 +47,17 @@ extension AgentServer {
         reported["clipped"] = [
             "shadows": bins.shadowClipped, "highlights": bins.highlightClipped,
         ]
-        reported["note"] =
+        var note =
             "256 bins per channel, 0 = black. Fully transparent pixels are never counted, "
             + "so total (\(bins.total)) is the number of pixels actually measured out of "
             + "\(doc.width * doc.height) on the canvas. clipped.shadows and "
             + "clipped.highlights are the largest per-channel counts in bin 0 and bin 255."
+        if reported["kind"] as? String == "group" {
+            note += " This layer is a GROUP, so the numbers are its children composited "
+                + "together — the group's own opacity, blend mode, mask and style are not "
+                + "applied."
+        }
+        reported["note"] = note
         return try jsonResult(reported)
     }
 

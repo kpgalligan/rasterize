@@ -23,6 +23,15 @@ extension EditorViewController {
     func presentToolOptions() {
         let bar = optionsBar
         if isTransforming {
+            // The layer COUNT is not repeated here: the status line carries
+            // it (`transformStatusText`, MultiLayerEdit.swift), which is the
+            // one place that says what the box encloses — one box drawn
+            // around three layers looks exactly like one box drawn around
+            // one. That number is also the cue for the preview's single
+            // approximation: with a non-contiguous set, layers sitting
+            // BETWEEN the selected ones draw in the `above` plate
+            // (`transformStackComposites`, MultiLayerEdit.swift), so a
+            // preview that looks reordered has a number to explain it.
             bar.present(
                 icon: "arrow.triangle.2.circlepath", fallback: "FT",
                 title: "Free Transform", clusters: transformClusters())
@@ -289,14 +298,23 @@ extension EditorViewController {
     private func moveClusters() -> [OptionCluster] {
         [
             OptionCluster([
+                // Two halves of one option, the way Photoshop spells it: the
+                // checkbox says whether a click retargets at all, the popup
+                // says what it picks. The popup is meaningless with the
+                // checkbox off, so it follows it.
                 OptionDescriptor(
-                    id: "move.autoselect", microLabel: "Auto-select", overflowLabel: "Auto-select",
+                    id: "move.autoselecton", overflowLabel: "Auto-select",
+                    kind: .checkbox(
+                        label: "Auto-select",
+                        get: { ToolOptionsStore.shared.move.autoSelect },
+                        set: { ToolOptionsStore.shared.move.autoSelect = $0 })),
+                OptionDescriptor(
+                    id: "move.autoselect", overflowLabel: "Auto-select target",
                     kind: .popup(
                         width: 76, items: ["Layer", "Group"],
                         get: { ToolOptionsStore.shared.move.autoSelectIndex },
                         set: { ToolOptionsStore.shared.move.autoSelectIndex = $0 }),
-                    // Move always drags the active layer today.
-                    isEnabled: { false }),
+                    isEnabled: { ToolOptionsStore.shared.move.autoSelect }),
             ]),
             OptionCluster([
                 OptionDescriptor(
@@ -309,32 +327,52 @@ extension EditorViewController {
                     isEnabled: { false }),
             ]),
             OptionCluster([
+                // The six segments are in the core's own `RzAlign` order, so
+                // the index goes straight through to the same call Layer ▸
+                // Align makes (EditorViewController+Arrange.swift): CONTENT
+                // bounds, aligned to the selection's union with two or more
+                // entries selected and to the canvas with one.
                 OptionDescriptor(
                     id: "move.align", overflowLabel: "Align",
                     kind: .segmented(
                         segments: [
-                            ("align.horizontal.left", "⇤", "Align left edge"),
-                            ("align.horizontal.center", "↔", "Align horizontal center"),
-                            ("align.horizontal.right", "⇥", "Align right edge"),
-                            ("align.vertical.top", "⤒", "Align top edge"),
-                            ("align.vertical.center", "↕", "Align vertical center"),
-                            ("align.vertical.bottom", "⤓", "Align bottom edge"),
+                            ("align.horizontal.left", "⇤", "Align left edges"),
+                            ("align.horizontal.center", "↔", "Align horizontal centers"),
+                            ("align.horizontal.right", "⇥", "Align right edges"),
+                            ("align.vertical.top", "⤒", "Align top edges"),
+                            ("align.vertical.center", "↕", "Align vertical centers"),
+                            ("align.vertical.bottom", "⤓", "Align bottom edges"),
                         ],
                         get: { -1 },
-                        set: { [weak self] index in self?.alignActiveLayer(index) },
-                        segmentEnabled: nil)),
+                        set: { [weak self] index in self?.alignSelection(index) },
+                        segmentEnabled: nil),
+                    isEnabled: { [weak self] in self?.canAlignLayers ?? false }),
             ]),
             OptionCluster([
+                // Equalizing the gaps needs three entries to have a gap
+                // between them at all — a rule that changes with the layers
+                // panel's selection, not with the tool. So it rides
+                // `segmentEnabled`, which the control asks on every click and
+                // every redraw, rather than `isEnabled`, which it caches
+                // until the bar is refreshed: a control that dims lazily
+                // would swallow the very click it should take.
                 OptionDescriptor(
                     id: "move.distribute", overflowLabel: "Distribute",
-                    kind: .button(title: "Distribute…", action: {}),
-                    isEnabled: { false }),
+                    kind: .segmented(
+                        segments: [
+                            ("distribute.horizontal", "⇹", "Distribute horizontal spacing"),
+                            ("distribute.vertical", "⇳", "Distribute vertical spacing"),
+                        ],
+                        get: { -1 },
+                        set: { [weak self] index in self?.distributeSelection(index) },
+                        segmentEnabled: { [weak self] _ in self?.canDistributeLayers ?? false })),
                 OptionDescriptor(
                     id: "move.snaplayers", overflowLabel: "Snap to layers",
                     kind: .checkbox(
                         label: "Snap to layers",
                         get: { ToolOptionsStore.shared.move.snapToLayers },
                         set: { ToolOptionsStore.shared.move.snapToLayers = $0 }),
+                    // Snapping is guides/grid work — the next phase.
                     isEnabled: { false }),
                 OptionDescriptor(
                     id: "move.nudge", microLabel: "Nudge", overflowLabel: "Nudge step",
@@ -343,35 +381,11 @@ extension EditorViewController {
                         quick: Self.quickPx,
                         get: { ToolOptionsStore.shared.move.nudgeStep },
                         set: { ToolOptionsStore.shared.move.nudgeStep = $0 }),
-                    // Arrow nudges are 1px (Shift: 10) for now.
+                    // Arrow nudges are 1px (Shift: 10); a settable step rides
+                    // with the same phase that adds snapping.
                     isEnabled: { false }),
             ]),
         ]
-    }
-
-    /// One of the Move tool's six align buttons: pins the active layer's
-    /// extent to the canvas edge (or centers it on that axis).
-    private func alignActiveLayer(_ index: Int) {
-        guard let document = document, let doc = document.doc,
-              let info = doc.layerInfo(document.activeLayerIndex)
-        else {
-            NSSound.beep()
-            return
-        }
-        let idx = document.activeLayerIndex
-        var x = info.offsetX
-        var y = info.offsetY
-        switch index {
-        case 0: x = 0
-        case 1: x = (doc.width - info.width) / 2
-        case 2: x = doc.width - info.width
-        case 3: y = 0
-        case 4: y = (doc.height - info.height) / 2
-        default: y = doc.height - info.height
-        }
-        document.applyEdit("Align Layer") { doc in
-            doc.withLayerOffset(idx, x, y)
-        }
     }
 
     // MARK: - Paint tools (brush, eraser, clone, dodge)

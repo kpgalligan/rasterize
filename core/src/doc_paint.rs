@@ -10,6 +10,7 @@
 
 use crate::blend::{blend_kind, composite_source_into, BlendMode};
 use crate::doc::RzDocument;
+use crate::doc_lock::EditKind;
 use crate::ops::CompositeMode;
 
 impl RzDocument {
@@ -26,7 +27,9 @@ impl RzDocument {
     /// Dissolve keeps its canvas-absolute deterministic dither, so a
     /// dissolve stroke lands the same speckle a dissolve layer would.
     ///
-    /// Domain refusals (`None`): `idx` out of range; NaN `alpha`; `src` not
+    /// Domain refusals (`None`): `idx` out of range; NaN `alpha`; a Pass
+    /// Through `mode` (a group's declaration, not a blend function —
+    /// [`BlendMode::is_group_only`]); `src` not
     /// exactly canvas-sized; a layer extent that misses the canvas; or —
     /// for every mode but Normal — no pixel actually changing (e.g.
     /// multiply by white), since an identical copy would register a
@@ -42,10 +45,28 @@ impl RzDocument {
         mode: BlendMode,
         alpha: f32,
     ) -> Option<Self> {
+        self.under_locks(idx, EditKind::Pixels, |doc| {
+            doc.painting_layer_blend_unlocked(idx, src, mode, alpha)
+        })
+    }
+
+    /// The body of [`Self::painting_layer_blend`], outside the lock gate.
+    /// Split out only so the gate is one line; that method is its only
+    /// caller.
+    fn painting_layer_blend_unlocked(
+        &self,
+        idx: usize,
+        src: &[u8],
+        mode: BlendMode,
+        alpha: f32,
+    ) -> Option<Self> {
         if mode == BlendMode::Normal {
             return self.painting_layer(idx, src, CompositeMode::Over, alpha);
         }
-        let layer = self.layers.get(idx)?;
+        if mode.is_group_only() {
+            return None;
+        }
+        let layer = self.raster_layer(idx)?;
         if alpha.is_nan() {
             return None;
         }

@@ -20,10 +20,29 @@ final class ImageDocument: NSDocument {
     /// canvas draws, Copy copies, and flat-format writes encode.
     private(set) var projection: RasterImage?
 
-    /// The layer that edits target (panel selection). Deliberately NOT part
-    /// of undo: changing it neither dirties the document nor registers an
-    /// undo step. Re-clamped whenever `doc` changes.
-    var activeLayerIndex: Int = 0
+    /// The panel selection: a PRIMARY entry plus the others a set operation
+    /// acts on. Deliberately NOT part of undo in itself — changing it
+    /// neither dirties the document nor registers an undo step — but it IS
+    /// captured by every undo registration, because undoing a Group Layers
+    /// has to put the selection back on the layers that were grouped.
+    /// Re-clamped whenever `doc` changes.
+    ///
+    /// Written through `setLayerSelection` / `selectLayer`
+    /// (LayerSelection.swift) or through `activeLayerIndex` below.
+    private(set) var layerSelection = LayerSelection.single(0)
+
+    /// The layer that single-layer tools target — the selection's PRIMARY.
+    ///
+    /// It keeps its name and its exact old meaning so the ~120 places that
+    /// ask "which layer am I working on?" need no change at all. Assigning
+    /// it COLLAPSES the selection onto that one entry, which is what every
+    /// existing write already meant (a click on a row, a new layer becoming
+    /// active, `set_active_layer`); a genuine multi-selection is written
+    /// with `setLayerSelection`.
+    var activeLayerIndex: Int {
+        get { layerSelection.primary }
+        set { layerSelection = .single(newValue) }
+    }
 
     /// The editor's paint target, mirrored down so the ONE active-layer edit
     /// path can route a filter or an adjustment onto a single plane or an
@@ -369,9 +388,9 @@ final class ImageDocument: NSDocument {
             NSSound.beep()
             return
         }
-        let index = activeLayerIndex
+        let selection = layerSelection
         undoManager?.registerUndo(withTarget: self) { document in
-            document.restoreDoc(current, activeIndex: index, actionName: actionName)
+            document.restoreDoc(current, selection: selection, actionName: actionName)
         }
         undoManager?.setActionName(actionName)
         doc = updated
@@ -379,10 +398,87 @@ final class ImageDocument: NSDocument {
         docDidChange()
     }
 
+    /// Replaces the whole selection, clamped to the document. Like the
+    /// single-layer `activeLayerIndex` write it retargets future edits only:
+    /// no undo step, no dirty flag. The ONE setter, so the "always in range,
+    /// always holds its primary" invariant lives in one place.
+    func setLayerSelection(_ selection: LayerSelection) {
+        layerSelection = selection.clamped(to: doc?.layerCount ?? 0)
+    }
+
+    /// Chains one pure per-entry op across the WHOLE selection as a single
+    /// undo step — the panel header's blend mode and opacity, the lock
+    /// items, visibility.
+    ///
+    /// For PROPERTY writes only: every index is resolved against the same
+    /// stack, so an op that renumbers (group, delete, merge, reorder) must
+    /// be ONE core call over the whole set instead — that is why the core
+    /// exports `rz_doc_*_layers` rather than leaving the host to loop.
+    ///
+    /// A nil from `op` means "this entry did not change" — the core's purity
+    /// rule, which a multi-selection hits constantly (three layers set to
+    /// Multiply when one already is). The edit therefore carries on with the
+    /// entries that DID change and fails only when none of them did, which
+    /// is exactly when `applyEdit`'s beep is the right answer.
+    func applyToSelectedLayers(
+        _ actionName: String, _ op: @escaping (RasterDocument, Int) -> RasterDocument?
+    ) {
+        let indices = layerSelection.all
+        applyEdit(actionName) { doc in
+            var updated = doc
+            var changed = false
+            for idx in indices {
+                if let next = op(updated, idx) {
+                    updated = next
+                    changed = true
+                }
+            }
+            return changed ? updated : nil
+        }
+    }
+
+    /// Opens or closes a GROUP's disclosure in the panel.
+    ///
+    /// A real document mutation, deliberately: `open` is persisted in the
+    /// `.rz` layer record, and a field that saves without dirtying loses
+    /// itself — open a document, toggle a disclosure, close it, and there is
+    /// no save prompt and the state is gone, while any later edit would
+    /// silently save it. So this counts a change like every other edit path.
+    ///
+    /// It registers NO undo: a disclosure triangle is not part of the
+    /// picture, and an undo step for it would be noise the user never asked
+    /// for. And it skips `refreshProjection()` — the picture did not change,
+    /// only the row set — while still posting the change notification, which
+    /// is what reloads the panel's rows.
+    ///
+    /// CLOSING a group re-points the selection at the rows that are still
+    /// visible, through the same `visibleRow(for:)` the panel draws with. What
+    /// the panel highlights and what a command acts on must be the same entry:
+    /// a selected layer inside a group that then closes has no row of its own,
+    /// the panel draws its GROUP's row selected instead, and leaving the
+    /// selection on the hidden child meant Delete Layer, Merge Down and the
+    /// footer buttons all acted on something other than the one row the panel
+    /// said was selected. Remapping removes the mismatch rather than hiding
+    /// it. Opening a group needs no remap: nothing stops being visible.
+    func setGroupExpanded(_ idx: Int, _ open: Bool) {
+        guard let current = doc, let updated = current.withLayerOpen(idx, open) else { return }
+        doc = updated
+        countEditChange(.changeDone)
+        setLayerSelection(open ? layerSelection : layerSelection.mappedToVisibleRows(in: updated))
+        NotificationCenter.default.post(
+            name: .imageDocumentImageDidChange, object: self, userInfo: ["isLive": false])
+    }
+
     /// Applies a flat-image operation to the ACTIVE layer's pixels as one
     /// undo step (filters and adjustments). Rewriting the pixels of a text
     /// layer invalidates its description, so this goes through
     /// applyRasterizingEdit.
+    ///
+    /// Deliberately SINGLE-layer even when several are selected: Photoshop
+    /// filters the active layer only, and a filter fanned out across a
+    /// selection would be one undo step holding several pictures the user
+    /// never previewed. The set-aware entry point is
+    /// `applyToSelectedLayers`, and it is for property writes.
     func applyToActiveLayer(_ actionName: String, _ op: (RasterImage) -> RasterImage?) {
         // A colour plane or an alpha channel is targeted: the same op runs
         // on that plane alone (ImageDocument+Channels.swift).
@@ -502,36 +598,44 @@ final class ImageDocument: NSDocument {
         }
     }
 
-    /// Undo/redo target. Restores the snapshot AND the active-layer index
-    /// captured when the undo was registered, so undoing a structural layer
-    /// op (delete, merge, reorder) does not silently retarget later edits.
-    private func restoreDoc(_ restored: RasterDocument, activeIndex: Int, actionName: String) {
+    /// Undo/redo target. Restores the snapshot AND the SELECTION captured
+    /// when the undo was registered, so undoing a structural layer op
+    /// (delete, merge, reorder, group) does not silently retarget later
+    /// edits — the whole set, not just the primary, because undoing a Group
+    /// Layers has to put the selection back on the layers that were grouped.
+    private func restoreDoc(
+        _ restored: RasterDocument, selection: LayerSelection, actionName: String
+    ) {
         guard let current = doc else { return }
-        let index = activeLayerIndex
+        let now = layerSelection
         undoManager?.registerUndo(withTarget: self) { document in
-            document.restoreDoc(current, activeIndex: index, actionName: actionName)
+            document.restoreDoc(current, selection: now, actionName: actionName)
         }
         undoManager?.setActionName(actionName)
         doc = restored
-        activeLayerIndex = activeIndex
+        layerSelection = selection
         if undoManager?.isRedoing == true {
             countEditChange(.changeRedone)
         } else {
             countEditChange(.changeUndone)
         }
-        docDidChange() // clamps activeLayerIndex as a safety net
+        docDidChange() // prunes and clamps the selection as a safety net
     }
 
     private func docDidChange(isLive: Bool = false) {
-        clampActiveLayerIndex()
+        clampLayerSelection()
         refreshProjection()
         NotificationCenter.default.post(
             name: .imageDocumentImageDidChange, object: self, userInfo: ["isLive": isLive])
     }
 
-    private func clampActiveLayerIndex() {
+    /// Prune-and-clamp, after every document change: an edit that removed
+    /// entries (delete, merge, ungroup) leaves indices in the set that name
+    /// nothing, or name something else. Pruning is what stops a stale index
+    /// from silently retargeting the next set op.
+    private func clampLayerSelection() {
         guard let doc = doc else { return }
-        activeLayerIndex = min(max(activeLayerIndex, 0), max(doc.layerCount - 1, 0))
+        layerSelection = layerSelection.clamped(to: doc.layerCount)
     }
 
     private func refreshProjection() {
@@ -569,9 +673,9 @@ final class ImageDocument: NSDocument {
         guard let base = liveEditBase else { return }
         liveEditBase = nil
         if base !== doc {
-            let index = activeLayerIndex
+            let selection = layerSelection
             undoManager?.registerUndo(withTarget: self) { document in
-                document.restoreDoc(base, activeIndex: index, actionName: actionName)
+                document.restoreDoc(base, selection: selection, actionName: actionName)
             }
             undoManager?.setActionName(actionName)
             countEditChange(.changeDone)
@@ -597,9 +701,12 @@ final class ImageDocument: NSDocument {
         }
         let idx = activeLayerIndex
         let before = doc
+        // Where the new layer lands is the CORE's answer, not `idx + 1`:
+        // above a GROUP it goes above the whole subtree.
+        let landing = before?.insertionIndex(above: idx) ?? idx + 1
         applyEdit("Paste Layer") { $0.addingImageLayer(above: idx, pasted, name: "Pasted Layer") }
         if doc !== before, let doc = doc {
-            activeLayerIndex = min(idx + 1, doc.layerCount - 1)
+            activeLayerIndex = min(landing, doc.layerCount - 1)
         }
     }
 

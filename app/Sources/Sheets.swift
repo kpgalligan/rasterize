@@ -1353,12 +1353,15 @@ final class AdjustmentLayerSheetController: NSViewController {
             let below = document.activeLayerIndex
             let name = op.displayName
             let before = document.doc
+            // Above a GROUP the new entry lands above the whole subtree,
+            // so the core answers where it went (§4.5).
+            let landing = before?.insertionIndex(above: below) ?? below + 1
             document.applyEdit("New \(name) Layer") {
                 $0.addingAdjustmentLayer(
                     above: below, name: name, meta: meta, selection: selection)
             }
             guard document.doc !== before, let doc = document.doc else { return }
-            onCommitted?(min(below + 1, doc.layerCount - 1))
+            onCommitted?(min(landing, doc.layerCount - 1))
         case .edit(let idx, let original):
             // Closing the dialog with unchanged values must not register an
             // undo step or dirty the file (sorted-key encoding makes the
@@ -1586,12 +1589,15 @@ final class CurvesAdjustmentSheetController: NSViewController {
             // the sheet was open (an agent's) survives.
             let below = document.activeLayerIndex
             let before = document.doc
+            // Above a GROUP the new entry lands above the whole subtree,
+            // so the core answers where it went (§4.5).
+            let landing = before?.insertionIndex(above: below) ?? below + 1
             document.applyEdit("New \(name) Layer") {
                 $0.addingAdjustmentLayer(
                     above: below, name: name, meta: meta, selection: selection)
             }
             guard document.doc !== before, let doc = document.doc else { return }
-            onCommitted?(min(below + 1, doc.layerCount - 1))
+            onCommitted?(min(landing, doc.layerCount - 1))
         case .edit(let idx, let original):
             // Closing the dialog with unchanged values must not register an
             // undo step or dirty the file (sorted-key encoding makes the

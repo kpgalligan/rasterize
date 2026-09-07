@@ -266,9 +266,9 @@ fn rzdc_v4_round_trips_the_style_and_the_light() {
     assert_eq!(&bytes[..4], b"RZDC");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        6,
+        7,
         "layer styles bumped the format to 4, channels to 5, colour and \
-         metadata to 6"
+         metadata to 6, groups and locks to 7"
     );
     assert_eq!(
         f32::from_le_bytes(bytes[20..24].try_into().unwrap()),
@@ -500,12 +500,12 @@ fn rzdc_hand_built_records_load_or_refuse_deterministically() {
         open_bytes(&dir, "v3-shaped.rzdc", &v3_shaped).is_err(),
         "a v3-shaped file stamped 4"
     );
-    let mut v7 = header(7, Some((120.0, 30.0)));
-    record(&mut v7);
-    let err = open_bytes(&dir, "v7.rzdc", &v7)
+    let mut v8 = header(8, Some((120.0, 30.0)));
+    record(&mut v8);
+    let err = open_bytes(&dir, "v8.rzdc", &v8)
         .err()
         .expect("must be refused");
-    assert!(err.contains("unsupported RZDC version 7"), "{err}");
+    assert!(err.contains("unsupported RZDC version 8"), "{err}");
 
     // Lenient style read.
     let malformed = {

@@ -11,13 +11,59 @@ decoding, encoding, and manipulation.
   and the non-separable Hue/Saturation/Color/Luminosity — grouped in the
   panel exactly like Photoshop's menu;
   layers panel with thumbnails, inline rename, drag-reorder, a right-click
-  row menu (Rename, Select Frame… on a Live Photo layer, Layer Style… with
-  Copy / Paste / Clear Layer Style, Delete Layer), and
-  new/delete/duplicate/merge-down/flatten; Move tool (V) with arrow-key
-  nudges; Paste as New Layer; PSD files import with their real layers; the
-  native `.rz` format saves the full layer stack — masks, clipping flags,
-  layer styles, the global light, alpha channels, and text and adjustment
-  descriptions included — losslessly, and older `.rz` files still load
+  row menu (Rename, Select Frame… on a Live Photo layer, Group / Ungroup,
+  Lock, Layer Style… with Copy / Paste / Clear Layer Style, Delete Layer),
+  and new/group/delete/duplicate/merge-down/flatten; Move tool (V) with
+  arrow-key nudges; Paste as New Layer; PSD files import with their real
+  layers; the native `.rz` format saves the full layer stack — masks,
+  clipping flags, layer styles, the global light, alpha channels, groups,
+  locks and links, and text and adjustment descriptions included —
+  losslessly, and older `.rz` files still load
+- **Layer groups** (Layer > New Group, ⌘G; Ungroup ⇧⌘G): a group holds
+  layers and nests arbitrarily, with its own name, visibility, opacity,
+  blend mode, mask, layer style and clipping. A group is **Pass Through** by
+  default — its children composite straight against the layers below it, so
+  grouping alone never changes the picture and an adjustment layer inside a
+  group still reaches the layers beneath it. Give the group any other blend
+  mode or a style and it ISOLATES: its children render on their own and the
+  result composites once, which is also what confines an adjustment layer to
+  the group. A group's own **mask** and **opacity** never isolate it — they
+  gate it per pixel instead, so masking a group of adjustment layers
+  restricts their reach rather than switching them off, and a reveal-all
+  mask changes nothing. (Clipping a layer to a pass-through group isolates
+  it — a clip base has to have its own footprint — and the app says so when
+  it happens.) Ungrouping says what it cost: a group's own mask, style,
+  opacity, blend mode and clipping cannot be carried by its children, and a
+  clipping mask on the group's bottom layer — which clipped to nothing
+  inside it — is released rather than silently re-pointed at the layer
+  below. A group's disclosure
+  triangle is saved with the document. PSD groups import with their nesting
+  and names
+- **Selecting several layers**: ⇧- and ⌘-click in the panel; move,
+  transform, align, distribute, delete, duplicate, group and merge then act
+  on the whole set, while the last row touched stays the single active layer
+  every tool needs. **Link Layers** ties layers together so they move and
+  transform as one whatever is selected; **Align** and **Distribute** work
+  on each layer's opaque CONTENT bounds, against the selection or the canvas
+- **Layer locks** (Layer > Lock, Lock All ⌘/): transparency freezes the
+  layer's alpha — paint lands at full strength but the shape cannot change,
+  an eraser cannot punch a hole, and Apply Layer Mask (which would bake the
+  coverage into that alpha) is refused; pixels refuses every pixel edit while
+  still letting the layer's mask be painted; position refuses moves and
+  transforms (a transform is a position edit, so a transparency-locked layer
+  still transforms — and so does a whole-document crop or straighten, which
+  re-frames the picture rather than moving a layer inside it); all three
+  together also freeze the mask. Merging answers to the DESTINATION layer's
+  pixel and transparency locks, since a merge replaces its picture. Every
+  refusal names the lock that stopped it
+- **Workflow commands**: Layer Via Copy (⌘J) and Layer Via Cut (⇧⌘J) lift
+  the selection into a new layer — on a group, an adjustment layer, a text /
+  shape / Live Photo layer or with nothing selected, ⌘J duplicates instead,
+  so a re-editable layer is never silently rasterized; Merge Visible, Stamp
+  Visible (⇧⌥⌘E), and Arrange ▸ Bring to Front / Forward / Backward / To
+  Back (⇧⌘] ⌘] ⌘[ ⇧⌘[), which move a layer among its siblings only. The Move
+  tool's **Auto-Select** activates the layer — or its group — under the
+  click
 - **Layer masks**: a grayscale coverage mask per layer that hides pixels
   without erasing them — Layer > Mask adds one revealing all, hiding all, or
   built from the current selection, then enables/disables it (a disabled mask
@@ -133,7 +179,7 @@ decoding, encoding, and manipulation.
   pane per effect, copied/pasted/cleared from the same menu, badged "fx" in
   the layers panel (double-click a plain raster layer's row to open the
   sheet), scaled with Free Transform and Image Size, baked by Merge Down and
-  Flatten, and saved losslessly in `.rz` (format version 6; older files
+  Flatten, and saved losslessly in `.rz` (format version 7; older files
   still load). A document-level global light (angle, altitude) drives every
   effect with Use Global Light on. The Free Transform preview shows the
   layer without its effects until commit
@@ -499,10 +545,14 @@ decoding, encoding, and manipulation.
 - Checkerboard backdrop for transparency
 
 Known limits: PSD support is 8-bit RGB/grayscale (16-bit and CMYK files are
-rejected with a clear error), and PSD layer masks and clipping flags do not
-import; animated GIFs and multi-page TIFFs
-load their first frame/page only, so ⌘S on a GIF deliberately routes through
-Save As instead of overwriting the animation in place. Document-level rotate,
+rejected with a clear error), and PSD layer masks do not import. Photoshop
+layer GROUPS import with their structure and names, and clipping flags now
+import too; a group's own opacity, blend mode and visibility are not read by
+the PSD decoder this build uses, so every imported group arrives at 100 %,
+Pass Through and visible, and layer locks do not import for the same reason.
+Animated GIFs and multi-page TIFFs load their first frame/page only, so ⌘S
+on a GIF deliberately routes through Save As instead of overwriting the
+animation in place. Document-level rotate,
 flip and resize compose into every text, shape and Live Photo description,
 so a re-edit after one lands in place; the Crop tool's straighten angle
 still rasterizes them. A layer an earlier version's Image Size resampled
@@ -585,14 +635,24 @@ model defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 81 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 95 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG — `render`'s `channel` shows ONE plane as a grayscale PNG
 instead — and `sample_color` reads single pixels off the flattened
 composite — the eyedropper; `sample_pixel` is its Info-panel twin, adding
 HSB, Lab through the document's own profile, and the closest sRGB spelling
 to paint it back with, and `histogram` counts the tones of the composite or
-one layer), layer operations, blend modes, layer masks (add
+one layer), layer operations, layer structure (`group_layers` /
+`ungroup_layers`, `set_layer_lock`, `link_layers` / `unlink_layers`,
+`align_layers` / `distribute_layers` over each layer's opaque content
+bounds, `arrange_layer`, `layer_via_copy` / `layer_via_cut`,
+`merge_visible`, `stamp_visible`, `auto_select_layer` for the Move tool's
+hit test, and `set_selected_layers`; `duplicate_layer`, `delete_layer` and
+`merge_down` take a whole set in one call, `reorder_layer` takes a `depth`
+to move a layer into or out of a group, and `get_document` reports every
+row's kind, depth, parent, children, locks, link and content box — a
+structural edit renumbers the stack, so each tool reports the new indices
+back), blend modes, layer masks (add
 revealing, hiding or from the selection; enable, apply, or delete), clipping
 masks (`set_layer_clipped` confines a layer to the alpha of the first
 unclipped layer below it; `get_document` reports the flag), layer styles

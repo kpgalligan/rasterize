@@ -44,11 +44,15 @@ extension EditorViewController {
 
         let below = document.activeLayerIndex
         let before = document.doc
+        // Where the new entry lands is the CORE's answer: above a GROUP it
+        // goes above the whole subtree, so `below + 1` would select the
+        // wrong row (§4.5's one definition).
+        let landing = before?.insertionIndex(above: below) ?? below + 1
         document.applyEdit("Add \(name) Layer") {
             $0.addingDescribedLayer(above: below, .shape(payload), anchor: anchor, name: name)
         }
         guard document.doc !== before else { return }
-        setActiveLayer(min(below + 1, document.doc.layerCount - 1))
+        setActiveLayer(min(landing, document.doc.layerCount - 1))
     }
 
     /// The options bar's shape style, resolved for the canvas preview.
@@ -339,9 +343,17 @@ extension EditorViewController {
            doc.describedAnchor(idx) == anchor {
             return
         }
+        // A re-render REWRITES the layer's pixels, so it answers to the same
+        // locks every other pixel path does; without it the core refused and
+        // `applyEdit` beeped with nothing said.
+        guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_PIXELS) else { return }
+        let beforeEdit = document.doc
         document.applyEdit("Edit Shape Layer") {
             $0.rerenderingDescribedLayer(idx, .shape(payload), anchor: anchor)
         }
+        // A TRANSPARENCY lock refuses a re-layout that resizes the raster, and
+        // only then — named here, after the fact, instead of a bare beep.
+        if document.doc === beforeEdit { refuseLockedRerender(layer: idx) }
     }
 
     /// Escape: the layer never changed; the box just goes away.

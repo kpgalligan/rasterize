@@ -20,7 +20,9 @@ use image::RgbaImage;
 use crate::blend::{
     blend_kind, composite_source_into, BlendKind, BlendMode, LUMA_B, LUMA_G, LUMA_R,
 };
-use crate::doc::{Layer, RzDocument};
+use crate::doc::{Layer, LayerKind, RzDocument};
+use crate::doc_channel::padded_plane;
+use crate::doc_lock::EditKind;
 
 /// One 8-bit plane of a colour image. Mirrors `RzPlane` in the C header.
 ///
@@ -284,6 +286,10 @@ impl RzDocument {
     /// `Mask` yields `None` when the layer has no mask; when it has one the
     /// plane is again canvas-sized with 0 OUTSIDE the layer's rect — outside
     /// the layer there is nothing for a mask to reveal.
+    ///
+    /// On a GROUP every plane reads its PROJECTION (`layer_canvas_image`
+    /// answers that for a group), and `Mask` is the group's canvas-sized mask
+    /// verbatim, since that mask already IS a canvas plane.
     pub fn layer_plane(&self, idx: usize, plane: Plane) -> Option<Vec<u8>> {
         let layer = self.layers.get(idx)?;
         let px = (self.width as usize).checked_mul(self.height as usize)?;
@@ -294,6 +300,12 @@ impl RzDocument {
             return image_plane(&self.layer_canvas_image(idx)?, plane);
         }
         let mask = layer.mask.as_deref()?;
+        if layer.kind == LayerKind::Group {
+            // The mask rides the group's offset (`doc_align`), so the canvas
+            // plane is that mask shifted to where it actually sits.
+            return (mask.dimensions() == (self.width, self.height))
+                .then(|| padded_plane(mask, self.width, self.height, layer.offset).into_raw());
+        }
         let (lw, lh) = layer.pixels.dimensions();
         if mask.dimensions() != (lw, lh) {
             return None;
@@ -335,8 +347,16 @@ impl RzDocument {
     /// and wrong for a FILTER, which reads and refilters every sample of the
     /// layer: [`Self::with_layer_space_plane`] is that path's writer.
     pub fn with_layer_plane(&self, idx: usize, plane: Plane, src: &[u8]) -> Option<Self> {
+        self.under_locks(idx, EditKind::Pixels, |doc| {
+            doc.with_layer_plane_unlocked(idx, plane, src)
+        })
+    }
+
+    /// The body of [`Self::with_layer_plane`], outside the lock gate. Split
+    /// out only so the gate is one line; that method is its only caller.
+    fn with_layer_plane_unlocked(&self, idx: usize, plane: Plane, src: &[u8]) -> Option<Self> {
         let byte = plane.byte()?;
-        let layer = self.layers.get(idx)?;
+        let layer = self.raster_layer(idx)?;
         let expected = (self.width as usize).checked_mul(self.height as usize)?;
         if src.len() != expected {
             return None;
@@ -378,8 +398,22 @@ impl RzDocument {
     /// `Luma`/`Mask`, a `src` that is not the LAYER's size, or when no byte
     /// would change.
     pub fn with_layer_space_plane(&self, idx: usize, plane: Plane, src: &[u8]) -> Option<Self> {
+        self.under_locks(idx, EditKind::Pixels, |doc| {
+            doc.with_layer_space_plane_unlocked(idx, plane, src)
+        })
+    }
+
+    /// The body of [`Self::with_layer_space_plane`], outside the lock gate.
+    /// Split out only so the gate is one line; that method is its only
+    /// caller.
+    fn with_layer_space_plane_unlocked(
+        &self,
+        idx: usize,
+        plane: Plane,
+        src: &[u8],
+    ) -> Option<Self> {
         let byte = plane.byte()?;
-        let layer = self.layers.get(idx)?;
+        let layer = self.raster_layer(idx)?;
         let (lw, lh) = layer.pixels.dimensions();
         let expected = (lw as usize).checked_mul(lh as usize)?;
         if src.len() != expected {
@@ -454,8 +488,22 @@ impl RzDocument {
     /// length, a layer extent that misses the canvas, or when no byte would
     /// change (the same latch as [`Self::painting_channel`]).
     pub fn painting_layer_plane(&self, idx: usize, plane: Plane, overlay: &[u8]) -> Option<Self> {
+        self.under_locks(idx, EditKind::Pixels, |doc| {
+            doc.painting_layer_plane_unlocked(idx, plane, overlay)
+        })
+    }
+
+    /// The body of [`Self::painting_layer_plane`], outside the lock gate.
+    /// Split out only so the gate is one line; that method is its only
+    /// caller.
+    fn painting_layer_plane_unlocked(
+        &self,
+        idx: usize,
+        plane: Plane,
+        overlay: &[u8],
+    ) -> Option<Self> {
         let byte = plane.byte()?;
-        let layer = self.layers.get(idx)?;
+        let layer = self.raster_layer(idx)?;
         let expected = (self.width as usize)
             .checked_mul(self.height as usize)?
             .checked_mul(4)?;
@@ -557,7 +605,9 @@ fn unit_byte(v: f32) -> u8 {
 /// In place on a CALLER-owned buffer: the documented exception to the purity
 /// rule that the `rz_selection_*` family already uses. Returns `false` (and
 /// leaves `base` untouched) on a zero dimension, a buffer whose length is not
-/// exactly `w * h`, a non-finite opacity, or one of the four HSL modes.
+/// exactly `w * h`, a non-finite opacity, one of the four HSL modes, or Pass
+/// Through, which is a group's declaration and not a blend function at all
+/// ([`crate::blend::BlendMode::is_group_only`]).
 // Apply Image's own vocabulary, one parameter each; bundling them into a
 // struct would only move the count somewhere else, and the FFI shim mirrors
 // this list one-for-one.
@@ -572,7 +622,8 @@ pub fn blend_planes(
     invert_base: bool,
     invert_source: bool,
 ) -> bool {
-    if w == 0 || h == 0 || !opacity.is_finite() || degenerates_on_gray(mode) {
+    if w == 0 || h == 0 || !opacity.is_finite() || degenerates_on_gray(mode) || mode.is_group_only()
+    {
         return false;
     }
     let expected = match (w as usize).checked_mul(h as usize) {
@@ -617,8 +668,9 @@ pub fn blend_planes(
 ///
 /// PURE, unlike its in-place sibling: three fresh planes come back, in
 /// red-green-blue order. `None` on a zero dimension, any buffer whose length
-/// is not exactly `w * h`, or a non-finite opacity. (Every mode is accepted
-/// here — the four HSL ones are what this function exists for.)
+/// is not exactly `w * h`, a non-finite opacity, or Pass Through (a group's
+/// declaration, not a blend function). Every other mode is accepted — the
+/// four HSL ones are what this function exists for.
 // Apply Image's own vocabulary, one parameter each; the FFI shim mirrors this
 // list one-for-one.
 #[allow(clippy::too_many_arguments)]
@@ -632,7 +684,7 @@ pub fn blend_planes_rgb(
     invert_base: bool,
     invert_source: bool,
 ) -> Option<[Vec<u8>; 3]> {
-    if w == 0 || h == 0 || !opacity.is_finite() {
+    if w == 0 || h == 0 || !opacity.is_finite() || mode.is_group_only() {
         return None;
     }
     let expected = (w as usize).checked_mul(h as usize)?;

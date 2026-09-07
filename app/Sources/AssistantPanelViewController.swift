@@ -232,7 +232,10 @@ final class AssistantPanelViewController: NSViewController {
         return """
             You are the assistant built into Rasterize, a macOS layered image editor. You edit \
             the user's open image by calling tools; the user sees every change live and each \
-            tool call is one undo step. \(context) Layer index 0 is the bottom layer. \
+            tool call is one undo step. \(context) Layer index 0 is the bottom layer; an \
+            index may name a layer GROUP, whose children come BEFORE it in the list and \
+            name it in parent — get_document reports each entry's kind, depth and \
+            children. \
             Coordinates start at the canvas top-left corner with y increasing downward. Use the \
             render tool to look at the canvas before visual edits and again afterwards to \
             verify the result. Keep replies to a sentence or two; never repeat tool output \

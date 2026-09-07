@@ -788,3 +788,58 @@ fn an_entry_carried_through_an_uncomposited_version_is_adopted_from_its_own_stac
     // The skipped version renders once when asked, from nothing.
     assert_eq!(v2.flattened().into_raw(), fresh_render(&v2, two));
 }
+
+#[test]
+fn two_styled_groups_do_not_share_a_cache_key() {
+    // The cache keys a style's rendered planes on the POINTER identity of
+    // `layer.pixels`. A group has no pixels, so the obvious implementation —
+    // one shared transparent dummy for every group — would make two styled
+    // groups of the same size collide and render each other's effects. Each
+    // group entry therefore owns a PRIVATE 1x1 `Arc`, and the key the
+    // compositor actually uses is the per-composite SYNTHETIC layer's, so the
+    // two groups below must project exactly what each would project alone.
+    const W: u32 = 120;
+    const H: u32 = 90;
+    let base = RzDocument::from_pixels(solid(W, H, WHITE))
+        .adding_image_layer(0, solid(20, 20, RED), "Left")
+        .unwrap()
+        .with_layer_offset(1, 15, 35)
+        .unwrap()
+        .adding_image_layer(1, solid(20, 20, [0, 0, 255, 255]), "Right")
+        .unwrap()
+        .with_layer_offset(2, 80, 35)
+        .unwrap();
+    let (doc, left, _, _) = base.group_layers(&[1], "L").unwrap();
+    let (doc, right, _, _) = doc.group_layers(&[left + 1], "R").unwrap();
+    let red_stroke = "{\"effects\":[{\"type\":\"stroke\",\"size\":3,\"color\":\"#FF0000\",\
+         \"position\":\"outside\"}]}";
+    let blue_glow = "{\"effects\":[{\"type\":\"outer_glow\",\"size\":6,\"color\":\"#0000FF\"}]}";
+    let both = styled(&styled(&doc, left, red_stroke), right, blue_glow);
+    // Each group's private `Arc` is its own, so the two entries can never
+    // key to the same cache slot in the first place.
+    assert!(
+        !Arc::ptr_eq(&both.layers[left].pixels, &both.layers[right].pixels),
+        "each group entry owns a private pixel Arc"
+    );
+    // And the projection agrees with each group styled ALONE, which is what a
+    // collision would break.
+    let only_left = styled(&doc, left, red_stroke);
+    let only_right = styled(&doc, right, blue_glow);
+    let combined = both.flattened();
+    let left_alone = only_left.flattened();
+    let right_alone = only_right.flattened();
+    for y in 0..H {
+        for x in 0..W {
+            let expected = if x < W / 2 {
+                px(&left_alone, x, y)
+            } else {
+                px(&right_alone, x, y)
+            };
+            assert_eq!(
+                px(&combined, x, y),
+                expected,
+                "({x}, {y}): the two styled groups must not share planes"
+            );
+        }
+    }
+}

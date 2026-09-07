@@ -53,10 +53,18 @@ extension EditorViewController {
         // adjustment-layer refusal is spoken here, in the same alert fill and
         // gradient use — and the agent mirror throws the same sentence.
         guard !refuseAdjustmentPixelEdit() else { return }
+        // A GROUP has no pixels of its own (`heal_layer` goes through the
+        // core's `raster_layer`), and a lock refuses the heal outright —
+        // both said HERE, before `applyRasterizingEdit` asks the user to give
+        // up a described layer for an edit that is about to be refused. The
+        // MCP mirror answers the same two sentences.
+        guard !refuseGroupPixelEdit() else { return }
         guard let document = document, let doc = document.doc else {
             NSSound.beep()
             return
         }
+        guard !refuseLockedEdit(layer: document.activeLayerIndex, kind: RZ_EDIT_PIXELS)
+        else { return }
         let width = doc.width
         let height = doc.height
         // An outline is traced over a canvas of a given size; a document

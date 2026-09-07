@@ -56,13 +56,20 @@ final class EditorViewController: NSViewController {
     /// 0 = Layers, 1 = Channels, 2 = Assistant, 3 = Info.
     var panelTab = 0
 
-    // Move-tool drag state: the active layer's offset when the drag began.
-    private var moveStartOffset: (x: Int, y: Int)?
+    // Move-tool drag state: the delta ALREADY APPLIED since the press, not
+    // any layer's start offset — a group has no offset of its own, so the
+    // gesture tracks its own total (MultiLayerEdit.swift.moveDidBegin says
+    // why). Internal, like `transformSession` below: the gesture itself lives
+    // in MultiLayerEdit.swift, and a stored property cannot.
+    var moveAppliedDelta: (x: Int, y: Int)?
 
-    // The open Free Transform session (see TransformSession), and the flag
+    // The open Free Transform session (see TransformSession, which lives in
+    // MultiLayerEdit.swift together with the preview it feeds), and the flag
     // that marks the document change its own commit causes — every OTHER
-    // change under an open session ends it.
-    private var transformSession: TransformSession?
+    // change under an open session ends it. Internal, not private: a stored
+    // property cannot live in an extension, so the session STAYS here while
+    // everything that reads it moved out.
+    var transformSession: TransformSession?
     private var isCommittingTransform = false
 
     // Brush/eraser drag state: the document handle when the stroke began.
@@ -232,6 +239,29 @@ final class EditorViewController: NSViewController {
                 : (isAdjustment ? .mask : .layer)
             self.strokeTarget = target
             self.canvas.paintTarget = target
+            // Locks, once per stroke, against the target the stroke really
+            // hits. A MASK edit answers to the Mask kind — Photoshop lets a
+            // pixel-locked layer's mask be painted, and only Lock All
+            // freezes it — while the layer's own pixels and its colour
+            // PLANES answer to Pixels. A CHANNEL is canvas-sized document
+            // state that belongs to no layer, so it is exempt, exactly as
+            // it is exempt from the hidden-layer refusal above. Transparency
+            // lock refuses nothing here: the core restores the layer's alpha
+            // after the stroke, so the paint lands and stays inside the
+            // existing shape.
+            if !onChannel {
+                let editKind: RzEditKind = target == .mask ? RZ_EDIT_MASK : RZ_EDIT_PIXELS
+                if self.refuseLockedEdit(layer: idx, kind: editKind) { return false }
+                // A GROUP has no pixels of its own, so every tick's
+                // `paintingLayer` would answer nil and the whole stroke
+                // would be a silent no-op (+Groups.swift). A COLOUR PLANE
+                // reads the same pixels — `paintingLayerPlane` goes through
+                // the core's `raster_layer` too — and the agent's mirror
+                // already covers both (AgentServer+Channels).
+                if target == .layer || target.isPlane, self.refuseGroupPixelEdit() {
+                    return false
+                }
+            }
             guard !target.isCoverage else {
                 // Coverage strokes ghost on the canvas and commit in one
                 // step from onCommitMaskOverlay: no live-edit session.
@@ -348,35 +378,16 @@ final class EditorViewController: NSViewController {
         canvas.onEyedropper = { [weak self] point in self?.sampleColor(at: point) }
         canvas.onGradientCommit = { [weak self] a, b in self?.gradientCommitted(a, b) }
         canvas.onBrushSizeKey = { [weak self] newSize in self?.brushSizeKeyChanged(newSize) }
-        canvas.onMoveBegin = { [weak self] in
-            guard let self = self, let document = self.document, let doc = document.doc,
-                  let info = doc.layerInfo(document.activeLayerIndex)
-            else { return }
-            self.moveStartOffset = (info.offsetX, info.offsetY)
-            document.beginLiveEdit()
+        canvas.onMoveBegin = { [weak self] point, modifiers in
+            self?.moveDidBegin(at: point, modifiers: modifiers)
         }
-        canvas.onMoveUpdate = { [weak self] dx, dy in
-            guard let self = self, let document = self.document, let doc = document.doc,
-                  let start = self.moveStartOffset
-            else { return }
-            let idx = document.activeLayerIndex
-            if let updated = doc.withLayerOffset(idx, start.x + dx, start.y + dy) {
-                document.updateLiveEdit(updated)
-            }
-        }
+        canvas.onMoveUpdate = { [weak self] dx, dy in self?.moveDidUpdate(dx, dy) }
         canvas.onMoveEnd = { [weak self] in
             guard let self = self, let document = self.document else { return }
-            self.moveStartOffset = nil
+            self.moveAppliedDelta = nil
             document.endLiveEdit("Move Layer")
         }
-        canvas.onMoveNudge = { [weak self] dx, dy in
-            guard let self = self, let document = self.document else { return }
-            let idx = document.activeLayerIndex
-            document.applyEdit("Move Layer") { doc in
-                guard let info = doc.layerInfo(idx) else { return nil }
-                return doc.withLayerOffset(idx, info.offsetX + dx, info.offsetY + dy)
-            }
-        }
+        canvas.onMoveNudge = { [weak self] dx, dy in self?.moveNudge(dx, dy) }
         canvas.onTransformMouseDown = { [weak self] point, modifiers in
             self?.transformMouseDown(point, modifiers)
         }
@@ -953,8 +964,11 @@ final class EditorViewController: NSViewController {
             return
         }
         // A canvas click can't be blocked by menu validation: refuse a fill
-        // aimed at an adjustment layer's (ignored) pixels with the alert.
-        guard !refuseAdjustmentPixelEdit() else { return }
+        // aimed at an adjustment layer's (ignored) pixels — or at a LOCKED
+        // layer — with the alert that names the reason.
+        guard !refuseAdjustmentPixelEdit(), !refuseGroupPixelEdit() else { return }
+        guard !refuseLockedEdit(layer: document.activeLayerIndex, kind: RZ_EDIT_PIXELS)
+        else { return }
         let options = ToolOptionsStore.shared.fill
         let idx = document.activeLayerIndex
         // The bar's opacity rides in the fill color's own alpha.
@@ -1021,7 +1035,9 @@ final class EditorViewController: NSViewController {
         }
         // Same rule as fillClicked: a gradient drag ends on the canvas,
         // outside menu validation's reach.
-        guard !refuseAdjustmentPixelEdit() else { return }
+        guard !refuseAdjustmentPixelEdit(), !refuseGroupPixelEdit() else { return }
+        guard !refuseLockedEdit(layer: document.activeLayerIndex, kind: RZ_EDIT_PIXELS)
+        else { return }
         let options = ToolOptionsStore.shared.gradient
         let idx = document.activeLayerIndex
         // Foreground → background (the rail's swatches); Reverse swaps them
@@ -1043,32 +1059,10 @@ final class EditorViewController: NSViewController {
 
     // MARK: - Free Transform
 
-    /// A modal free-transform session on ONE layer. The document is NOT
-    /// touched while it runs: the canvas draws the layer's cached pixels
-    /// through the composed matrix, and the core resamples exactly once, at
-    /// commit. The parameters (see LayerTransform) are the source of truth —
-    /// handle drags and the options-bar numerics are two ways of writing
-    /// them, and the matrix is always composed, never decomposed.
-    private struct TransformSession {
-        /// The layer being transformed; the session outlives changes to the
-        /// document's active layer, so it carries its own index.
-        let layer: Int
-        /// The layer's canvas rect when the session opened.
-        let sourceRect: CGRect
-        let layerImage: CGImage?
-        let maskImage: CGImage?
-        let below: CGImage?
-        let above: CGImage?
-        let opacity: CGFloat
-        var transform: LayerTransform
-        var sampler: RzResizeFilter
-        var drag: TransformDrag?
-    }
-
     /// What the current mouse drag does, captured at mouse-down together
     /// with the parameters it started from: every tick recomputes from that
     /// snapshot, so a drag never accumulates rounding error.
-    private enum TransformDrag {
+    enum TransformDrag {
         case move(start: LayerTransform, grab: CGPoint)
         case scale(handle: TransformHandle, start: LayerTransform)
         case rotate(start: LayerTransform, grab: CGPoint)
@@ -1108,101 +1102,30 @@ final class EditorViewController: NSViewController {
         }
         // Never leave a text session hanging underneath the box.
         canvas.commitTextSession()
-        let idx = document.activeLayerIndex
-        guard let doc = document.doc, let info = doc.layerInfo(idx),
-              info.width > 0, info.height > 0
-        else {
+        // A transform is a POSITION edit, never a Pixels one: it resamples
+        // the whole buffer including its alpha, so a frozen alpha channel
+        // has no meaning there (doc_lock.rs). A transparency-locked layer
+        // therefore still transforms; a position-locked one does not.
+        guard let doc = document.doc else {
             NSSound.beep()
             return
         }
-        let rect = CGRect(
-            x: CGFloat(info.offsetX), y: CGFloat(info.offsetY),
-            width: CGFloat(info.width), height: CGFloat(info.height))
-        let stack = transformStackComposites(doc, around: idx)
-        transformSession = TransformSession(
-            layer: idx,
-            sourceRect: rect,
-            // A hidden layer still transforms; there are simply no pixels to
-            // preview, only the box.
-            layerImage: info.visible
-                ? doc.layerImage(idx)?.makeCGImage(in: doc.colorSpace) : nil,
-            // Layer pixels come back UNMASKED, so an enabled mask has to
-            // clip the preview the way the projection would.
-            maskImage: doc.layerMaskEnabled(idx)
-                ? doc.layerMaskImage(idx).flatMap(Self.grayMaskImage) : nil,
-            below: stack.below,
-            above: stack.above,
-            opacity: CGFloat(info.opacity),
-            // A described layer pivots on its description's exact centre
-            // (EditorViewController+DescribedTransform.swift), a raster on
-            // its rect's.
-            transform: LayerTransform(
-                pivot: doc.describedPivot(idx) ?? CGPoint(x: rect.midX, y: rect.midY)),
-            sampler: transformSampler,
-            drag: nil)
+        // Over the EXPANDED set (MultiLayerEdit.swift), so a position-locked
+        // LINKED partner or group descendant is named here rather than at the
+        // commit.
+        guard !refuseLockedEdit(
+            layers: doc.movingSet(document.selectedLayerIndices), kind: RZ_EDIT_POSITION)
+        else { return }
+        guard let session = makeTransformSession(doc, sampler: transformSampler) else {
+            NSSound.beep()
+            return
+        }
+        transformSession = session
         updateOptionsBar()
         refreshTransformPreview()
         updateTransformFields()
         updateStatus()
         view.window?.makeFirstResponder(canvas)
-    }
-
-    /// A mask image (opaque RGBA grayscale, the layer's size) redrawn into a
-    /// DeviceGray bitmap, which is the only form CGContext.clip(to:mask:)
-    /// accepts. White shows and black hides, matching the core's coverage.
-    private static func grayMaskImage(_ mask: RasterImage) -> CGImage? {
-        guard let source = mask.makeCGImage(in: ColorProfile.sRGB),
-              source.width > 0, source.height > 0,
-              let context = CGContext(
-                data: nil, width: source.width, height: source.height,
-                bitsPerComponent: 8, bytesPerRow: source.width,
-                space: CGColorSpaceCreateDeviceGray(),
-                bitmapInfo: CGImageAlphaInfo.none.rawValue)
-        else { return nil }
-        context.draw(
-            source, in: CGRect(x: 0, y: 0, width: source.width, height: source.height))
-        return context.makeImage()
-    }
-
-    /// The two composites the preview draws the transformed layer between:
-    /// the stack below it and the stack above it. Built once per session, so
-    /// the drag itself never calls the core.
-    private func transformStackComposites(_ doc: RasterDocument, around idx: Int)
-        -> (below: CGImage?, above: CGImage?)
-    {
-        var belowDoc: RasterDocument? = doc
-        for layer in idx..<doc.layerCount {
-            belowDoc = belowDoc?.withLayerVisible(layer, false)
-        }
-        var aboveDoc: RasterDocument? = doc
-        for layer in 0...idx {
-            aboveDoc = aboveDoc?.withLayerVisible(layer, false)
-        }
-        return (
-            belowDoc?.flattened()?.makeCGImage(in: doc.colorSpace),
-            idx >= doc.layerCount - 1
-                ? nil : aboveDoc?.flattened()?.makeCGImage(in: doc.colorSpace))
-    }
-
-    /// Pushes the session's current matrix (and the box derived from it) to
-    /// the canvas. Cheap enough to run on every drag tick.
-    private func refreshTransformPreview() {
-        guard let session = transformSession else {
-            canvas.transformPreview = nil
-            return
-        }
-        canvas.transformPreview = ImageCanvasView.TransformPreview(
-            below: session.below,
-            above: session.above,
-            layer: session.layerImage,
-            mask: session.maskImage,
-            sourceRect: session.sourceRect,
-            matrix: session.transform.matrix,
-            opacity: session.opacity,
-            quad: session.transform.warpedQuad(of: session.sourceRect),
-            pivot: session.transform.pivotInCanvas,
-            interpolate: session.sampler != RZ_FILTER_NEAREST,
-            warped: session.transform.hasCornerOffsets)
     }
 
     /// The parameters → controls half of the binding (the descriptors'
@@ -1387,11 +1310,12 @@ final class EditorViewController: NSViewController {
         }
         // Nothing actually moved (or the layer is gone): no edit, no undo
         // step, no dirty flag — just close the session.
-        guard !session.transform.isIdentity, session.layer < doc.layerCount else {
+        guard !session.transform.isIdentity, session.layers.allSatisfy({ $0 < doc.layerCount })
+        else {
             endTransformSession()
             return true
         }
-        let idx = session.layer
+        let idx = session.primaryLayer
         let describesSource = document.layerDescribesSource(idx)
         // A distorted box commits through the perspective op with its warped
         // corners; a plain affine keeps the matrix path and its lossless
@@ -1408,7 +1332,10 @@ final class EditorViewController: NSViewController {
         // resampling the real pixels is what the prompt gates. Taken here
         // rather than through applyRasterizingEdit: Cancel has to keep the
         // session open instead of abandoning the whole gesture.
-        if describesSource {
+        // Composing a matrix into ONE description cannot stand for a SET, so
+        // only a single-entry session takes the lossless compose path; a set
+        // resamples every member (MultiLayerEdit.swift).
+        if describesSource, session.isSingleLayer {
             isCommittingTransform = true
             let outcome = commitDescribedTransform(
                 layer: idx, matrix: matrix, quad: quad, sampler: session.sampler)
@@ -1424,14 +1351,22 @@ final class EditorViewController: NSViewController {
             }
         }
         if describesSource,
-           !document.confirmRasterize(layer: idx, reason: document.unrenderableReason(layer: idx))
+           !document.confirmRasterize(
+               layer: idx,
+               reason: session.isSingleLayer
+                   ? document.unrenderableReason(layer: idx) : Self.setRasterizeReason)
         { return false }
+        // Every other member's pre-check — the degenerate matrix, each
+        // entry's own extent, the position locks and the remaining rasterize
+        // prompts (MultiLayerEdit.swift). After the primary's prompt, so each
+        // layer is asked exactly once.
+        guard !refuseUntransformableSet(session, quad: quad) else { return false }
         let sampler = session.sampler
         let before = document.doc
         isCommittingTransform = true
         document.applyEdit("Transform Layer") { doc in
-            let transformed = quad.map { doc.perspectiveLayer(idx, quad: $0, sampler: sampler) }
-                ?? doc.transformingLayer(idx, matrix, sampler: sampler)
+            let transformed = Self.transformedSet(
+                doc, layers: session.layers, quad: quad, matrix: matrix, sampler: sampler)
             guard let transformed else { return nil }
             guard describesSource else { return transformed }
             return transformed.withLayerMeta(idx, nil) ?? transformed
@@ -1702,7 +1637,7 @@ final class EditorViewController: NSViewController {
         // when one is the edit target; say so, alongside the panels' rings.
         let maskSuffix = paintTarget.statusSuffix(in: document.doc)
         statusTool.text = isTransforming
-            ? "Free Transform"
+            ? transformStatusText
             : "\(currentTool.displayName) · \(currentTool.keyCharacter.uppercased())\(maskSuffix)"
         updateZoomLabel()
     }
@@ -1776,6 +1711,14 @@ final class EditorViewController: NSViewController {
         // the (ignored) pixels of the adjustment layer that happens to be
         // active — §0.4's rule, the same one `onStrokeBegin` applies above.
         guard paintTarget.isChannel || !refuseAdjustmentPixelEdit() else { return }
+        // A filter rewrites the layer's pixels; the Pixels lock refuses it,
+        // and a CHANNEL target is exempt for the same reason as above (the
+        // edit lands on document state, not on the layer).
+        guard paintTarget.isChannel
+            || !refuseLockedEdit(layer: document.activeLayerIndex, kind: RZ_EDIT_PIXELS)
+        else { return }
+        // …and a GROUP has no pixels for a filter to rewrite at all.
+        guard paintTarget.isChannel || !refuseGroupPixelEdit() else { return }
         document.applyToActiveLayer(actionName, op)
     }
 
@@ -1845,35 +1788,58 @@ final class EditorViewController: NSViewController {
         let idx = document.activeLayerIndex
         let name = "Layer \(doc.layerCount + 1)"
         let before = document.doc
+        // Where the new entry lands is the CORE's answer (`idx + 1` is the
+        // wrong index the moment `idx` names a group), taken BEFORE the edit
+        // because the handle is replaced by it.
+        let landing = doc.insertionIndex(above: idx)
         document.applyEdit("New Layer") { $0.addingLayer(above: idx, name: name) }
         guard document.doc !== before else { return }
         // The active layer moved: setActiveLayer carries the whole invariant
         // (paint target, both panels, the canvas's mask base and rubylith).
-        setActiveLayer(min(idx + 1, document.doc.layerCount - 1))
+        setActiveLayer(min(landing, document.doc.layerCount - 1))
     }
 
+    /// Duplicate Layer, over the whole selection: ONE core call, never a
+    /// host loop — every structural op renumbers, so a loop would duplicate
+    /// the wrong entries from its second iteration on. A group duplicates
+    /// with its whole subtree.
     @objc func duplicateLayer(_ sender: Any?) {
-        guard let document = document else {
+        guard let document = document, let doc = document.doc else {
             NSSound.beep()
             return
         }
+        let indices = document.selectedLayerIndices
         let idx = document.activeLayerIndex
         let before = document.doc
-        document.applyEdit("Duplicate Layer") { $0.duplicatingLayer(idx) }
+        // Where the PRIMARY's copy lands, derived from the stack before the
+        // edit: each copy sits above its source, and the copies made below
+        // push this one up.
+        // …and the copies are made over the selection's INDEPENDENT ROOTS, so
+        // the primary's landing is looked up by entry rather than by position.
+        let landing = doc.layerTree.duplicateLanding(of: idx, in: indices) ?? idx
+        document.applyEdit("Duplicate Layer") { $0.duplicateLayers(indices) }
         guard document.doc !== before else { return }
         // The active layer moved: setActiveLayer carries the whole invariant.
-        setActiveLayer(min(idx + 1, document.doc.layerCount - 1))
+        setActiveLayer(min(max(landing, 0), document.doc.layerCount - 1))
     }
 
+    /// Delete Layer, over the whole selection: again ONE core call, which is
+    /// what makes "delete these three" safe — a host loop deleting
+    /// ascending would delete the wrong layers after the first.
     @objc func deleteLayer(_ sender: Any?) {
         guard let document = document else {
             NSSound.beep()
             return
         }
-        let idx = document.activeLayerIndex
-        document.applyEdit("Delete Layer") { $0.removingLayer(idx) }
-        // applyEdit re-clamps activeLayerIndex; the layer below (same index,
-        // or the new top) ends up selected.
+        let indices = document.selectedLayerIndices
+        document.applyEdit("Delete Layer") { $0.removeLayers(indices) }
+        // Collapse onto ONE survivor, the lowest slot the deletion left.
+        // `applyEdit`'s re-clamp only pulls stale numbers back into range,
+        // and after a delete those numbers name layers that were never
+        // selected — the panel would highlight them and the next set command
+        // (Group, Merge, Align, a Move drag) would act on them. Every other
+        // set op in this phase retargets after its edit; so does this one.
+        setActiveLayer(min(max(indices.first ?? 0, 0), (document.doc?.layerCount ?? 1) - 1))
         // The active layer moved: any mask paint target goes with it.
         syncPaintTarget()
         layersPanel.reload()
@@ -1881,17 +1847,50 @@ final class EditorViewController: NSViewController {
         updateActiveLayerRect()
     }
 
+    /// Merge Down on one layer, Merge Layers on a selection (Photoshop's
+    /// own retitling, which the menu item's validation does).
+    ///
+    /// "The layer below" is now the previous SIBLING, so merging inside a
+    /// group never reaches out of it; the core answers where the merged
+    /// entry landed by leaving it at the lowest member's slot.
     @objc func mergeDown(_ sender: Any?) {
-        guard let document = document, document.activeLayerIndex >= 1 else {
+        guard let document = document, let doc = document.doc else {
             NSSound.beep()
             return
         }
-        let idx = document.activeLayerIndex
+        let indices = document.selectedLayerIndices
         let before = document.doc
+        if indices.count > 1 {
+            // The merged entry lands at the LOWEST member's subtree start,
+            // not at its index: those differ the moment that member is a
+            // group, and `indices[0]` then names an unrelated layer.
+            let landing = doc.layerTree.subtree(of: indices[0]).lowerBound
+            // The merged entry replaces the lowest member's picture, so that
+            // member's Pixels / Transparency locks refuse the whole merge.
+            guard !refuseLockedEdit(layer: indices[0], kind: RZ_EDIT_MERGE) else { return }
+            document.applyEdit("Merge Layers") { $0.mergeLayers(indices) }
+            guard document.doc !== before else { return }
+            setActiveLayer(min(landing, document.doc.layerCount - 1))
+            return
+        }
+        let idx = document.activeLayerIndex
+        let siblings = doc.layerTree.siblings(of: idx)
+        guard let below = siblings.last(where: { $0 < idx }) else {
+            NSSound.beep()
+            return
+        }
+        // The merge replaces the layer BELOW: its Pixels and Transparency
+        // locks refuse it, and the alert names which.
+        guard !refuseLockedEdit(layer: below, kind: RZ_EDIT_MERGE) else { return }
+        // The merged entry lands at the previous sibling's SUBTREE START, not
+        // at its index — the same hazard the Merge Layers branch above names,
+        // and `below` is an unrelated layer the moment that sibling is a
+        // non-empty group.
+        let landing = doc.layerTree.subtree(of: below).lowerBound
         document.applyEdit("Merge Down") { $0.mergingDown(idx) }
         guard document.doc !== before else { return }
         // The active layer moved: setActiveLayer carries the whole invariant.
-        setActiveLayer(idx - 1)
+        setActiveLayer(min(landing, document.doc.layerCount - 1))
     }
 
     @objc func flattenImage(_ sender: Any?) {
@@ -1985,6 +1984,10 @@ final class EditorViewController: NSViewController {
             return
         }
         let idx = document.activeLayerIndex
+        // Applying a mask multiplies its coverage into the layer's ALPHA,
+        // which is exactly what Lock Transparency forbids — its own edit
+        // kind in the core, so the refusal names the lock instead of beeping.
+        guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_MASK_APPLY) else { return }
         document.applyEdit("Apply Layer Mask") { $0.removingLayerMask(idx, apply: true) }
         updateStatus()
     }
@@ -2000,35 +2003,6 @@ final class EditorViewController: NSViewController {
         let enabled = !doc.layerMaskEnabled(idx)
         document.applyEdit(enabled ? "Enable Layer Mask" : "Disable Layer Mask") {
             $0.withLayerMaskEnabled(idx, enabled)
-        }
-        updateStatus()
-    }
-
-    // MARK: - Clipping masks (Layer > Create/Release Clipping Mask)
-
-    /// Whether the ACTIVE layer is clipped to the layer below (drives the
-    /// menu item's Create/Release retitle).
-    private var activeLayerClipped: Bool {
-        guard let document = document, let doc = document.doc else { return false }
-        return doc.layerClipped(document.activeLayerIndex)
-    }
-
-    /// One toggling action, Photoshop-style: clips the active layer to the
-    /// layer below, or releases it. The bottom layer has nothing below to
-    /// clip to (validation disables the item; the core would composite it as
-    /// unclipped anyway). Grouping is positional in the core, so this flag
-    /// flip is the whole edit — one undo step.
-    @objc func toggleClippingMask(_ sender: Any?) {
-        guard let document = document, let doc = document.doc,
-              document.activeLayerIndex >= 1
-        else {
-            NSSound.beep()
-            return
-        }
-        let idx = document.activeLayerIndex
-        let clipped = !doc.layerClipped(idx)
-        document.applyEdit(clipped ? "Create Clipping Mask" : "Release Clipping Mask") {
-            $0.withLayerClipped(idx, clipped: clipped)
         }
         updateStatus()
     }
@@ -2101,12 +2075,13 @@ final class EditorViewController: NSViewController {
         }
         let below = document.activeLayerIndex
         let before = document.doc
+        let landing = before?.insertionIndex(above: below) ?? below + 1
         document.applyEdit("New \(op.displayName) Layer") {
             $0.addingAdjustmentLayer(
                 above: below, name: op.displayName, meta: meta, selection: selection)
         }
         guard document.doc !== before else { return }
-        didCommitAdjustmentLayer(min(below + 1, document.doc.layerCount - 1))
+        didCommitAdjustmentLayer(min(landing, document.doc.layerCount - 1))
     }
 
     /// Post-commit bookkeeping shared by every adjustment-layer commit (the
@@ -2133,16 +2108,28 @@ final class EditorViewController: NSViewController {
         editAdjustmentLayer(document.activeLayerIndex)
     }
 
-    /// Makes `idx` the layer edits target and refreshes everything that
+    /// Makes `idx` the ONLY selected layer and refreshes everything that
     /// follows it — the paint target, the panel, the status line, the
     /// on-canvas layer boundary. Like the panel's own selection this only
-    /// retargets future edits: no undo step, no dirty flag. A no-op when
-    /// `idx` is already active or out of range.
+    /// retargets future edits: no undo step, no dirty flag.
     func setActiveLayer(_ idx: Int) {
-        guard let document = document, let doc = document.doc,
-              idx >= 0, idx < doc.layerCount, idx != document.activeLayerIndex
-        else { return }
-        document.activeLayerIndex = idx
+        setSelectedLayers(.single(idx))
+    }
+
+    /// The set-aware twin: replaces the whole selection and takes the same
+    /// bookkeeping.
+    ///
+    /// The early-out compares the WHOLE selection, not just its primary, and
+    /// it is load-bearing for COST as well as correctness:
+    /// `activeLayerDidChange()` reloads the layers panel, and the Move
+    /// tool's Auto-Select calls this on every canvas click. Comparing only
+    /// the primary would let a set-only change through unnoticed; dropping
+    /// the guard entirely would rebuild the panel on every click.
+    func setSelectedLayers(_ selection: LayerSelection) {
+        guard let document = document, let doc = document.doc, doc.layerCount > 0 else { return }
+        let clamped = selection.clamped(to: doc.layerCount)
+        guard clamped != document.layerSelection else { return }
+        document.setLayerSelection(clamped)
         activeLayerDidChange()
     }
 
@@ -2165,6 +2152,10 @@ final class EditorViewController: NSViewController {
         channelsPanel?.activeLayerChanged()
         infoPanel?.activeLayerChanged()
         refreshChannelDisplay()
+        // The Move bar's Align and Distribute segments dim by how many
+        // entries are selected, so the bar has to re-read the selection here
+        // too — not only when the tool changes.
+        updateOptionsBar()
         updateStatus()
         updateActiveLayerRect()
     }
@@ -2434,14 +2425,21 @@ final class EditorViewController: NSViewController {
         // route in this build, and must not hit the layer while every
         // indicator names the channel); these backstops cover any path
         // around it.
-        guard !refuseAdjustmentPixelEdit(), !refusePlaneTargetEdit() else { return }
+        guard !refuseAdjustmentPixelEdit(), !refusePlaneTargetEdit(),
+              !refuseGroupPixelEdit()
+        else { return }
         let idx = document.activeLayerIndex
+        guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_PIXELS) else { return }
         let mask = selection.maskBytes()
         // Rewriting pixels invalidates a text layer's description, so this
         // goes through the rasterize prompt (Cancel abandons the edit).
+        let before = document.doc
         document.applyRasterizingEdit("Clear", layer: idx) { doc in
             doc.clearingSelection(idx, mask: mask)
         }
+        // A frozen alpha makes a clear a byte-exact no-op, which the core
+        // reports as nil and applyRasterizingEdit as a bare beep.
+        if document.doc === before { refuseFrozenAlpha(layer: idx) }
     }
 
     /// Edit > Cut (⌘X): Copy then Clear as one step — the ACTIVE LAYER's
@@ -2462,13 +2460,21 @@ final class EditorViewController: NSViewController {
         // a plane or channel targeted (Cut copies the LAYER's pixels, which
         // such a target does not name); these backstops cover any path
         // around it.
-        guard !refuseAdjustmentPixelEdit(), !refusePlaneTargetEdit() else { return }
+        // The group guard comes BEFORE the copy: a group's projection would
+        // otherwise land on the clipboard and only then would the clear
+        // fail, so ⌘X would silently degrade to Copy.
+        guard !refuseAdjustmentPixelEdit(), !refusePlaneTargetEdit(),
+              !refuseGroupPixelEdit()
+        else { return }
         let idx = document.activeLayerIndex
+        guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_PIXELS) else { return }
         guard copyToPasteboard(doc.layerCanvasImage(idx)) else { return }
         let mask = selection.maskBytes()
+        let before = document.doc
         document.applyRasterizingEdit("Cut", layer: idx) { doc in
             doc.clearingSelection(idx, mask: mask)
         }
+        if document.doc === before { refuseFrozenAlpha(layer: idx) }
     }
 
     /// Edit > Copy: the ACTIVE LAYER's pixels within the selection, the way
@@ -2636,6 +2642,14 @@ extension EditorViewController: NSUserInterfaceValidations {
             return false
         }
 
+        // Every item this phase added — group, ungroup, the locks, align,
+        // distribute, link, arrange, via copy/cut, merge/stamp visible —
+        // answers through ONE early-out rather than two dozen cases in a
+        // switch that already carries thirty-two (EditorViewController
+        // +Locks.swift). nil means "not one of mine", and the switch below
+        // decides as before.
+        if let handled = validateStructureItem(item) { return handled }
+
         switch item.action {
         case #selector(freeTransform(_:)):
             // Needs a layer with pixels to transform.
@@ -2691,7 +2705,7 @@ extension EditorViewController: NSUserInterfaceValidations {
             // wells name a channel, the item stands down (the Fill tool is
             // how a plane or channel is cleared).
             guard !isEditingText, canvas.selection != nil, !activeLayerIsAdjustment,
-                  !paintTarget.targetsPlaneOrChannel
+                  !activeLayerIsGroup, !paintTarget.targetsPlaneOrChannel
             else { return false }
             return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
         case #selector(cut(_:)):
@@ -2701,7 +2715,7 @@ extension EditorViewController: NSUserInterfaceValidations {
             // such a target it would cut one thing and copy another. No
             // text-editing guard — ⌘X reaches a field editor first, which
             // claims cut: itself, exactly as ⌘C does for copy.
-            guard canvas.selection != nil, !activeLayerIsAdjustment,
+            guard canvas.selection != nil, !activeLayerIsAdjustment, !activeLayerIsGroup,
                   !paintTarget.targetsPlaneOrChannel
             else { return false }
             return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
@@ -2750,12 +2764,22 @@ extension EditorViewController: NSUserInterfaceValidations {
             else { return false }
             return AdjustmentLayerSheetController.opHasDialog(op)
         case #selector(deleteLayer(_:)):
-            return (document?.doc?.layerCount ?? 1) > 1
+            // What a removal TAKES is not the number of selected rows — a
+            // group takes its whole subtree (+Groups.swift).
+            return canDeleteLayer
         case #selector(mergeDown(_:)):
-            // The core refuses to merge into a hidden layer; mirror that
-            // here (and match the panel's merge button).
-            let active = document?.activeLayerIndex ?? 0
-            return active >= 1 && document?.doc?.layerInfo(active - 1)?.visible == true
+            // Retitled for a multi-selection (Photoshop's Merge Layers), and
+            // "the layer below" is the previous SIBLING — merging inside a
+            // group never reaches out of it. The core refuses to merge into
+            // a hidden layer; mirror that here (and match the panel's merge
+            // button).
+            let multiple = (document?.layerSelection.isMultiple ?? false)
+            if let menuItem = item as? NSMenuItem {
+                menuItem.title = multiple ? "Merge Layers" : "Merge Down"
+            }
+            if multiple { return canMergeSelectedLayers }
+            guard let below = clippingBaseBelowActiveLayer else { return false }
+            return document?.doc?.layerInfo(below)?.visible == true
         case #selector(flattenImage(_:)):
             return (document?.doc?.layerCount ?? 1) > 1
         case #selector(addLayerMaskRevealAll(_:)), #selector(addLayerMaskHideAll(_:)):
@@ -2778,7 +2802,7 @@ extension EditorViewController: NSUserInterfaceValidations {
                 menuItem.title =
                     activeLayerClipped ? "Release Clipping Mask" : "Create Clipping Mask"
             }
-            return (document?.activeLayerIndex ?? 0) >= 1
+            return clippingBaseBelowActiveLayer != nil
         case #selector(copy(_:)):
             // Copy takes the ACTIVE LAYER's pixels, and an adjustment layer
             // has none worth copying — its effect lives in the composite, so

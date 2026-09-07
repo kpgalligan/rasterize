@@ -321,7 +321,11 @@ extension AgentServer {
         // target, so the same call means the same thing whatever the app's
         // panel happens to be showing.
         let paint = try paintTarget(a, document, allowMask: false)
-        let layer = try paintLayerIndex(a, document)
+        // Structural, then the group guard only where the layer's own pixels
+        // are written: a CHANNEL target is document state, so a group index
+        // sitting in `layer` (right after ⌘G, say) must not refuse the call.
+        let layer = try structuralLayerIndex(a, document)
+        if paint == .layer || paint.isPlane { try rejectGroupPixelEdit(document, layer) }
         var parameters = ApplyImageParameters()
         parameters.source = try sourceLayer(a, doc, key: "source")
         parameters.sourcePlane = try planeChoice(a, doc, key: "source_plane")

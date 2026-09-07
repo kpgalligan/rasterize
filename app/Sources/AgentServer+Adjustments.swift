@@ -210,6 +210,14 @@ extension AgentServer {
     /// never pins the black point at 0), then apply the SAME levels math the
     /// Levels dialog and the levels adjustment run. One undo step; an image
     /// already at full range writes nothing and reports `changed: false`.
+    ///
+    /// A GROUP is refused, by `paintLayerIndex` and in its words: a group has
+    /// no pixels of its own to stretch, only a projection of the layers
+    /// inside it, and writing that projection back would flatten the group.
+    /// The refusal names the group's children so a model can auto-level them
+    /// one at a time — or it can add a levels ADJUSTMENT LAYER inside the
+    /// group, which recolors everything below it there without touching a
+    /// single stored pixel.
     private func autoLevels(
         _ a: [String: Any], mode: RzAutoMode, action: String
     ) throws -> String {

@@ -188,6 +188,12 @@ typedef enum {
   RZ_BLEND_SATURATION = 24,
   RZ_BLEND_COLOR = 25,
   RZ_BLEND_LUMINOSITY = 26,
+  /* A GROUP whose children composite straight onto the backdrop below the
+     group instead of into a private buffer. Not a blend function: legal only
+     on a group entry (see "Layer groups" below), refused by
+     rz_doc_with_layer_blend_mode on a raster layer and by every plane and
+     paint blend. */
+  RZ_BLEND_PASS_THROUGH = 27,
 } RzBlendMode;
 
 /* Opens a document. Sniffing order: files starting "RZDC" are native
@@ -212,8 +218,11 @@ void rz_doc_free(RzDocument *doc);
  * section below states, and the one rz_max_channels_at answers), or a layer
  * or channel PNG over 512 MiB is an error; layer and channel names longer
  * than 64 KiB are truncated on a UTF-8 character boundary, and each of the
- * four version-6 document blobs is capped at 16 MiB. Layout
- * (little-endian): "RZDC", u32 version=6,
+ * four version-6 document blobs is capped at 16 MiB. A malformed depth
+ * sequence, a nesting deeper than ten levels, and a document whose isolated
+ * groups declare more canvas area than this build will composite are errors
+ * too, at BOTH ends: the writer refuses to produce a file it could not read
+ * back. Layout (little-endian): "RZDC", u32 version=7,
  * u32 canvas width, u32 canvas height, u32 layer count, then (version 4)
  * f32 global-light angle and f32 altitude in degrees; then per layer
  * bottom-to-top: u32 name byte length + UTF-8 name, i32 offset x, i32
@@ -221,15 +230,28 @@ void rz_doc_free(RzDocument *doc);
  * PNG-encoded RGBA8 layer pixels; then the version-2 fields, which a
  * version-1 record simply lacks: u8 mask present, u8 mask enabled, u32 mask
  * byte length + that many RAW coverage bytes when present (a mask is always
- * the layer's pixel count, so its dimensions are not stored twice), then u8
+ * the layer's pixel count — or, for a GROUP, the canvas's; see the
+ * version-7 fields below — so its dimensions are not stored twice), then u8
  * layer-metadata present and, when present, u32 byte length + UTF-8 bytes (see
  * "Layer metadata" below); then the version-3 field, appended after all the
  * version-2 fields (each older record is a strict prefix of the next): u8
  * clipped (see "Clipping masks" below); then the version-4 field: u8
  * layer-style present and, when present, u32 byte length + UTF-8 canonical
- * style JSON (see "Layer styles" below). After the LAST layer record comes
- * the version-5 block, the alpha channel list (see "Channels" below): u32
- * channel count, then per channel u32 name byte length + UTF-8 name, u8
+ * style JSON (see "Layer styles" below); then the version-7 fields, twelve
+ * bytes closing the record (see "Layer groups, locks, links and structure"
+ * below): u32 lock flags (an RzLockFlags bitmask, bits 3..31 reserved and
+ * masked off by the reader), u32 link-group id (0 = unlinked), u16 nesting
+ * depth (0 = top level), u8 kind (0 = raster, 1 = group; any other value is
+ * an error) and u8 group-open, the panel disclosure flag, which is
+ * meaningless on a raster entry. A GROUP entry's pixel PNG is a 1x1 fully
+ * transparent PNG, so the record shape stays uniform; its MASK, however, is
+ * CANVAS-sized rather than layer-sized, so the reader accepts a stored mask
+ * length equal to either and only builds the mask once the kind byte says
+ * which it must be, refusing the wrong pairing. Note that whole-FILE
+ * prefixing does not hold for version 7 — its bytes go inside each record,
+ * not at the tail, exactly as version 4's did. After the LAST layer record
+ * comes the version-5 block, the alpha channel list (see "Channels" below):
+ * u32 channel count, then per channel u32 name byte length + UTF-8 name, u8
  * overlay red, u8 green, u8 blue, f32 overlay opacity, u8 color-indicates-
  * selected, and u32 PNG byte length + a PNG-encoded 8-bit GRAYSCALE (L8)
  * plane of exactly the canvas size (a channel is always canvas-sized, so its
@@ -242,11 +264,13 @@ void rz_doc_free(RzDocument *doc);
  * stored verbatim and never interpreted; the ICC slot is written ABSENT
  * when the document's profile is the built-in sRGB, and an absent slot
  * reads back as that profile, so a blob-less version-6 file is a version-5
- * file plus exactly 12 bytes. Version-1, -2, -3, -4 and -5 files still
+ * file plus exactly 12 bytes. Version-1, -2, -3, -4, -5 and -6 files still
  * load, missing fields taking their defaults: no mask and no metadata on any
  * layer (v1), clipped false (v1 and v2), no style on any layer and a
- * (120°, 30°) global light (v1–v3), no channels (v1–v4), and a 72 × 72 ppi
- * resolution, the built-in sRGB profile and no metadata packets (v1–v5). A
+ * (120°, 30°) global light (v1–v3), no channels (v1–v4), a 72 × 72 ppi
+ * resolution, the built-in sRGB profile and no metadata packets (v1–v5), and
+ * an unlocked, unlinked, open RASTER entry at depth 0 — a flat stack — for
+ * every layer (v1–v6). A
  * style is read leniently: a style from a newer build keeps the effects this
  * build knows; the resolution is sanitized rather than refused, exactly like
  * the global light. */
@@ -258,7 +282,13 @@ uint32_t rz_doc_height(const RzDocument *doc);
 size_t rz_doc_layer_count(const RzDocument *doc);
 
 /* Layer getters. Out-of-range idx: NULL / 0 / RZ_BLEND_NORMAL / false.
- * rz_doc_layer_name returns a heap string freed with rz_string_free. */
+ * rz_doc_layer_name returns a heap string freed with rz_string_free.
+ * The four geometry getters report the entry's PIXEL BUFFER rect: for a
+ * RASTER entry its offset and dimensions, unchanged, and for a GROUP (see
+ * "Layer groups" below) — which has no buffer of its own — the union of its
+ * raster descendants' buffer rects, 0 for a group holding none. One meaning
+ * for both kinds, and cheap on both: rz_doc_layer_bounds is the CONTENT box
+ * (the opaque pixels), and callers that mean that ask for it by name. */
 char *rz_doc_layer_name(const RzDocument *doc, size_t idx);
 float rz_doc_layer_opacity(const RzDocument *doc, size_t idx);
 RzBlendMode rz_doc_layer_blend_mode(const RzDocument *doc, size_t idx);
@@ -268,16 +298,21 @@ int32_t rz_doc_layer_offset_y(const RzDocument *doc, size_t idx);
 uint32_t rz_doc_layer_width(const RzDocument *doc, size_t idx);
 uint32_t rz_doc_layer_height(const RzDocument *doc, size_t idx);
 
-/* Copy of a layer's pixels at the layer's own size. */
+/* Copy of a layer's pixels at the layer's own size. NULL on a GROUP, which
+ * has no pixels of its own. */
 RzImage *rz_doc_layer_image(const RzDocument *doc, size_t idx);
 
 /* A layer's own pixels on a transparent CANVAS-sized image, placed at its
  * offset — the single-layer counterpart of rz_doc_flattened. Opacity, blend
  * mode, visibility and the layer mask are ignored: they say how the layer
- * composites, not what its pixels are. */
+ * composites, not what its pixels are. On a GROUP this is its RAW projection
+ * — its children only, without the group's own opacity, blend mode, mask or
+ * style — which keeps exactly the same contract. */
 RzImage *rz_doc_layer_canvas_image(const RzDocument *doc, size_t idx);
 
-/* Aspect-fit thumbnail of a layer, longest side == max_side (min 1). */
+/* Aspect-fit thumbnail of a layer, longest side == max_side (min 1). On a
+ * GROUP it is that projection, aspect-fit; a layers panel wanting a cheap
+ * group row should draw a folder glyph rather than ask for one per reload. */
 RzImage *rz_doc_layer_thumbnail(const RzDocument *doc, size_t idx,
                                 uint32_t max_side);
 
@@ -287,21 +322,37 @@ RzImage *rz_doc_layer_thumbnail(const RzDocument *doc, size_t idx,
  *   ao = as' + ab*(1-as')
  *   Co = ( as'*(1-ab)*Cs + as'*ab*B(Cb,Cs) + (1-as')*ab*Cb ) / ao   (ao > 0)
  * Invisible layers are skipped; areas a layer does not cover use Cb. Layers
- * flagged clipped composite in groups with the unclipped layer beneath them
- * (see "Clipping masks" below). Layers carrying a style composite with their
+ * flagged clipped composite in groups with the unclipped SIBLING beneath them
+ * (see "Clipping masks" below), and LAYER GROUPS composite as described under
+ * "Layer groups" below — pass-through groups transparently, isolated ones
+ * rendered once into a private buffer. Layers carrying a style composite with their
  * effects (see "Layer styles" below). */
 RzImage *rz_doc_flattened(const RzDocument *doc);
 
 /* Pure per-layer setters: return a NEW document (input untouched), NULL on
- * out-of-range idx or NULL args. Opacity is clamped to [0,1]. */
+ * out-of-range idx or NULL args. Opacity is clamped to [0,1]. Each also
+ * answers NULL when the entry ALREADY holds the value passed (the offset
+ * pair included, on a group as on a layer): an op that changes nothing
+ * returns nothing, so a host reading a row and writing it straight back adds
+ * no undo step and does not dirty the document. */
 RzDocument *rz_doc_with_layer_name(const RzDocument *doc, size_t idx,
                                    const char *name);
 RzDocument *rz_doc_with_layer_opacity(const RzDocument *doc, size_t idx,
                                       float opacity);
+/* RZ_BLEND_PASS_THROUGH is legal only on a GROUP; naming it for a raster
+ * layer is a refusal (NULL). */
 RzDocument *rz_doc_with_layer_blend_mode(const RzDocument *doc, size_t idx,
                                          RzBlendMode mode);
 RzDocument *rz_doc_with_layer_visible(const RzDocument *doc, size_t idx,
                                       bool visible);
+/* On a GROUP this SHIFTS the whole subtree, so the origin of the rect the four
+ * geometry getters report — the union of its layers' buffer rects — lands at
+ * (x, y); NULL for a group holding no layer. Every canvas-sized GROUP MASK in
+ * that subtree slides by the same delta: a mask travels with the thing it
+ * masks, on a group exactly as on a layer, and the area it vacates reads 0.
+ * Reading an entry's offset and writing it back is therefore the identity on
+ * both kinds of entry. It is a property write and deliberately does NOT follow
+ * links. */
 RzDocument *rz_doc_with_layer_offset(const RzDocument *doc, size_t idx,
                                      int32_t x, int32_t y);
 
@@ -312,13 +363,24 @@ RzDocument *rz_doc_with_layer_pixels(const RzDocument *doc, size_t idx,
                                      const RzImage *img);
 
 /* Stack operations (all pure). Insertion index semantics: the new layer is
- * inserted ABOVE idx (i.e. at position idx+1); idx must be in range. */
+ * inserted ABOVE idx — above its whole SUBTREE, at idx's own depth, which is
+ * position idx+1 on a document with no groups and rz_doc_layer_subtree's
+ * *out_end in general. idx must be in range. */
 RzDocument *rz_doc_adding_layer(const RzDocument *doc, size_t idx,
                                 const char *name); /* transparent, canvas-sized, offset 0 */
 RzDocument *rz_doc_adding_image_layer(const RzDocument *doc, size_t idx,
                                       const RzImage *img, const char *name);
+/* Duplicates the entry and, for a group, its whole subtree — depths kept,
+ * " copy" appended to the top entry's name only. Metadata and style are
+ * copied like every other property; LINKS are not. */
 RzDocument *rz_doc_duplicating_layer(const RzDocument *doc, size_t idx);
-RzDocument *rz_doc_removing_layer(const RzDocument *doc, size_t idx); /* NULL if last layer */
+/* Removes the entry and, for a group, its whole subtree. NULL when that would
+ * leave the document with no entries at all. */
+RzDocument *rz_doc_removing_layer(const RzDocument *doc, size_t idx);
+/* Removes the entry (with its subtree) and reinserts it at `to`, taking the
+ * DEPTH of whatever entry sits at `to` — the natural reading of a panel drag
+ * onto a row, and byte-for-byte the old remove-then-insert on a document with
+ * no groups. rz_doc_move_layer_to names a depth explicitly. */
 RzDocument *rz_doc_moving_layer(const RzDocument *doc, size_t from, size_t to);
 
 /* Merges layer idx (idx >= 1) into the layer below it. BOTH layers' blend
@@ -329,9 +391,13 @@ RzDocument *rz_doc_moving_layer(const RzDocument *doc, size_t from, size_t to);
  * layers' extents. A CLIPPED upper layer is baked through its clipping: its
  * contribution is alpha-limited to the lower layer's footprint (the same
  * group kernel as the projection — see "Clipping masks" below). An invisible
- * upper layer is simply removed. NULL if idx == 0 / out of range, or if the
- * LOWER layer is hidden (the merge would discard the upper layer's
- * content). */
+ * upper layer is simply removed. "The layer below" is the previous SIBLING —
+ * the entry immediately below within the entry's own level, which is idx - 1
+ * on a document with no groups — and either operand may be a GROUP, which is
+ * rendered to pixels first, so a group merged down (or merged into) becomes a
+ * plain raster entry and its subtree is removed. NULL if idx is at the BOTTOM
+ * of its level / out of range, or if the LOWER entry is hidden (the merge
+ * would discard the upper entry's content). */
 RzDocument *rz_doc_merging_down(const RzDocument *doc, size_t idx);
 
 /* Single-layer document containing the projection, named "Background". */
@@ -849,10 +915,14 @@ bool rz_selection_smooth(uint8_t *mask, uint32_t width, uint32_t height,
 
 /* ---- Layer masks --------------------------------------------------------
  *
+ * A GROUP's mask is CANVAS-sized rather than layer-sized; see "Layer groups"
+ * below for the whole rule, which every export in this section follows.
+ *
  * A layer mask is a per-layer grayscale coverage channel gating the layer's
  * alpha while compositing: 0 hides, 255 shows, intermediate values are
  * partial coverage, multiplied on top of the layer's opacity. A mask is
- * always exactly the LAYER's pixel size (never the canvas size) and it moves,
+ * always exactly the LAYER's pixel size (a GROUP's, which has no pixel
+ * buffer, is the canvas's — the one exception) and it moves,
  * rotates, crops and scales WITH the layer (GIMP-style), so it keeps hiding
  * the same layer content wherever the layer sits on the canvas; replacing a
  * layer's pixels with a differently sized image drops it. Masks ride along
@@ -1193,13 +1263,16 @@ bool rz_blend_planes_rgb(uint8_t *base_r, uint8_t *base_g, uint8_t *base_b,
 /* ---- Clipping masks -----------------------------------------------------
  *
  * Every layer carries a CLIPPED flag (default false): a clipped layer is
- * confined to the alpha footprint of the first unclipped layer beneath it —
- * Photoshop clipping-mask semantics, "blend clipped layers as group". Group
- * structure is purely POSITIONAL and re-derived at every composite: any
- * unclipped layer is a BASE, and its clip group is the consecutive run of
- * clipped layers immediately above it, so reordering or deleting layers
- * needs no bookkeeping. A clipped layer at the BOTTOM of the stack (nothing
- * unclipped below) has no base and composites as if unclipped.
+ * confined to the alpha footprint of the first unclipped SIBLING beneath it
+ * — Photoshop clipping-mask semantics, "blend clipped layers as group". Clip
+ * structure is purely POSITIONAL and re-derived at every composite, WITHIN
+ * EACH LEVEL: any unclipped entry is a BASE, and its clip group is the
+ * consecutive run of clipped siblings immediately above it, so reordering or
+ * deleting entries needs no bookkeeping. A clipped entry at the BOTTOM of its
+ * level (nothing unclipped below it there) has no base and composites as if
+ * unclipped. A clip run never crosses a group boundary; a GROUP may be
+ * clipped and may be a clip base, and either makes it composite as a unit
+ * (see "Layer groups" below).
  *
  * A base with no clipped layers above composites exactly as it always did.
  * A non-empty group blends as one unit: the base renders into a private
@@ -1290,7 +1363,9 @@ RzDocument *rz_doc_with_layer_meta(const RzDocument *doc, size_t idx,
  * backdrop, pushed through its blend mode and scaled by opacity * mask
  * coverage (an unmasked adjustment layer reaches the whole canvas; alpha is
  * never changed). False on out-of-range idx, absent meta, or meta that does
- * not parse as an adjustment (such a layer composites as plain raster). */
+ * not parse as an adjustment (such a layer composites as plain raster), and
+ * ALWAYS false on a GROUP: the core never interprets a group's metadata, so a
+ * blob that happened to parse cannot turn a group into an adjustment. */
 bool rz_doc_layer_is_adjustment(const RzDocument *doc, size_t idx);
 
 /* Replaces layer idx's pixels with a copy of a straight-alpha RGBA8 buffer
@@ -1330,7 +1405,9 @@ RzDocument *rz_doc_set_layer_content(const RzDocument *doc, size_t idx,
  * of the pixels only, never of the effects) and Blend If (two split-slider
  * ramps, on this layer and on the composite beneath, weighting the layer's
  * alpha). The effects are functions of the layer's SHAPE (its alpha times
- * its enabled mask) and are rendered by the projection only:
+ * its enabled mask) — a GROUP may carry a style, whose shape is then its own
+ * rendered projection, and an adjustment layer may not — and are rendered by
+ * the projection only:
  * rz_doc_layer_image, rz_doc_layer_canvas_image and the thumbnails stay
  * effect-free, exactly as they stay mask-free.
  *
@@ -1414,6 +1491,393 @@ RzDocument *rz_doc_set_global_light(const RzDocument *doc, float angle,
 /* The global light's components in degrees; 0.0 on NULL doc. */
 float rz_doc_global_light_angle(const RzDocument *doc);
 float rz_doc_global_light_altitude(const RzDocument *doc);
+
+/* ---- Layer groups, locks, links and structure ---------------------------
+ *
+ * The layer stack is a FOREST, flattened. Every entry carries a KIND (raster
+ * or group), a nesting DEPTH (0 at the top level) and — new with them — lock
+ * flags, a link-group id and, for a group, a panel disclosure flag. A GROUP's
+ * children are the entries immediately BELOW it at greater depth, and the
+ * group's own record is the LAST record of its own subtree, so the array
+ * stays bottom-first and children come before the group that holds them:
+ *
+ *     index 0  Layer 0   depth 0
+ *     index 1  Layer A   depth 1   |
+ *     index 2  Layer B   depth 1   |  children of Group 1
+ *     index 3  Group 1   depth 0
+ *
+ * That is Photoshop's panel order read bottom-up and exactly how PSD stores
+ * it. Every existing export still addresses an entry by its flat index, and
+ * rz_doc_layer_count still counts ENTRIES, groups included. A group has no
+ * pixels of its own: rz_doc_layer_image is NULL for one, every pixel writer
+ * refuses one, and rz_doc_layer_offset_x/y/width/height answer the union of
+ * its raster descendants' buffer rects instead of a pixel rect of its own.
+ *
+ * COMPOSITING. A group renders ISOLATED — its children into a private buffer
+ * over their own extent, quantized once and composited as a single layer with
+ * the group's opacity, blend mode, mask, style and clipped flag — when
+ * anything about it needs its own RENDERED PIXELS or its own footprint: any
+ * blend mode other than RZ_BLEND_PASS_THROUGH, a style, its own clipped flag,
+ * or a VISIBLE clipped layer above it. A plain PASS-THROUGH group (the
+ * default for a new group) allocates nothing: its children composite straight
+ * onto the backdrop below the group, which is what lets an adjustment layer
+ * inside a group reach the layers beneath it. Note the consequence, which is
+ * Photoshop's too: CLIPPING any layer to a pass-through group makes that
+ * group composite as a unit, and an adjustment layer inside it then stops
+ * reaching the layers below the group.
+ *
+ * A pass-through group's own MASK and OPACITY do NOT isolate it: they GATE it
+ * per pixel instead. Its children composite onto a copy of the real backdrop
+ * and the result is mixed back by mask/255 * opacity, so an adjustment layer
+ * inside a masked group is RESTRICTED to where the mask is white (and scaled
+ * by the opacity) rather than switched off — "group the adjustment layers and
+ * mask the group" works, and a reveal-all mask at opacity 1 is byte-identical
+ * to no mask at all. Isolating for them would composite the adjustment
+ * against a fresh transparent buffer, where an adjustment never touches a
+ * pixel, and the effect would disappear entirely.
+ *
+ * Nesting is arbitrary up to ten levels; deeper is refused, and a projection's
+ * group buffers are additionally capped so a crafted file cannot exhaust
+ * memory (a group whose buffer would pass the cap simply contributes
+ * nothing).
+ *
+ * CLIPPING is re-derived WITHIN a level: a clipped entry clips to the first
+ * unclipped SIBLING below it, never across a group boundary, and a clipped
+ * entry at the bottom of its level has no base and composites as if
+ * unclipped — a GROUP there keeps passing through, since a flag the
+ * compositor ignores never forces isolation either. So clipping a group to a
+ * sibling that does not exist, or sending an already-clipped group to the
+ * back of its level, changes no picture.
+ *
+ * A GROUP's MASK is CANVAS-sized, unlike a layer's, which is always its
+ * layer's own size — a group has no pixel buffer to be the size of, and
+ * Photoshop's group masks are canvas space too. rz_doc_adding_layer_mask
+ * creates one at the canvas size for all three kinds,
+ * rz_doc_painting_layer_mask validates against the canvas, and
+ * rz_doc_removing_layer_mask with apply == true is REFUSED on a group (there
+ * are no pixels to bake into). The whole-document geometry ops carry a group
+ * mask the way they carry a channel: cut down by crop, padded by canvas
+ * resize, resampled to the new canvas by resize. A group mask also TRAVELS
+ * WITH ITS GROUP: rz_doc_move_layers and rz_doc_with_layer_offset slide it by
+ * the move's delta and rz_doc_transform_layers warps it through the same
+ * affine, so a masked group behaves identically whichever gesture moved it.
+ * A TRANSLATE moves it as BOOKKEEPING — the group entry's own offset, which
+ * has no other meaning on a group — and never as a resample, so a Move drag
+ * that goes out and comes back, or two opposite arrow nudges, restore the
+ * mask exactly rather than eating a band of it per step. The plane is
+ * resampled once, by the next op that needs the mask as a canvas plane.
+ *
+ * LOCKS are a bitmask (RzLockFlags). Transparency freezes the layer's alpha
+ * channel — a stroke changes colour but never coverage, and an eraser cannot
+ * punch a hole. Pixels refuses every pixel edit but leaves the MASK editable,
+ * as Photoshop does — except APPLYING one (RZ_EDIT_MASK_APPLY), which bakes
+ * the coverage into the layer's alpha and so answers to Transparency too.
+ * Position refuses offset changes, moves, transforms and
+ * perspective; on a group it also consults every descendant's bit, because
+ * moving a group moves them. All three set is "Lock All", which additionally
+ * freezes the mask. A MERGE (RZ_EDIT_MERGE) answers to the DESTINATION
+ * entry's Pixels and Transparency bits: it replaces that entry's whole
+ * picture at a new extent. A TRANSFORM is a POSITION edit and never a Pixels one: it
+ * resamples the whole buffer including its alpha, so a frozen alpha channel
+ * has no meaning there, and a transparency-locked layer stays transformable
+ * exactly as in Photoshop. Locks never block delete, duplicate, reorder,
+ * group/ungroup, rename, opacity, blend mode, visibility or style.
+ *
+ * LINKS are a group id on each entry (0 = unlinked): every entry sharing a
+ * non-zero id moves and transforms with the others. rz_doc_with_layer_offset
+ * deliberately does NOT follow links — it is a property write, not a move;
+ * rz_doc_move_layers and rz_doc_transform_layers do.
+ *
+ * Groups, locks, links and the disclosure flag round-trip through
+ * rz_doc_save_native: they are what bumped the RZDC format to version 7. */
+
+typedef enum {
+  RZ_LAYER_RASTER = 0,
+  RZ_LAYER_GROUP = 1,
+} RzLayerKind;
+
+/* A uint32_t bitmask. Bits 3..31 are reserved and are masked off wherever a
+   value enters. */
+typedef enum {
+  RZ_LOCK_TRANSPARENCY = 1,
+  RZ_LOCK_PIXELS = 2,
+  RZ_LOCK_POSITION = 4,
+  RZ_LOCK_ALL = 7,
+} RzLockFlags;
+
+typedef enum {
+  RZ_EDIT_PIXELS = 0,
+  RZ_EDIT_POSITION = 1,
+  RZ_EDIT_MASK = 2,
+  /* Applying a layer mask: a mask op that also bakes the coverage into the
+     layer's ALPHA, so Lock Transparency refuses it as well as Lock All. */
+  RZ_EDIT_MASK_APPLY = 3,
+  /* A merge writing this entry: its whole picture is replaced, at a new
+     extent. Lock Pixels and Lock Transparency both refuse it. */
+  RZ_EDIT_MERGE = 4,
+} RzEditKind;
+
+typedef enum {
+  RZ_ARRANGE_FRONT = 0,
+  RZ_ARRANGE_FORWARD = 1,
+  RZ_ARRANGE_BACKWARD = 2,
+  RZ_ARRANGE_BACK = 3,
+} RzArrange;
+
+typedef enum {
+  RZ_ALIGN_LEFT = 0,
+  RZ_ALIGN_CENTER_X = 1,
+  RZ_ALIGN_RIGHT = 2,
+  RZ_ALIGN_TOP = 3,
+  RZ_ALIGN_CENTER_Y = 4,
+  RZ_ALIGN_BOTTOM = 5,
+} RzAlign;
+
+/* --- the entry model (getters and pure setters) --- */
+
+/* True when entry idx is a GROUP; false on NULL doc, out-of-range idx or a
+ * raster layer. */
+bool rz_doc_layer_is_group(const RzDocument *doc, size_t idx);
+
+/* The entry's nesting depth (0 at the top level); 0 on NULL doc or
+ * out-of-range idx. */
+uint32_t rz_doc_layer_depth(const RzDocument *doc, size_t idx);
+
+/* The entry's subtree as the half-open range [*out_start, *out_end): the
+ * entry itself for a raster layer, the whole group for a group. *out_end is
+ * exactly where a new sibling inserted "above" this entry lands, which is
+ * what rz_doc_adding_layer, rz_doc_adding_image_layer and
+ * rz_doc_duplicating_layer do — so a host that must select what it just
+ * created asks this rather than assuming idx + 1. Either out pointer may be
+ * NULL. False (nothing written) on NULL doc or out-of-range idx. */
+bool rz_doc_layer_subtree(const RzDocument *doc, size_t idx,
+                          size_t *out_start, size_t *out_end);
+
+/* The entry's lock flags (an RzLockFlags bitmask); 0 on NULL doc or
+ * out-of-range idx. */
+uint32_t rz_doc_layer_locks(const RzDocument *doc, size_t idx);
+
+/* Pure setter: replaces the entry's lock flags, reserved bits masked off.
+ * NULL on NULL doc or out-of-range idx. */
+RzDocument *rz_doc_with_layer_locks(const RzDocument *doc, size_t idx,
+                                    uint32_t locks);
+
+/* Which of the entry's lock bits would block an edit of `kind` (0 = allowed)
+ * — the query a host asks to phrase a refusal that NAMES the lock. The ops
+ * refuse regardless, so a host that never asks cannot get through. 0 on NULL
+ * doc, out-of-range idx or an unknown kind. */
+uint32_t rz_doc_lock_block(const RzDocument *doc, size_t idx, RzEditKind kind);
+
+/* The entry's link-group id (0 = unlinked); 0 on NULL doc or out-of-range
+ * idx. */
+uint32_t rz_doc_layer_link(const RzDocument *doc, size_t idx);
+
+/* Whether GROUP idx is shown expanded in the layers panel; false on NULL doc
+ * or out-of-range idx. Meaningless on a raster entry, which answers true. */
+bool rz_doc_layer_open(const RzDocument *doc, size_t idx);
+
+/* Pure setter: expands or collapses GROUP idx. NULL on NULL doc,
+ * out-of-range idx or a raster entry. */
+RzDocument *rz_doc_with_layer_open(const RzDocument *doc, size_t idx,
+                                   bool open);
+
+/* The entry's CONTENT bounds — the canvas box of its OPAQUE pixels with its
+ * enabled mask applied, and for a group the union over its raster
+ * descendants — written to out_xywh as x, y, width, height. This is the rect
+ * rz_doc_align_layers and rz_doc_distribute_layers act on, and it is NOT the
+ * pixel rect rz_doc_layer_offset_x/width report for a raster layer: a
+ * photo-shaped layer on a canvas-sized buffer has two different rectangles.
+ * Not clipped to the canvas, and blind to the visible flag (this says what
+ * the entry HOLDS). False (nothing written) on NULL doc, out-of-range idx, or
+ * an entry with nothing opaque in it. */
+bool rz_doc_layer_bounds(const RzDocument *doc, size_t idx, int32_t *out_xywh);
+
+/* --- structure --- */
+
+/* Wraps the given entries — which must all share ONE parent — in a new group
+ * named `name`, whose index comes back through out_group. The subtrees are
+ * gathered in their existing relative order and the group is inserted so its
+ * subtree occupies the TOPMOST given entry's slot; the gathered depths shift
+ * by +1. The new group is Pass Through, opacity 1, visible, open, unclipped,
+ * with no mask, style, locks or link.
+ *
+ * Two things the caller must be able to report come back alongside it, as NEW
+ * indices, in the optional buffers out_cleared_clip and out_reordered (each
+ * out_cap size_t entries; their true lengths always come back through
+ * out_cleared_len / out_reordered_len, so a short buffer is detectable and a
+ * buffer of rz_doc_layer_count entries can never truncate):
+ *   - the BOTTOM-MOST grouped entry has its clipped flag CLEARED when it was
+ *     set, since nothing inside the group is below it to clip to (Photoshop's
+ *     behaviour; without it the entry would silently composite as if
+ *     unclipped);
+ *   - a NON-CONTIGUOUS set gathers the subtrees into the topmost given
+ *     entry's slot, so entries left between them change their relative
+ *     position (grouping {A, C} out of [A, B, C] leaves B below A).
+ *
+ * NULL on NULL doc or name, an empty / out-of-range / repeating index list,
+ * entries that do not share one parent, and a nesting past ten levels. */
+RzDocument *rz_doc_group_layers(const RzDocument *doc, const size_t *idx,
+                                size_t len, const char *name,
+                                size_t *out_group, size_t *out_cleared_clip,
+                                size_t *out_cleared_len, size_t *out_reordered,
+                                size_t *out_reordered_len, size_t out_cap);
+
+/* Dissolves group idx: its children take its depth and its slot, in order,
+ * and the group entry is removed. The group's own mask, style, opacity, blend
+ * mode and clipped flag are DISCARDED — they cannot be expressed on the
+ * children — so a caller that wants to report the loss must read them first.
+ *
+ * out_cleared_clip / out_cleared_len / out_cap are the same optional report
+ * rz_doc_group_layers takes, and the mirror image of it: inside the group the
+ * bottom-most child was at the BOTTOM of its level, so a clipped flag on it
+ * was baseless and composited as unclipped; out at the parent level it could
+ * land above an unclipped sibling and suddenly clip to it. An entry that was
+ * baseless therefore STAYS baseless — the flag is cleared — and the entry's
+ * NEW index comes back here so the caller can say so. At most one entry.
+ *
+ * NULL on NULL doc, out-of-range idx, a raster entry, or when the document
+ * would be left with no entries at all. */
+RzDocument *rz_doc_ungroup_layer(const RzDocument *doc, size_t idx,
+                                 size_t *out_cleared_clip,
+                                 size_t *out_cleared_len, size_t out_cap);
+
+/* THE structural move: the entry at `from` and its whole subtree land at
+ * index `to` — an index into the stack with that subtree already taken out,
+ * exactly as rz_doc_moving_layer has always meant — at `depth`. This is how a
+ * layer moves INTO or OUT OF a group.
+ *
+ * There is deliberately no "not into your own subtree" refusal: because `to`
+ * numbers the stack with the subtree ALREADY removed, every value in range is
+ * a legal insertion point and landing inside the moved block is impossible by
+ * construction. A guard written in the PRE-drain numbering would refuse the
+ * commonest panel drag — a group dropped one place up over a smaller sibling.
+ * `to` past the end is clamped to the end.
+ *
+ * NULL on NULL doc, an out-of-range index, a depth past ten levels, any
+ * (to, depth) pair whose result would be a malformed structure, and a move
+ * that would leave the stack exactly as it is (the core's no-op rule, so a
+ * drag that put an entry back where it started mints no undo step). */
+RzDocument *rz_doc_move_layer_to(const RzDocument *doc, size_t from, size_t to,
+                                 uint32_t depth);
+
+/* Moves entry idx among its SIBLINGS only — never into or out of a group. To
+ * change an entry's level use rz_doc_move_layer_to. NULL on NULL doc,
+ * out-of-range idx, or when the entry is already there. */
+RzDocument *rz_doc_arrange_layer(const RzDocument *doc, size_t idx,
+                                 RzArrange how);
+
+/* Links the given entries: they take the smallest unused non-zero link id, so
+ * a save round trip is byte-identical. Unlink clears theirs, and an id left
+ * with a single member is cleared too (a link group of one is not a link).
+ * NULL on NULL doc or an empty / out-of-range / repeating index list, and
+ * when nothing would change. */
+RzDocument *rz_doc_link_layers(const RzDocument *doc, const size_t *idx,
+                               size_t len);
+RzDocument *rz_doc_unlink_layers(const RzDocument *doc, const size_t *idx,
+                                 size_t len);
+
+/* --- set operations ---
+ *
+ * Each takes an explicit index list and makes ONE document, never a sequence
+ * of single-entry calls: every structural op renumbers, so a host loop would
+ * address the wrong entries after the first step. The set is expanded by
+ * SUBTREE and then by LINK GROUP, deduplicated; each call is all-or-nothing.
+ * NULL on NULL doc, an empty / out-of-range / repeating list, a lock that
+ * forbids the edit, and — the core's own rule — when nothing would change. */
+
+/* Translates every given entry by (dx, dy). The ONE move-a-set op: the Move
+ * tool, the arrow-key nudge and align/distribute all go through it. A GROUP
+ * has no offset of its own — its raster descendants are in the expanded set
+ * and move on their own — but its canvas-sized MASK slides by the same delta,
+ * so a masked group drags exactly as it transforms. */
+RzDocument *rz_doc_move_layers(const RzDocument *doc, const size_t *idx,
+                               size_t len, int32_t dx, int32_t dy);
+
+/* The same affine applied to every given entry, each deriving its own
+ * destination extent. `affine` is six doubles, as in rz_doc_transform_layer. */
+RzDocument *rz_doc_transform_layers(const RzDocument *doc, const size_t *idx,
+                                    size_t len, const double *affine,
+                                    RzResizeFilter sampler);
+
+/* The same affine applied to the WHOLE stack — the Crop tool's straighten.
+ * Per-entry POSITION locks do NOT gate it: straightening re-frames the
+ * picture rather than moving a layer within it, which is why rz_doc_crop,
+ * rz_doc_geometry, rz_doc_canvas_resize and rz_doc_resize do not consult a
+ * layer lock either. NULL on NULL doc or affine, an unknown sampler, any
+ * entry the transform itself refuses, and when nothing would change. */
+RzDocument *rz_doc_straighten_layers(const RzDocument *doc,
+                                     const double *affine,
+                                     RzResizeFilter sampler);
+
+/* Duplicates / removes every given entry (subtrees included). Removal runs
+ * top-down internally and refuses only when it would empty the document. */
+RzDocument *rz_doc_duplicate_layers(const RzDocument *doc, const size_t *idx,
+                                    size_t len);
+RzDocument *rz_doc_remove_layers(const RzDocument *doc, const size_t *idx,
+                                 size_t len);
+
+/* Merges the given entries — which must all share one parent — into ONE
+ * raster entry at the lowest member's slot and depth, through the same kernel
+ * as the projection, keeping the lowest member's name, visibility and clipped
+ * flag. Masks, meta and styles are baked and dropped exactly as
+ * rz_doc_merging_down documents. */
+RzDocument *rz_doc_merge_layers(const RzDocument *doc, const size_t *idx,
+                                size_t len);
+
+/* Aligns every given entry's CONTENT bounds (rz_doc_layer_bounds) to `edge`
+ * of the reference rect: the union of the given entries' bounds, or the
+ * canvas with to_canvas. An entry with nothing opaque is skipped. NULL when
+ * fewer than two entries have content and to_canvas is false. */
+RzDocument *rz_doc_align_layers(const RzDocument *doc, const size_t *idx,
+                                size_t len, RzAlign edge, bool to_canvas);
+
+/* Spaces the given entries evenly along one axis: the two outermost keep
+ * their positions and the gaps between adjacent CONTENT bounds are made equal
+ * (Photoshop's "distribute spacing", not "distribute centers"). Needs at
+ * least three entries with content; a negative gap is arithmetic, not an
+ * error. */
+RzDocument *rz_doc_distribute_layers(const RzDocument *doc, const size_t *idx,
+                                     size_t len, bool vertical);
+
+/* --- commands --- */
+
+/* Replaces every entry that CONTRIBUTES to the projection — visible, with
+ * every ancestor visible — with ONE canvas-sized raster entry holding the
+ * visible projection, inserted at the slot of the bottom-most contributing
+ * entry's top-level ancestor and named after that entry. Every entry that
+ * does not contribute SURVIVES untouched, a visible layer inside a hidden
+ * group included; a group survives if any descendant does. NULL on NULL doc
+ * and when fewer than two LEAF entries contribute. */
+RzDocument *rz_doc_merge_visible(const RzDocument *doc);
+
+/* Adds the visible projection as a NEW canvas-sized raster entry immediately
+ * above above_idx's subtree, at above_idx's depth. Nothing else changes. NULL
+ * on NULL doc, out-of-range above_idx or NULL name. */
+RzDocument *rz_doc_stamp_visible(const RzDocument *doc, size_t above_idx,
+                                 const char *name);
+
+/* Layer Via Copy / Via Cut: the source's pixels inside the canvas-sized
+ * coverage mask (or the whole layer when mask is NULL) become a new raster
+ * entry immediately above the source, same depth and same canvas position.
+ * This op RASTERIZES: it keeps neither the layer's metadata nor its style, so
+ * a host whose layer is a described one (text, shape) or an adjustment layer
+ * wants rz_doc_duplicating_layer instead. With cut, the same coverage is
+ * cleared from the source, under the source's locks. NULL on NULL doc or
+ * name, out-of-range idx, a group, an adjustment layer, a mask that is not
+ * canvas-sized, or a coverage that selects nothing inside the layer. */
+RzDocument *rz_doc_layer_via(const RzDocument *doc, size_t idx,
+                             const uint8_t *mask, uint32_t w, uint32_t h,
+                             bool cut, const char *name);
+
+/* The entry a click at canvas (x, y) activates — the TOPMOST one whose own
+ * coverage there is at least half (the same contour a selection is cut at),
+ * skipping invisible entries with their subtrees and skipping adjustment
+ * layers. A group hits when any descendant hits. With top_level the answer is
+ * the hit entry's top-level ancestor (Auto-Select: Group). False (nothing
+ * written) on NULL doc or when nothing is hit — the caller then leaves its
+ * selection alone rather than emptying it. */
+bool rz_doc_layer_at(const RzDocument *doc, int32_t x, int32_t y,
+                     bool top_level, size_t *out_idx);
 
 /* ---- Colour management and metadata -------------------------------------
  *

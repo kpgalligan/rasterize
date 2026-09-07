@@ -108,6 +108,7 @@
 //! slightly; the margin between skin at 1.7 and red-eye at 4.2 absorbs it.
 
 use crate::doc::RzDocument;
+use crate::doc_lock::EditKind;
 use crate::doc_select::feather_mask;
 
 /// Coverage above which a pixel joins a pupil candidate component. Low
@@ -129,8 +130,9 @@ impl RzDocument {
     /// an empty rect or one entirely off-canvas; a layer extent that misses
     /// the rect; nothing red at all inside the rect; no red component the
     /// rect both CONTAINS and admits under `pupil_size` (a DISTINCT refusal
-    /// from "nothing red" — the callers say so, naming `pupil_size`); or no
-    /// byte moving.
+    /// from "nothing red" — the callers say so, naming `pupil_size`); no
+    /// byte moving; or a GROUP index, which has no pixels of its own. A
+    /// PIXELS edit under `doc_lock`.
     // The parameter list deliberately mirrors `rz_doc_red_eye_layer`'s C
     // signature one-for-one; bundling them into a struct would only move
     // the count somewhere else.
@@ -145,7 +147,25 @@ impl RzDocument {
         pupil_size: f32,
         darken: f32,
     ) -> Option<Self> {
-        let layer = self.layers.get(idx)?;
+        self.under_locks(idx, EditKind::Pixels, |doc| {
+            doc.red_eye_layer_unlocked(idx, x, y, w, h, pupil_size, darken)
+        })
+    }
+
+    /// The body of [`Self::red_eye_layer`], outside the lock gate. Split out
+    /// only so the gate is one line; that method is its only caller.
+    #[allow(clippy::too_many_arguments)]
+    fn red_eye_layer_unlocked(
+        &self,
+        idx: usize,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        pupil_size: f32,
+        darken: f32,
+    ) -> Option<Self> {
+        let layer = self.raster_layer(idx)?;
         if !pupil_size.is_finite() || !darken.is_finite() || w == 0 || h == 0 {
             return None;
         }

@@ -194,11 +194,13 @@ fn dot_fixture_at(offset: (i32, i32)) -> RzDocument {
             Rgba(RED)
         }
     });
-    RzDocument::from_pixels(solid(60, 60, WHITE))
+    let doc = RzDocument::from_pixels(solid(60, 60, WHITE))
         .adding_image_layer(0, dot, "Dot")
-        .expect("add layer")
-        .with_layer_offset(1, offset.0, offset.1)
-        .expect("set offset")
+        .expect("add layer");
+    // (0, 0) is the offset the fresh layer already carries, and a setter
+    // handed the stored value answers None (the core's purity rule).
+    let placed = doc.with_layer_offset(1, offset.0, offset.1);
+    placed.unwrap_or(doc)
 }
 
 fn dot_fixture() -> RzDocument {

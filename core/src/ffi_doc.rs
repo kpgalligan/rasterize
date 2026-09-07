@@ -2,6 +2,7 @@
 //! conventions as `ffi`: catch_unwind everywhere, NULL-tolerant, errors via
 //! heap CStrings released with rz_string_free.
 
+use std::borrow::Cow;
 use std::ffi::{c_char, c_double, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
@@ -10,7 +11,7 @@ use image::imageops::FilterType;
 use image::{GrayImage, RgbaImage};
 
 use crate::adjust::Adjustment;
-use crate::doc::{BlendMode, MaskKind, RzDocument, MAX_PIXELS};
+use crate::doc::{BlendMode, LayerKind, MaskKind, RzDocument, MAX_PIXELS};
 use crate::doc_transform::Affine;
 use crate::ffi_util::{
     boxed, doc_get, doc_op, fallible_op, filter_from_c, mask_slice, read_cstr, thumb_dims,
@@ -190,13 +191,33 @@ pub unsafe extern "C" fn rz_doc_layer_visible(doc: *const RzDocument, idx: usize
     unsafe { doc_get(doc, false, |d| Some(d.layers.get(idx)?.visible)) }
 }
 
-/// The layer's canvas x offset; 0 on NULL doc or out-of-range idx.
+/// The rect the four geometry getters report: a RASTER entry's pixel buffer
+/// rect, unchanged, and for a GROUP — which has no buffer of its own — the
+/// UNION of its raster descendants' buffer rects (0, 0, 0, 0 when it holds
+/// none). One meaning for both kinds, "the rectangle this entry's pixels live
+/// in", and O(number of descendants) either way. `None` for an out-of-range
+/// index, which the getters map to 0.
+///
+/// Deliberately NOT the content box. These four are read once per row on
+/// every layers-panel reload and once per row in `get_document`, so answering
+/// a group with `layer_bounds` cost four per-pixel scans of the whole subtree
+/// per row — seconds of blocked main thread on a photo-sized document with a
+/// few groups in it. `rz_doc_layer_bounds` is still the content box on EVERY
+/// entry, and the callers that mean the opaque box (align, distribute, the
+/// agent's `content_*` keys) ask for it by name.
+fn entry_rect(doc: &RzDocument, idx: usize) -> Option<(i32, i32, u32, u32)> {
+    doc.layers.get(idx)?;
+    Some(doc.layer_pixel_rect(idx).unwrap_or((0, 0, 0, 0)))
+}
+
+/// The layer's canvas x offset; 0 on NULL doc or out-of-range idx. On a GROUP
+/// it is its descendants' buffer union's origin (see `entry_rect`).
 ///
 /// # Safety
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
 #[no_mangle]
 pub unsafe extern "C" fn rz_doc_layer_offset_x(doc: *const RzDocument, idx: usize) -> i32 {
-    unsafe { doc_get(doc, 0, |d| Some(d.layers.get(idx)?.offset.0)) }
+    unsafe { doc_get(doc, 0, |d| Some(entry_rect(d, idx)?.0)) }
 }
 
 /// The layer's canvas y offset; 0 on NULL doc or out-of-range idx.
@@ -205,7 +226,7 @@ pub unsafe extern "C" fn rz_doc_layer_offset_x(doc: *const RzDocument, idx: usiz
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
 #[no_mangle]
 pub unsafe extern "C" fn rz_doc_layer_offset_y(doc: *const RzDocument, idx: usize) -> i32 {
-    unsafe { doc_get(doc, 0, |d| Some(d.layers.get(idx)?.offset.1)) }
+    unsafe { doc_get(doc, 0, |d| Some(entry_rect(d, idx)?.1)) }
 }
 
 /// The layer's pixel width; 0 on NULL doc or out-of-range idx.
@@ -214,7 +235,7 @@ pub unsafe extern "C" fn rz_doc_layer_offset_y(doc: *const RzDocument, idx: usiz
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
 #[no_mangle]
 pub unsafe extern "C" fn rz_doc_layer_width(doc: *const RzDocument, idx: usize) -> u32 {
-    unsafe { doc_get(doc, 0, |d| Some(d.layers.get(idx)?.pixels.width())) }
+    unsafe { doc_get(doc, 0, |d| Some(entry_rect(d, idx)?.2)) }
 }
 
 /// The layer's pixel height; 0 on NULL doc or out-of-range idx.
@@ -223,11 +244,11 @@ pub unsafe extern "C" fn rz_doc_layer_width(doc: *const RzDocument, idx: usize) 
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
 #[no_mangle]
 pub unsafe extern "C" fn rz_doc_layer_height(doc: *const RzDocument, idx: usize) -> u32 {
-    unsafe { doc_get(doc, 0, |d| Some(d.layers.get(idx)?.pixels.height())) }
+    unsafe { doc_get(doc, 0, |d| Some(entry_rect(d, idx)?.3)) }
 }
 
-/// Copy of a layer's pixels at the layer's own size; NULL on NULL doc or
-/// out-of-range idx.
+/// Copy of a layer's pixels at the layer's own size; NULL on NULL doc, an
+/// out-of-range idx, or a GROUP, which has no pixels of its own.
 ///
 /// # Safety
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
@@ -235,7 +256,7 @@ pub unsafe extern "C" fn rz_doc_layer_height(doc: *const RzDocument, idx: usize)
 pub unsafe extern "C" fn rz_doc_layer_image(doc: *const RzDocument, idx: usize) -> *mut RzImage {
     unsafe {
         doc_get(doc, ptr::null_mut(), |d| {
-            let pixels = (*d.layers.get(idx)?.pixels).clone();
+            let pixels = (*d.raster_layer(idx)?.pixels).clone();
             Some(Box::into_raw(Box::new(RzImage { pixels })))
         })
     }
@@ -263,8 +284,10 @@ pub unsafe extern "C" fn rz_doc_layer_canvas_image(
 }
 
 /// Aspect-fit thumbnail of a layer with longest side `max(1, max_side)`
-/// (Triangle filter; tiny layers are upscaled). NULL on NULL doc,
-/// out-of-range idx, an empty-sized layer, or an absurd target size.
+/// (Triangle filter; tiny layers are upscaled). On a GROUP it is that group's
+/// PROJECTION, aspect-fit — a layers panel wanting a cheap group row should
+/// draw a folder glyph rather than ask for one projection per reload. NULL on
+/// NULL doc, out-of-range idx, an empty-sized layer, or an absurd target size.
 ///
 /// # Safety
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
@@ -277,12 +300,17 @@ pub unsafe extern "C" fn rz_doc_layer_thumbnail(
     unsafe {
         doc_get(doc, ptr::null_mut(), |d| {
             let layer = d.layers.get(idx)?;
-            let (lw, lh) = layer.pixels.dimensions();
+            let source = if layer.kind == LayerKind::Group {
+                Cow::Owned(d.layer_canvas_image(idx)?)
+            } else {
+                Cow::Borrowed(&*layer.pixels)
+            };
+            let (lw, lh) = source.dimensions();
             if lw == 0 || lh == 0 {
                 return None;
             }
             let (tw, th) = thumb_dims(lw, lh, max_side);
-            let pixels = crate::ops::resize(&layer.pixels, tw, th, FilterType::Triangle)?;
+            let pixels = crate::ops::resize(&source, tw, th, FilterType::Triangle)?;
             Some(Box::into_raw(Box::new(RzImage { pixels })))
         })
     }
@@ -1436,7 +1464,9 @@ pub unsafe extern "C" fn rz_doc_with_layer_meta(
 pub unsafe extern "C" fn rz_doc_layer_is_adjustment(doc: *const RzDocument, idx: usize) -> bool {
     unsafe {
         doc_get(doc, false, |d| {
-            let meta = d.layers.get(idx)?.meta.as_deref()?;
+            // Never for a group: the core does not interpret a group's meta,
+            // so a blob that happens to parse cannot make one an adjustment.
+            let meta = d.raster_layer(idx)?.meta.as_deref()?;
             Some(Adjustment::from_meta(meta).is_some())
         })
     }

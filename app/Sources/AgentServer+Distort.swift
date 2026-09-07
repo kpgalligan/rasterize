@@ -71,6 +71,31 @@ extension AgentServer {
         return try jsonResult(result)
     }
 
+    /// Adds the report for descriptions dropped from entries OTHER than the
+    /// one the call named — a transformed group's children, a link partner.
+    ///
+    /// `pixelEditResult`'s `rasterized` covers the TARGET's own description;
+    /// this covers the rest of the set, and exists for the same reason: a set
+    /// transform resamples every member, so every described member loses its
+    /// description in the same edit, and a model that cannot see what it lost
+    /// cannot put it back. The sentence is appended to whatever note the
+    /// target's own report already wrote, so a reply carries one note.
+    static func appendSetRasterization(
+        _ result: inout [String: Any], _ dropped: [(layer: Int, kind: DescribedKind)]
+    ) {
+        guard !dropped.isEmpty else { return }
+        result["rasterized_layers"] = dropped.map {
+            ["layer": $0.layer, "kind": $0.kind.rawValue] as [String: Any]
+        }
+        let list = dropped.map { "\($0.layer) (\($0.kind.rawValue))" }.joined(separator: ", ")
+        let sentence =
+            "This edit resampled every layer the set expands to, so the description on layer "
+            + "\(list) was dropped as well — those pixels are no longer its rendering, and "
+            + "edit_text_layer / edit_shape_layer no longer work on them. The pixels are "
+            + "intact; undo restores the descriptions."
+        result["note"] = (result["note"] as? String).map { $0 + " " + sentence } ?? sentence
+    }
+
     /// Why a transform on a described layer had to rasterize, when it was
     /// because the description could not render right now (a text family
     /// not installed here, a Live Photo whose source will not decode) or
@@ -115,19 +140,64 @@ extension AgentServer {
     /// stays re-editable); a true perspective quad — or a description that
     /// cannot render right now — resamples the pixels and drops the
     /// description silently in the same edit, reported with the reason.
+    ///
+    /// A GROUP is a legitimate target — the core maps every descendant
+    /// through the same quad — so this takes `structuralLayerIndex`, and the
+    /// rect the corners are the destinations OF is then the group's CONTENT
+    /// box, read from `layerBounds`. Not `layerInfo`: on a group those four
+    /// keys answer the union of the descendants' pixel BUFFER rects, which is
+    /// the whole canvas the moment a child is a paste, a text layer or a shape
+    /// layer, and mapping the corners relative to that rect would apply an
+    /// affine nobody asked for.
+    ///
+    /// Like every transform this is a POSITION edit, never a pixel one
+    /// (`doc_lock.rs`): a transparency-locked layer still distorts, and a
+    /// position lock — the group's own, any descendant's, or a link partner's
+    /// — refuses the call BY NAME, over exactly the set the commit will write.
     func distortLayer(_ a: [String: Any]) throws -> String {
         let document = try target(a)
-        let index = try paintLayerIndex(a, document)
+        let index = try structuralLayerIndex(a, document)
         guard let doc = document.doc, let info = doc.layerInfo(index) else {
             throw ToolError(message: "Layer \(index) could not be read")
         }
-        guard info.width > 0, info.height > 0 else {
-            throw ToolError(
-                message: "Layer \(index) (\"\(info.name)\") has no pixels to distort.")
+        let isGroup = doc.layerIsGroup(index)
+        // LINKED partners transform with the layer whatever the selection
+        // (§3F), so a linked raster entry commits through the same
+        // `transform_layers` path a group does — see the branch below.
+        let partners = doc.movingSet([index]).filter { $0 != index }
+        let isLinked = !isGroup && !partners.isEmpty
+        // A group commits through `transform_layers`, which fans out to the
+        // whole subtree AND to every link group it touches; a lone plain
+        // layer commits through the single-entry perspective (or compose)
+        // path. The refusal is asked over the set that will really be
+        // written, so it names the entry whose lock actually stopped it — a
+        // group carrying no lock of its own used to be told to clear one,
+        // which is a documented no-op, leaving no way out of the message, and
+        // a position-locked link PARTNER used not to refuse the call at all.
+        if isGroup || isLinked {
+            try rejectLockedMove(document, [index])
+        } else {
+            try rejectLockedEdit(document, index, RZ_EDIT_POSITION)
         }
-        let rect = CGRect(
-            x: CGFloat(info.offsetX), y: CGFloat(info.offsetY),
-            width: CGFloat(info.width), height: CGFloat(info.height))
+        let rect: CGRect
+        if isGroup {
+            guard let box = doc.layerBounds(index) else {
+                throw ToolError(
+                    message: "Layer \(index) (\"\(info.name)\") is a group with nothing opaque "
+                        + "inside it, so there is nothing to distort.")
+            }
+            rect = CGRect(
+                x: CGFloat(box.x), y: CGFloat(box.y),
+                width: CGFloat(box.width), height: CGFloat(box.height))
+        } else {
+            guard info.width > 0, info.height > 0 else {
+                throw ToolError(
+                    message: "Layer \(index) (\"\(info.name)\") has no pixels to distort.")
+            }
+            rect = CGRect(
+                x: CGFloat(info.offsetX), y: CGFloat(info.offsetY),
+                width: CGFloat(info.width), height: CGFloat(info.height))
+        }
         let corners = try cornerPoints(a)
 
         let samplerName = (stringArg(a, "sampler") ?? "bicubic").lowercased()
@@ -169,6 +239,97 @@ extension AgentServer {
             },
             "sampler": sampler.name,
         ]
+        // A GROUP has no pixel buffer to inverse-map, so the core's
+        // perspective op refuses one outright. An AFFINE quad still has an
+        // exact meaning for a group — apply it to every descendant, which is
+        // what `transform_layers` does, carrying the group's own canvas-sized
+        // mask through the channel path rather than the layer-mask path. So a
+        // parallelogram commits, and a true perspective quad is refused BY
+        // NAME here instead of arriving as the core's generic "degenerate
+        // quad", which would send a model looking for the wrong problem.
+        if isGroup {
+            guard let affine = LayerTransform.parallelogramAffine(of: rect, onto: corners) else {
+                throw ToolError(
+                    message: "Layer \(index) (\"\(info.name)\") is a group, and a group has no "
+                        + "single buffer of pixels to map through a perspective quad. Give "
+                        + "corners that form a PARALLELOGRAM — the affine skew, scale or "
+                        + "rotation every layer inside can follow — or distort the layers "
+                        + "inside it one at a time (get_document lists its children).")
+            }
+            // The resample rewrites every descendant's (and link partner's)
+            // pixels, so every described one among them loses its description
+            // in the same edit — `app/CLAUDE.md`'s invariant, and the same
+            // rule transform_layer follows.
+            let resampled = doc.describedEntries(in: doc.movingSet([index]))
+            try performGroupedEdit(document, "Distort Layer") {
+                $0.transformLayers([index], affine, sampler: sampler.filter)?
+                    .droppingDescriptions(in: resampled.map { $0.layer })
+            }
+            let landed = document.doc?.layerBounds(index)
+            var reply: [String: Any] = [
+                "ok": true,
+                "layer": index,
+                "bounds": [
+                    "x": landed?.x ?? 0, "y": landed?.y ?? 0,
+                    "width": landed?.width ?? 0, "height": landed?.height ?? 0,
+                ],
+                "applied": applied,
+                "note": "A group has no pixels of its own, so the affine those corners denote "
+                    + "was applied to every layer inside it, to the group's own mask, and to "
+                    + "anything LINKED to one of them. corners are the destinations of the "
+                    + "group's CONTENT box (get_document's content_x/y/width/height), and "
+                    + "bounds is that same content box afterwards.",
+            ]
+            Self.appendSetRasterization(&reply, resampled)
+            return try jsonResult(reply)
+        }
+        // LINKED but not a group: the partners have to follow, which the
+        // single-entry `perspectiveLayer` below cannot do — it writes one
+        // layer and would leave them behind, silently breaking the link that
+        // `transform_layer` and the app's own ⌘T both honour. So this takes
+        // the group branch's path: the affine the corners denote, applied
+        // through `transform_layers`, which carries every link group it
+        // touches. A true PERSPECTIVE quad has no single meaning for a set —
+        // the same gesture in the app is refused outright
+        // (`MultiLayerEdit.refuseUntransformableSet`: "Distort applies to one
+        // layer at a time.") — so it is refused here by name rather than
+        // applied to one member of the set.
+        if isLinked {
+            guard let affine = LayerTransform.parallelogramAffine(of: rect, onto: corners) else {
+                throw ToolError(
+                    message: "Layer \(index) (\"\(info.name)\") is LINKED to "
+                        + "\(partners.count) other layer\(partners.count == 1 ? "" : "s"), "
+                        + "and a distort applies to one layer at a time: a perspective quad "
+                        + "has no single meaning for a set. Give corners that form a "
+                        + "PARALLELOGRAM — the affine skew, scale or rotation every linked "
+                        + "layer can follow — or unlink the layer (unlink_layers) and "
+                        + "distort it on its own.")
+            }
+            // Every partner is resampled too, so a described one among them
+            // loses its description in the SAME edit — the rule
+            // transform_layer follows for exactly this reason.
+            let alsoRasterized = doc.describedEntries(in: partners)
+            let rasterized = try performPixelEdit(
+                document, "Distort Layer", pixelLayer: index, lockKind: RZ_EDIT_POSITION
+            ) { doc in
+                doc.transformLayers([index], affine, sampler: sampler.filter)?
+                    .droppingDescriptions(in: alsoRasterized.map { $0.layer })
+            }
+            let landed = document.doc?.layerInfo(index)
+            return try pixelEditResult(
+                [
+                    "ok": true,
+                    "layer": index,
+                    "linked_layers": partners,
+                    "bounds": [
+                        "x": landed?.offsetX ?? 0, "y": landed?.offsetY ?? 0,
+                        "width": landed?.width ?? 0, "height": landed?.height ?? 0,
+                    ],
+                    "applied": applied,
+                ], layer: index, rasterized: rasterized,
+                reason: Self.unrenderableReason(document, layer: index, before: doc),
+                alsoRasterized: alsoRasterized)
+        }
         // A parallelogram on a described layer composes as the exact affine
         // it is — the same compose-or-fall-through rule as transform_layer:
         // nil means it did not compose (a plain layer needs no Swift-side
@@ -185,8 +346,13 @@ extension AgentServer {
 
         let rasterized: DroppedDescription?
         do {
-            rasterized = try performPixelEdit(document, "Distort Layer", pixelLayer: index) {
-                doc in
+            // POSITION, not PIXELS: a distortion resamples the whole buffer
+            // including its alpha, so a transparency lock has nothing to
+            // freeze and must not refuse (the same rule transform_layer
+            // follows — see performPixelEdit's `lockKind`).
+            rasterized = try performPixelEdit(
+                document, "Distort Layer", pixelLayer: index, lockKind: RZ_EDIT_POSITION
+            ) { doc in
                 doc.perspectiveLayer(index, quad: corners, sampler: sampler.filter)
             }
         } catch is ToolError {

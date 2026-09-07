@@ -14,6 +14,7 @@ use std::ptr;
 use image::imageops::FilterType;
 
 use crate::doc::RzDocument;
+use crate::rzdc::MAX_RZDC_LAYERS;
 use crate::RzImage;
 
 /// Stores a heap-allocated copy of `msg` through `err_out` (if non-NULL).
@@ -177,6 +178,59 @@ pub(crate) unsafe fn mask_slice<'a>(buffer: *const u8, len: usize) -> Option<&'a
         None
     } else {
         Some(unsafe { std::slice::from_raw_parts(buffer, len) })
+    }
+}
+
+/// A caller's list of layer indices, refused WHOLE (`None`) when the pointer
+/// is NULL, `len` is 0 or past the format's layer cap, an index is not below
+/// `count`, or an index repeats. A repeat is an error rather than a silent
+/// dedupe because every set op renumbers: a caller that named an entry twice
+/// has miscounted something, and answering it with a quietly different set
+/// would hide that. Ascending on the way out, which is the order every
+/// structural op wants.
+///
+/// # Safety
+/// `ptr` must be NULL or valid for `len` `size_t` values for the duration of
+/// the call.
+pub(crate) unsafe fn index_slice(
+    ptr: *const usize,
+    len: usize,
+    count: usize,
+) -> Option<Vec<usize>> {
+    if ptr.is_null() || len == 0 || len > MAX_RZDC_LAYERS as usize {
+        return None;
+    }
+    let raw = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let mut out = raw.to_vec();
+    out.sort_unstable();
+    if out.windows(2).any(|w| w[0] == w[1]) || out.last().is_some_and(|&i| i >= count) {
+        return None;
+    }
+    Some(out)
+}
+
+/// Writes as much of `values` as fits into a caller buffer of `cap` entries
+/// and reports the TRUE length through `out_len`, so a caller can tell a
+/// truncated answer from a complete one. A NULL buffer means "do not report
+/// it" and is not an error.
+///
+/// # Safety
+/// `buffer` must be NULL or valid for `cap` `size_t` writes; `out_len` must be
+/// NULL or a valid pointer to a writable `size_t`.
+pub(crate) unsafe fn write_indices(
+    values: &[usize],
+    buffer: *mut usize,
+    cap: usize,
+    out_len: *mut usize,
+) {
+    if !out_len.is_null() {
+        unsafe { *out_len = values.len() };
+    }
+    if buffer.is_null() {
+        return;
+    }
+    for (i, &value) in values.iter().take(cap).enumerate() {
+        unsafe { *buffer.add(i) = value };
     }
 }
 

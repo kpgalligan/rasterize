@@ -46,7 +46,11 @@ pub const BLEND_HUE: c_int = 23;
 pub const BLEND_SATURATION: c_int = 24;
 pub const BLEND_COLOR: c_int = 25;
 pub const BLEND_LUMINOSITY: c_int = 26;
+/// The number of modes a RASTER layer may carry: 0..=26. Pass Through (27)
+/// is a GROUP's declaration and is refused on a layer, so it is deliberately
+/// outside this count and every loop built on it.
 pub const BLEND_MODE_COUNT: c_int = 27;
+pub const BLEND_PASS_THROUGH: c_int = 27;
 
 pub const COMPOSITE_OVER: c_int = 0;
 pub const COMPOSITE_ERASE: c_int = 1;
@@ -59,6 +63,31 @@ pub const FILTER_NEAREST: c_int = 0;
 pub const FILTER_BILINEAR: c_int = 1;
 pub const FILTER_CATMULL_ROM: c_int = 2;
 pub const FILTER_LANCZOS3: c_int = 3;
+
+/// `RzEditKind`, `RzLockFlags`, `RzArrange` and `RzAlign`, mirrored from the
+/// header exactly like the blend and filter tables above.
+pub const EDIT_PIXELS: c_int = 0;
+pub const EDIT_POSITION: c_int = 1;
+pub const EDIT_MASK: c_int = 2;
+pub const EDIT_MASK_APPLY: c_int = 3;
+pub const EDIT_MERGE: c_int = 4;
+
+pub const LOCK_TRANSPARENCY: u32 = 1;
+pub const LOCK_PIXELS: u32 = 2;
+pub const LOCK_POSITION: u32 = 4;
+pub const LOCK_ALL: u32 = 7;
+
+pub const ARRANGE_FRONT: c_int = 0;
+pub const ARRANGE_FORWARD: c_int = 1;
+pub const ARRANGE_BACKWARD: c_int = 2;
+pub const ARRANGE_BACK: c_int = 3;
+
+pub const ALIGN_LEFT: c_int = 0;
+pub const ALIGN_CENTER_X: c_int = 1;
+pub const ALIGN_RIGHT: c_int = 2;
+pub const ALIGN_TOP: c_int = 3;
+pub const ALIGN_CENTER_Y: c_int = 4;
+pub const ALIGN_BOTTOM: c_int = 5;
 
 // ---------------------------------------------------------------- helpers --
 
@@ -136,6 +165,23 @@ pub fn apply(
 ) -> *mut RzDocument {
     let out = op(doc);
     assert!(!out.is_null(), "document operation failed");
+    unsafe { rz_doc_free(doc) };
+    out
+}
+
+/// [`apply`] for a PROPERTY setter a fixture may hand the value the entry
+/// already holds — an offset of (0, 0) on a fresh layer, say. The core
+/// answers NULL for an op that would change nothing (its purity rule, so a
+/// host never registers a phantom undo step), and that is not a failure here:
+/// the document already says what the caller asked for, so it is kept.
+pub fn apply_or_keep(
+    doc: *mut RzDocument,
+    op: impl FnOnce(*const RzDocument) -> *mut RzDocument,
+) -> *mut RzDocument {
+    let out = op(doc);
+    if out.is_null() {
+        return doc;
+    }
     unsafe { rz_doc_free(doc) };
     out
 }
@@ -349,8 +395,10 @@ pub fn mask_fixture(canvas: (u32, u32), layer: (u32, u32), offset: (i32, i32)) -
     let doc = doc
         .adding_image_layer(0, solid(layer.0, layer.1, BLUE), "Top")
         .expect("add layer");
-    doc.with_layer_offset(1, offset.0, offset.1)
-        .expect("set offset")
+    // An offset of (0, 0) is the one the layer already has, and a setter
+    // handed the stored value answers None (the purity rule).
+    let placed = doc.with_layer_offset(1, offset.0, offset.1);
+    placed.unwrap_or(doc)
 }
 
 /// Canvas-sized selection buffer from a per-pixel function.
@@ -434,7 +482,7 @@ pub fn ffi_mask_fixture(
         &solid(layer.0, layer.1, BLUE),
         "Top",
     );
-    apply(doc, |d| unsafe {
+    apply_or_keep(doc, |d| unsafe {
         rz_doc_with_layer_offset(d, 1, offset.0, offset.1)
     })
 }
@@ -654,7 +702,8 @@ pub fn rect_layer_doc(
     let doc = doc
         .adding_image_layer(0, solid(rect.2, rect.3, color), "Rect")
         .expect("add rect layer");
-    doc.with_layer_offset(1, rect.0, rect.1).expect("offset")
+    let placed = doc.with_layer_offset(1, rect.0, rect.1);
+    placed.unwrap_or(doc)
 }
 
 /// The documented feather kernel (rasterize_core.h, rz_selection_feather):

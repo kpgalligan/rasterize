@@ -440,21 +440,49 @@ fn luminosity_mask(
 // polarity through with `..c.clone()`.
 
 /// Applies one exact whole-document transform (the rotations and flips) to
-/// every channel — the same generic `Geometry::apply` layer pixels and masks
-/// go through, so a channel permutes identically.
+/// ONE canvas-sized plane — the same generic `Geometry::apply` layer pixels
+/// and masks go through, so a plane permutes identically.
+pub(crate) fn geometry_plane(plane: &GrayImage, geom: Geometry) -> GrayImage {
+    geom.apply(plane)
+}
+
+/// Cuts ONE canvas-sized plane down to the new canvas window. A canvas plane
+/// (unlike a layer, which merely shifts its offset) is genuinely cut down to
+/// the rect.
+pub(crate) fn cropped_plane(plane: &GrayImage, x: u32, y: u32, w: u32, h: u32) -> GrayImage {
+    imageops::crop_imm(plane, x, y, w, h).to_image()
+}
+
+/// Pads ONE canvas-sized plane into the new canvas, with the old canvas's
+/// top-left corner landing at `origin`. New area is 0 — unselected for a
+/// channel, hidden for a group mask, which is the same thing an absent plane
+/// means in both. `imageops::replace` clips, so a negative origin (the canvas
+/// shrinking around the content) is handled by construction.
+pub(crate) fn padded_plane(plane: &GrayImage, w: u32, h: u32, origin: (i32, i32)) -> GrayImage {
+    let mut out = GrayImage::new(w, h);
+    imageops::replace(&mut out, plane, i64::from(origin.0), i64::from(origin.1));
+    out
+}
+
+/// Resamples ONE canvas-sized plane to the NEW CANVAS size (never a
+/// per-layer size — a canvas plane has no layer), with the same filter the
+/// layer pixels take.
+pub(crate) fn resized_plane(plane: &GrayImage, w: u32, h: u32, filter: FilterType) -> GrayImage {
+    imageops::resize(plane, w, h, filter)
+}
+
+/// [`geometry_plane`] over every channel.
 pub(crate) fn geometry_channels(channels: &[Channel], geom: Geometry) -> Vec<Channel> {
     channels
         .iter()
         .map(|c| Channel {
-            data: Arc::new(geom.apply(&*c.data)),
+            data: Arc::new(geometry_plane(&c.data, geom)),
             ..c.clone()
         })
         .collect()
 }
 
-/// Crops every channel to the new canvas window. A channel is CANVAS space
-/// (unlike a layer, which merely shifts its offset), so it is genuinely cut
-/// down to the rect.
+/// [`cropped_plane`] over every channel.
 pub(crate) fn cropped_channels(
     channels: &[Channel],
     x: u32,
@@ -465,16 +493,13 @@ pub(crate) fn cropped_channels(
     channels
         .iter()
         .map(|c| Channel {
-            data: Arc::new(imageops::crop_imm(&*c.data, x, y, w, h).to_image()),
+            data: Arc::new(cropped_plane(&c.data, x, y, w, h)),
             ..c.clone()
         })
         .collect()
 }
 
-/// Pads every channel into the new canvas, with the old canvas's top-left
-/// corner landing at `origin`. New area is 0 — unselected, the same thing an
-/// absent selection means. `imageops::replace` clips, so a negative origin
-/// (the canvas shrinking around the content) is handled by construction.
+/// [`padded_plane`] over every channel.
 pub(crate) fn padded_channels(
     channels: &[Channel],
     w: u32,
@@ -483,24 +508,14 @@ pub(crate) fn padded_channels(
 ) -> Vec<Channel> {
     channels
         .iter()
-        .map(|c| {
-            let mut plane = GrayImage::new(w, h);
-            imageops::replace(
-                &mut plane,
-                &*c.data,
-                i64::from(origin.0),
-                i64::from(origin.1),
-            );
-            Channel {
-                data: Arc::new(plane),
-                ..c.clone()
-            }
+        .map(|c| Channel {
+            data: Arc::new(padded_plane(&c.data, w, h, origin)),
+            ..c.clone()
         })
         .collect()
 }
 
-/// Resamples every channel to the NEW CANVAS size (not a per-layer size — a
-/// channel has no layer), with the same filter the layer pixels take.
+/// [`resized_plane`] over every channel.
 pub(crate) fn resized_channels(
     channels: &[Channel],
     w: u32,
@@ -510,7 +525,7 @@ pub(crate) fn resized_channels(
     channels
         .iter()
         .map(|c| Channel {
-            data: Arc::new(imageops::resize(&*c.data, w, h, filter)),
+            data: Arc::new(resized_plane(&c.data, w, h, filter)),
             ..c.clone()
         })
         .collect()

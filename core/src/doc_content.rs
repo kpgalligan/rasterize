@@ -16,6 +16,7 @@ use std::sync::Arc;
 use image::{GrayImage, RgbaImage};
 
 use crate::doc::RzDocument;
+use crate::doc_lock::EditKind;
 
 impl RzDocument {
     /// Pure: layer `idx` takes `pixels` (any size), `offset`, and `mask`
@@ -28,7 +29,12 @@ impl RzDocument {
     /// dimensions differ from the pixels' — the invariant is enforced
     /// here rather than repaired by dropping the mask, because the caller
     /// asked for that exact mask. Never an identical copy by intent (a
-    /// replacement is always an edit), like `with_layer_pixels`.
+    /// replacement is always an edit), like `with_layer_pixels`. `None` on a
+    /// GROUP index too — a group is never a described layer, so there is
+    /// nothing here for it to re-render into. A PIXELS edit under `doc_lock`;
+    /// on a transparency-locked layer a replacement that changes the layer's
+    /// SIZE or OFFSET is refused, since a frozen alpha channel cannot follow a
+    /// buffer that moved.
     pub fn set_layer_content(
         &self,
         idx: usize,
@@ -36,24 +42,26 @@ impl RzDocument {
         offset: (i32, i32),
         mask: Option<GrayImage>,
     ) -> Option<Self> {
-        self.layers.get(idx)?;
-        if mask
-            .as_ref()
-            .is_some_and(|m| m.dimensions() != pixels.dimensions())
-        {
-            return None;
-        }
-        // Clone-then-mutate inline rather than through doc.rs's private
-        // `with_layer`: that module is full, and this op sets three fields
-        // the closure form would only obscure.
-        let mut doc = self.clone();
-        let layer = &mut doc.layers[idx];
-        layer.pixels = Arc::new(pixels);
-        layer.offset = offset;
-        layer.mask = mask.map(Arc::new);
-        if layer.mask.is_none() {
-            layer.mask_enabled = true;
-        }
-        Some(doc)
+        self.raster_layer(idx)?;
+        self.under_locks(idx, EditKind::Pixels, move |doc| {
+            if mask
+                .as_ref()
+                .is_some_and(|m| m.dimensions() != pixels.dimensions())
+            {
+                return None;
+            }
+            // Clone-then-mutate inline rather than through doc.rs's private
+            // `with_layer`: that module is full, and this op sets three fields
+            // the closure form would only obscure.
+            let mut out = doc.clone();
+            let layer = &mut out.layers[idx];
+            layer.pixels = Arc::new(pixels);
+            layer.offset = offset;
+            layer.mask = mask.map(Arc::new);
+            if layer.mask.is_none() {
+                layer.mask_enabled = true;
+            }
+            Some(out)
+        })
     }
 }

@@ -38,7 +38,13 @@ struct CropToolOptions: Codable, Equatable {
 }
 
 struct MoveToolOptions: Codable, Equatable {
-    /// 0 Layer, 1 Group.
+    /// Whether a Move click activates the entry under the cursor at all.
+    /// Off by default, like Photoshop's: with it on, a click anywhere on the
+    /// canvas retargets every later edit, which is surprising until it is
+    /// asked for.
+    var autoSelect = false
+    /// What Auto-Select picks: 0 the LAYER under the cursor, 1 its top-level
+    /// GROUP.
     var autoSelectIndex = 0
     var showTransformControls = true
     var snapToLayers = true

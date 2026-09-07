@@ -47,6 +47,10 @@ extension AgentServer {
         let anchor = DescribedLayer.placementAnchor(CGPoint(x: x, y: y), transform: transform)
 
         let below = document.activeLayerIndex
+        // Where the new layer will land, from the stack BEFORE the edit:
+        // above a GROUP a new entry goes above the whole subtree, so
+        // `below + 1` would name the group's topmost CHILD.
+        let landing = document.doc?.insertionIndex(above: below) ?? below + 1
         do {
             try performGroupedEdit(document, "Add \(name) Layer") {
                 $0.addingDescribedLayer(above: below, .shape(payload), anchor: anchor, name: name)
@@ -59,7 +63,7 @@ extension AgentServer {
                     + "megapixel ceiling for one layer. Check w, h, stroke_width and "
                     + "transform.")
         }
-        let index = min(below + 1, (document.doc?.layerCount ?? 1) - 1)
+        let index = min(landing, (document.doc?.layerCount ?? 1) - 1)
         document.activeLayerIndex = index
         // The edit's own notification went out before the active layer
         // moved, so the panel and status bar need this one to catch up.
@@ -127,11 +131,19 @@ extension AgentServer {
         let anchor = a["x"] == nil && a["y"] == nil
             ? currentAnchor
             : DescribedLayer.placementAnchor(CGPoint(x: x, y: y), transform: transform)
+        // A re-render REWRITES the layer's pixels, so it answers to the same
+        // locks every other pixel tool does; without it a lock refusal was
+        // reported as a degenerate geometry.
+        try rejectLockedEdit(document, index, RZ_EDIT_PIXELS)
         do {
             try performGroupedEdit(document, "Edit Shape Layer") {
                 $0.rerenderingDescribedLayer(index, .shape(payload), anchor: anchor)
             }
         } catch is ToolError {
+            // A transparency lock refuses a re-render that resizes the raster,
+            // and it is not knowable up front — name it here rather than
+            // sending the model into the geometry.
+            try rejectLockedRerender(document, index)
             throw ToolError(
                 message: "Could not render the shape — the box is degenerate for the kind, "
                     + "nothing would be visible, or the raster would pass the core's 100 "
