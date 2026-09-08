@@ -1,11 +1,23 @@
 import AppKit
 
-/// Right-hand layers panel: blend mode + opacity for the active layer on
-/// top, the layer stack (row 0 = TOPMOST layer) in the middle, and the
-/// add/delete/duplicate/merge buttons below. All edits route through
-/// ImageDocument.applyEdit (or the live-edit API for opacity scrubs); the
-/// footer buttons send the same nil-target actions the Layer menu uses, so
-/// EditorViewController handles both.
+/// Right-hand layers panel: blend mode + opacity for the selection on top,
+/// the layer stack (row 0 = TOPMOST entry) in the middle, and the
+/// add/group/adjustment/duplicate/delete buttons below. All edits route
+/// through ImageDocument.applyEdit (or the live-edit API for opacity
+/// scrubs); the footer buttons send the same nil-target actions the Layer
+/// menu uses, so EditorViewController handles both.
+///
+/// The stack is a TREE: a group's children are rows under it, and a closed
+/// group hides them. Rows are therefore no longer `layerCount - 1 - row` —
+/// `rows` is the explicit mapping, rebuilt on every reload from `LayerTree`,
+/// the idiom the Channels panel already uses.
+///
+/// **The seam `LayersPanelViewController+Rows.swift` builds on** — `rows`,
+/// `tree`, `row(forLayerIndex:)`, `layerIndex(forRow:)` and `isReloading` —
+/// is deliberately `internal`, not `private`: Swift's `private` is
+/// file-scoped, and the selection, drag and row-menu delegate methods live
+/// in that file (`app/CLAUDE.md`: the pieces an extension file builds on are
+/// internal).
 final class LayersPanelViewController: NSViewController {
     weak var document: ImageDocument?
 
@@ -13,8 +25,20 @@ final class LayersPanelViewController: NSViewController {
     /// (the editor updates its status bar).
     var onActiveLayerChange: (() -> Void)?
 
+    /// Called when the user clicks the Channels tab.
+    var onShowChannels: (() -> Void)?
+
     /// Called when the user clicks the Assistant tab.
     var onShowAssistant: (() -> Void)?
+
+    /// Called when the user clicks the Info tab.
+    var onShowInfo: (() -> Void)?
+
+    /// Called on a ⌘-click on a layer's own thumbnail (`.layer` — load its
+    /// transparency) or its mask thumbnail (`.mask` — load the mask), with
+    /// the selection tools' modifier convention for the combine mode.
+    /// Loading a selection is never an edit.
+    var onLoadLayerSelection: ((Int, PaintTarget, SelectionCombineMode) -> Void)?
 
     /// Called when the user clicks a layer's own thumbnail or its mask
     /// thumbnail: the editor points brush/eraser at that target.
@@ -34,6 +58,16 @@ final class LayersPanelViewController: NSViewController {
     /// opens that layer's frame picker.
     var onLivePhotoEdit: ((Int) -> Void)?
 
+    /// Called when the user double-clicks a shape layer (layer index
+    /// attached): the editor switches to the matching shape tool and
+    /// reopens the layer's box on the canvas.
+    var onShapeEdit: ((Int) -> Void)?
+
+    /// Called when the user picks Layer Style… from a row's menu, or
+    /// double-clicks a layer that has no source to reopen (Photoshop's row
+    /// double-click): the editor opens that layer's style sheet.
+    var onLayerStyleEdit: ((Int) -> Void)?
+
     /// What brush/eraser currently edit on the active layer, pushed in by the
     /// editor and drawn as a focus ring around the matching thumbnail.
     private(set) var paintTarget: PaintTarget = .layer
@@ -43,19 +77,38 @@ final class LayersPanelViewController: NSViewController {
     private let opacitySlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let opacityValueLabel = NSTextField(labelWithString: "100%")
     private let layerCountLabel = NSTextField(labelWithString: "")
-    private let tableView = NSTableView()
+    /// Internal, not private: the selection, drag and row-menu delegate
+    /// methods live in `+Rows.swift`, which has to read the clicked and
+    /// selected rows.
+    let tableView = NSTableView()
     private let tableScroll = NSScrollView()
     private var addButton: NSButton!
-    private var removeButton: NSButton!
+    private var groupButton: NSButton!
+    private var adjustmentButton: NSButton!
     private var duplicateButton: NSButton!
-    private var mergeButton: NSButton!
+    private var deleteButton: NSButton!
 
     private let rowMenu = NSMenu()
 
-    private var isReloading = false
+    /// The table's rows, TOP-FIRST, rebuilt by `reload()`. The single
+    /// mapping between a row and an entry index: a closed group's children
+    /// have no row at all, so the old `layerCount - 1 - row` arithmetic
+    /// cannot express this and is gone.
+    private(set) var rows: [LayerRowModel] = []
+
+    /// The structure the rows were built from, kept for the drag code (a
+    /// drop onto a group row needs its depth) and the row menu.
+    private(set) var tree = LayerTree([])
+
+    /// Whether the blend popup currently offers Pass Through, so the menu is
+    /// rebuilt only when the primary entry's KIND changes rather than on
+    /// every header refresh.
+    private var blendMenuHasPassThrough = false
+
+    var isReloading = false
     private var opacityDragActive = false
 
-    private static let layerRowType = NSPasteboard.PasteboardType("com.kgalligan.rasterize.layerrow")
+    static let layerRowType = NSPasteboard.PasteboardType("com.kgalligan.rasterize.layerrow")
 
     init() {
         super.init(nibName: nil, bundle: nil)
@@ -76,10 +129,14 @@ final class LayersPanelViewController: NSViewController {
         let root = NSView(frame: NSRect(x: 0, y: 0, width: DS.panelWidth, height: 400))
         root.wantsLayer = true
 
-        // Panel tab row: Layers active here, Assistant switches over.
-        let tab = PanelTabsView(titles: ["Layers", "Assistant"], activeIndex: 0) {
-            [weak self] index in
-            if index == 1 { self?.onShowAssistant?() }
+        // Panel tab row: Layers active here, Channels and Assistant switch
+        // over.
+        let tab = PanelTabsView(
+            titles: ["Layers", "Channels", "Assistant", "Info"], activeIndex: 0
+        ) { [weak self] index in
+            if index == 1 { self?.onShowChannels?() }
+            if index == 2 { self?.onShowAssistant?() }
+            if index == 3 { self?.onShowInfo?() }
         }
         tab.translatesAutoresizingMaskIntoConstraints = false
 
@@ -91,21 +148,7 @@ final class LayersPanelViewController: NSViewController {
         blendPopup.translatesAutoresizingMaskIntoConstraints = false
         blendPopup.isBordered = false
         blendPopup.font = DS.sans(13)
-        // Separators mean item position != mode index, so every item carries
-        // its RzBlendMode raw value in `tag`; selection goes through tags,
-        // never item positions.
-        let blendMenu = NSMenu()
-        for (groupIndex, group) in RzBlendMode.blendModeGroups.enumerated() {
-            if groupIndex > 0 {
-                blendMenu.addItem(NSMenuItem.separator())
-            }
-            for (mode, title) in group {
-                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-                item.tag = Int(mode.rawValue)
-                blendMenu.addItem(item)
-            }
-        }
-        blendPopup.menu = blendMenu
+        installBlendMenu(passThrough: false)
         blendPopup.target = self
         blendPopup.action = #selector(blendChanged(_:))
 
@@ -135,8 +178,11 @@ final class LayersPanelViewController: NSViewController {
         // inline rename focuses its own field editor, but arrow keys must
         // keep nudging/tool keys working instead of walking the layer list.
         tableView.refusesFirstResponder = true
-        tableView.rowHeight = 48
-        tableView.allowsMultipleSelection = false
+        tableView.rowHeight = DS.layerRow
+        // ⇧-click extends and ⌘-click toggles, so move, transform, align,
+        // group and merge can act on a set. Empty stays forbidden: a
+        // document always has an active layer.
+        tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = false
         tableView.dataSource = self
         tableView.delegate = self
@@ -161,23 +207,29 @@ final class LayersPanelViewController: NSViewController {
         tableScroll.autohidesScrollers = true
         tableScroll.drawsBackground = false
 
-        // Footer: four 30x26 ghost icon buttons, mono layer count right.
-        // nil targets: actions resolve through the responder chain to the
+        // Footer: four ghost icon buttons, mono layer count right. nil
+        // targets: actions resolve through the responder chain to the
         // EditorViewController, the same handlers the Layer menu items use.
+        // The adjustment button is the exception — it pops the same per-op
+        // menu as Layer > New Adjustment Layer, so it targets the panel.
         addButton = GhostButton(
             symbol: "plus", fallback: "+", caption: nil, tooltip: "New Layer",
             action: #selector(EditorViewController.newLayer(_:)))
-        removeButton = GhostButton(
-            symbol: "minus", fallback: "−", caption: nil, tooltip: "Delete Layer",
-            action: #selector(EditorViewController.deleteLayer(_:)))
+        groupButton = GhostButton(
+            symbol: "folder.badge.plus", fallback: "▣", caption: nil, tooltip: "New Group",
+            action: #selector(EditorViewController.groupLayers(_:)))
+        adjustmentButton = GhostButton(
+            symbol: "circle.righthalf.filled", fallback: "◐", caption: nil,
+            tooltip: "New Adjustment Layer",
+            action: #selector(showNewAdjustmentMenu(_:)))
+        adjustmentButton.target = self
         duplicateButton = GhostButton(
             symbol: "plus.square.on.square", fallback: "⧉", caption: nil,
             tooltip: "Duplicate Layer",
             action: #selector(EditorViewController.duplicateLayer(_:)))
-        mergeButton = GhostButton(
-            symbol: "arrow.triangle.merge", fallback: "⤵", caption: nil,
-            tooltip: "Merge Down",
-            action: #selector(EditorViewController.mergeDown(_:)))
+        deleteButton = GhostButton(
+            symbol: "trash", fallback: "✕", caption: nil, tooltip: "Delete Layer",
+            action: #selector(EditorViewController.deleteLayer(_:)))
 
         layerCountLabel.translatesAutoresizingMaskIntoConstraints = false
         layerCountLabel.font = DS.mono(10)
@@ -190,7 +242,7 @@ final class LayersPanelViewController: NSViewController {
 
         let footerSpacer = NSView()
         let footer = NSStackView(views: [
-            addButton, removeButton, duplicateButton, mergeButton,
+            addButton, groupButton, adjustmentButton, duplicateButton, deleteButton,
             footerSpacer, layerCountLabel,
         ])
         footer.translatesAutoresizingMaskIntoConstraints = false
@@ -208,8 +260,12 @@ final class LayersPanelViewController: NSViewController {
         root.addSubview(footer)
 
         NSLayoutConstraint.activate([
-            tab.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
-            tab.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            // The tab row runs edge to edge; the content below keeps its
+            // 12px insets.
+            tab.topAnchor.constraint(equalTo: root.topAnchor),
+            tab.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            tab.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            tab.heightAnchor.constraint(equalToConstant: DS.tabHeight),
 
             blendContainer.topAnchor.constraint(equalTo: tab.bottomAnchor, constant: 12),
             blendContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
@@ -248,11 +304,44 @@ final class LayersPanelViewController: NSViewController {
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            footer.heightAnchor.constraint(equalToConstant: 30),
+            footer.heightAnchor.constraint(equalToConstant: 36),
         ])
 
         view = root
         applyPanelAppearance(separator: footerSeparator)
+    }
+
+    /// Builds the blend popup's menu, with Pass Through at the top when the
+    /// primary entry is a GROUP — the one place that mode means anything
+    /// (the core refuses it on a raster layer), and Photoshop's default for
+    /// a new group.
+    ///
+    /// Separators mean item position != mode index, so every item carries
+    /// its RzBlendMode raw value in `tag`; selection goes through tags,
+    /// never item positions.
+    private func installBlendMenu(passThrough: Bool) {
+        let menu = NSMenu()
+        if passThrough {
+            // The NAME comes from the one place that spells it
+            // (RzBlendMode.displayName); only the position is decided here.
+            let item = NSMenuItem(
+                title: RzBlendMode.displayName(for: RZ_BLEND_PASS_THROUGH),
+                action: nil, keyEquivalent: "")
+            item.tag = Int(RZ_BLEND_PASS_THROUGH.rawValue)
+            menu.addItem(item)
+        }
+        for (groupIndex, group) in RzBlendMode.blendModeGroups.enumerated() {
+            if groupIndex > 0 || passThrough {
+                menu.addItem(NSMenuItem.separator())
+            }
+            for (mode, title) in group {
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.tag = Int(mode.rawValue)
+                menu.addItem(item)
+            }
+        }
+        blendPopup.menu = menu
+        blendMenuHasPassThrough = passThrough
     }
 
     /// Colors that need explicit refresh on appearance changes (layer-backed
@@ -290,33 +379,108 @@ final class LayersPanelViewController: NSViewController {
         reload()
     }
 
-    // MARK: - Row/layer mapping (row 0 = TOPMOST layer)
+    // MARK: - Row/layer mapping (row 0 = TOPMOST entry)
 
-    private func layerIndex(forRow row: Int) -> Int {
-        (document?.doc?.layerCount ?? 0) - 1 - row
+    /// The entry a row names; nil for a row that no longer exists (the table
+    /// asks about rows across a reload).
+    func layerIndex(forRow row: Int) -> Int? {
+        guard row >= 0, row < rows.count else { return nil }
+        return rows[row].index
     }
 
-    private func row(forLayerIndex idx: Int) -> Int {
-        (document?.doc?.layerCount ?? 0) - 1 - idx
+    /// The row an entry is shown on; nil when it has none — a layer inside a
+    /// COLLAPSED group is selected and edited normally, it simply has no row
+    /// of its own.
+    func row(forLayerIndex idx: Int) -> Int? {
+        rows.firstIndex { $0.index == idx }
     }
 
     // MARK: - Reload
 
-    /// Rebuilds the table (regenerating the cheap 40px thumbnails), restores
-    /// the selection from activeLayerIndex, and refreshes header + buttons.
+    /// Rebuilds `rows` from the document's structure, reloads the table,
+    /// restores the WHOLE selection, and refreshes header + buttons.
+    ///
+    /// The row models carry no thumbnails: those are resampled by the cells
+    /// AppKit actually asks for, so a hundred-layer document does not
+    /// regenerate a hundred images on every reload.
     func reload() {
         guard isViewLoaded else { return }
+        rebuildRows()
         isReloading = true
         tableView.reloadData()
-        if let document = document, let doc = document.doc {
-            let row = doc.layerCount - 1 - document.activeLayerIndex
-            if row >= 0, row < doc.layerCount {
-                tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            }
+        // The whole set, in one call: restoring row by row would make AppKit
+        // post a selection change per row and read the round trip back as a
+        // user edit.
+        let selected = IndexSet(rows.indices.filter { rows[$0].isSelected })
+        if !selected.isEmpty {
+            tableView.selectRowIndexes(selected, byExtendingSelection: false)
         }
         isReloading = false
         updateHeaderControls()
         updateButtonStates()
+    }
+
+    /// The one place a row exists: the tree's visible rows, top-first, with
+    /// everything a cell needs read once per entry.
+    ///
+    /// A selected entry inside a COLLAPSED group has no row of its own: the
+    /// group's row stands for it, and the SELECTION is re-pointed at that row
+    /// rather than only drawn there.
+    private func rebuildRows() {
+        guard let document = document, let doc = document.doc else {
+            rows = []
+            tree = LayerTree([])
+            return
+        }
+        tree = doc.layerTree
+        // Written BACK, not merely drawn. Every command reads
+        // `document.activeLayerIndex` / `selectedLayerIndices`, so leaving the
+        // selection on an entry with no row meant Delete Layer, Merge Down,
+        // Align and the footer buttons acted on something the panel had
+        // never shown as selected — the highlighted group survived while a
+        // layer inside it was deleted. This is exactly the remap
+        // `ImageDocument.setGroupExpanded` makes on the disclosure-click
+        // path; the paths that do not go through it land here: a document
+        // loaded with a closed group around its active layer, and an agent's
+        // set_active_layer aimed inside one. (An agent naming a hidden entry
+        // therefore ends up with its GROUP active, and a pixel tool then
+        // refuses by name — which is why every agent tool takes an explicit
+        // `layer`, and why none of them relies on the panel's selection.)
+        document.setLayerSelection(document.layerSelection.mappedToVisibleRows(in: doc))
+        let selection = document.layerSelection
+        let selectedRows = selection.indices
+        // The PRIMARY's row, for the same reason: a primary with no row of
+        // its own would leave a single selection drawn in the weak "not the
+        // primary" treatment, reading as one member of a multi-selection with
+        // no active layer anywhere.
+        let primaryRow = selection.primary
+        rows = tree.visibleRows().compactMap { idx -> LayerRowModel? in
+            guard let info = doc.layerInfo(idx) else { return nil }
+            return LayerRowModel(
+                index: idx,
+                info: info,
+                depth: info.depth,
+                isGroup: info.isGroup,
+                childCount: tree.children(of: idx).count,
+                expanded: info.open,
+                hasMask: doc.layerHasMask(idx),
+                maskEnabled: doc.layerMaskEnabled(idx),
+                isText: doc.textPayload(idx) != nil,
+                isAdjustment: doc.layerIsAdjustment(idx),
+                isLivePhoto: doc.livePhotoPayload(idx) != nil,
+                isShape: doc.shapePayload(idx) != nil,
+                clipped: doc.layerClipped(idx),
+                // One bool FFI call per row — no style JSON copy or decode
+                // on the reload path.
+                hasStyle: doc.layerHasStyle(idx),
+                locks: doc.lockFlags(idx),
+                link: info.link,
+                isSelected: selectedRows.contains(idx),
+                isPrimary: idx == primaryRow,
+                thumbnail: nil,
+                maskThumbnail: nil,
+                paintTarget: paintTarget)
+        }
     }
 
     // MARK: - Paint target
@@ -329,45 +493,28 @@ final class LayersPanelViewController: NSViewController {
 
     /// Re-rings the visible rows in place — cheaper than a reload, which
     /// would re-resample every thumbnail.
-    private func refreshTargetRings() {
+    /// Internal, not private: the selection and thumbnail-click paths in
+    /// `+Rows.swift` re-ring the rows after they move the selection.
+    func refreshTargetRings() {
         guard isViewLoaded, let document = document else { return }
         let active = document.activeLayerIndex
-        for row in 0..<tableView.numberOfRows {
+        for row in 0..<min(tableView.numberOfRows, rows.count) {
             guard
                 let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
                     as? LayerCellView
             else { continue }
             cell.setTargetHighlight(
-                layerActive: layerIndex(forRow: row) == active, target: paintTarget)
+                layerActive: rows[row].index == active, target: paintTarget)
         }
-    }
-
-    /// A click on one of a row's thumbnails: make that layer active, then
-    /// point brush/eraser at the clicked target.
-    private func selectPaintTarget(_ target: PaintTarget, layer idx: Int) {
-        guard let document = document, document.doc != nil else { return }
-        if document.activeLayerIndex != idx {
-            // Panel selection only retargets future edits: no undo, no dirty.
-            document.activeLayerIndex = idx
-            let row = row(forLayerIndex: idx)
-            if row >= 0, row < tableView.numberOfRows {
-                isReloading = true
-                tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-                isReloading = false
-            }
-            updateHeaderControls()
-            updateButtonStates()
-            // Resets the editor's paint target for the new layer; the
-            // requested target lands right after.
-            onActiveLayerChange?()
-        }
-        onPaintTargetChange?(target)
-        refreshTargetRings()
     }
 
     /// The mask's grayscale image scaled down for its thumbnail well. Masks
     /// come back at the LAYER's full size, so the scaling happens in the core
     /// rather than at draw time.
+    ///
+    /// Stays `ColorProfile.sRGB` while the layer thumbnail beside it takes the
+    /// document's space: a mask byte is coverage shown as grey, not a colour,
+    /// so there is nothing here for a profile to describe.
     private func maskThumbnail(_ doc: RasterDocument, _ idx: Int, maxSide: Int) -> NSImage? {
         guard let mask = doc.layerMaskImage(idx), mask.width > 0, mask.height > 0 else {
             return nil
@@ -379,12 +526,14 @@ final class LayersPanelViewController: NSViewController {
         let scaled =
             (w == mask.width && h == mask.height)
             ? mask : (mask.resized(w: w, h: h, filter: RZ_FILTER_BILINEAR) ?? mask)
-        guard let cgImage = scaled.makeCGImage() else { return nil }
+        guard let cgImage = scaled.makeCGImage(in: ColorProfile.sRGB) else { return nil }
         return NSImage(
             cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 
-    private func updateHeaderControls() {
+    /// Internal, not private: the selection and drag delegate methods in
+    /// `+Rows.swift` refresh the header after they move the selection.
+    func updateHeaderControls() {
         guard let document = document, let doc = document.doc,
               let info = doc.layerInfo(document.activeLayerIndex)
         else {
@@ -392,6 +541,11 @@ final class LayersPanelViewController: NSViewController {
             opacitySlider.isEnabled = false
             opacityValueLabel.stringValue = "—"
             return
+        }
+        // Pass Through is offered only while the primary entry is a group —
+        // the mode has no meaning anywhere else and the core refuses it.
+        if info.isGroup != blendMenuHasPassThrough {
+            installBlendMenu(passThrough: info.isGroup)
         }
         blendPopup.isEnabled = true
         opacitySlider.isEnabled = true
@@ -405,39 +559,90 @@ final class LayersPanelViewController: NSViewController {
         }
     }
 
+    /// Counts LEAF layers, not entries: a group is a container, and telling
+    /// the user a two-layer document has three "layers" because one of them
+    /// is a folder would be wrong.
     private func updateLayerCount() {
-        let count = document?.doc?.layerCount ?? 0
+        let count = tree.pixelLayerCount
         layerCountLabel.stringValue = count == 1 ? "1 layer" : "\(count) layers"
     }
 
-    private func updateButtonStates() {
+    /// Internal for the same reason as `updateHeaderControls`.
+    func updateButtonStates() {
         updateLayerCount()
-        let doc = document?.doc
-        let count = doc?.layerCount ?? 0
-        let active = document?.activeLayerIndex ?? 0
+        let count = document?.doc?.layerCount ?? 0
         let hasDoc = count > 0
         addButton.isEnabled = hasDoc
+        groupButton.isEnabled = hasDoc
+        adjustmentButton.isEnabled = hasDoc
         duplicateButton.isEnabled = hasDoc
-        removeButton.isEnabled = count > 1
-        // Merge Down needs a VISIBLE layer below the active one; the core
-        // refuses to merge into a hidden layer.
-        mergeButton.isEnabled = hasDoc && active >= 1
-            && (doc?.layerInfo(active - 1)?.visible ?? false)
+        // Not `count > 1`: what a removal TAKES is the selection's
+        // independent roots' subtrees, so deleting the one group that holds
+        // the whole document is refused. Same call as the menu item's
+        // validation, so the button and the item cannot disagree.
+        deleteButton.isEnabled = document.map {
+            $0.doc?.removalLeavesLayers($0.selectedLayerIndices) ?? false
+        } ?? false
+    }
+
+    /// The footer's adjustment button: pops the same per-op menu as
+    /// Layer > New Adjustment Layer (same titles, same nil-target selectors,
+    /// so the editor's validation covers both).
+    @objc private func showNewAdjustmentMenu(_ sender: Any?) {
+        let menu = NSMenu(title: "New Adjustment Layer")
+        func add(_ title: String, _ action: Selector) {
+            menu.addItem(NSMenuItem(title: title, action: action, keyEquivalent: ""))
+        }
+        add(
+            "Brightness/Contrast/Saturation…",
+            #selector(EditorViewController.newAdjustmentLayerBCS(_:)))
+        add("Curves…", #selector(EditorViewController.newAdjustmentLayerCurves(_:)))
+        add("Levels…", #selector(EditorViewController.newAdjustmentLayerLevels(_:)))
+        add("Hue Rotate…", #selector(EditorViewController.newAdjustmentLayerHueRotate(_:)))
+        add("Posterize…", #selector(EditorViewController.newAdjustmentLayerPosterize(_:)))
+        add("Threshold…", #selector(EditorViewController.newAdjustmentLayerThreshold(_:)))
+        menu.addItem(.separator())
+        // The phase-5 ops, in AdjustmentMenuOrder's one order (the same
+        // list Image ▸ Adjustments and Layer ▸ New Adjustment Layer build
+        // from), each tagged with its index into it.
+        for (tag, op) in AdjustmentMenuOrder.newOps.enumerated() {
+            let entry = NSMenuItem(
+                title: op.displayName + "…",
+                action: #selector(EditorViewController.newAdjustmentLayerOp(_:)),
+                keyEquivalent: "")
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        menu.addItem(.separator())
+        add("Invert", #selector(EditorViewController.newAdjustmentLayerInvert(_:)))
+        add("Grayscale", #selector(EditorViewController.newAdjustmentLayerGrayscale(_:)))
+        add("Sepia", #selector(EditorViewController.newAdjustmentLayerSepia(_:)))
+        guard let button = adjustmentButton else { return }
+        menu.popUp(
+            positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 2), in: button)
     }
 
     // MARK: - Header actions
 
+    /// The header applies to the WHOLE selection — Photoshop's behaviour,
+    /// and the reason `applyToSelectedLayers` tolerates a per-entry no-op:
+    /// setting three layers to Multiply when one of them already is must
+    /// still change the other two.
+    ///
+    /// Pass Through reaches only a group (the core refuses it on a raster
+    /// entry), so a mixed selection quietly leaves the raster entries alone
+    /// rather than failing the whole edit.
     @objc private func blendChanged(_ sender: Any?) {
         guard let document = document else { return }
-        let idx = document.activeLayerIndex
         guard let tag = blendPopup.selectedItem?.tag, tag >= 0 else { return }
         let mode = RzBlendMode(rawValue: UInt32(tag))
-        document.applyEdit("Layer Blend Mode") { $0.withLayerBlendMode(idx, mode) }
+        document.applyToSelectedLayers("Layer Blend Mode") { $0.withLayerBlendMode($1, mode) }
     }
 
     @objc private func opacityChanged(_ sender: Any?) {
         guard let document = document, document.doc != nil else { return }
         let idx = document.activeLayerIndex
+        let indices = document.selectedLayerIndices
         let value = opacitySlider.doubleValue
         opacityValueLabel.stringValue = "\(Int((value * 100).rounded()))%"
         // Continuous slider ticks swap the doc live (no undo); the tick
@@ -456,7 +661,19 @@ final class LayersPanelViewController: NSViewController {
             document.beginLiveEdit()
             opacityDragActive = true
         }
-        if let updated = document.doc.withLayerOpacity(idx, value) {
+        // Every selected entry follows the slider, chained onto one handle
+        // so the whole scrub is still one live edit and one undo step. An
+        // entry already at this opacity answers nil (the core's no-op rule)
+        // and is simply skipped.
+        var updated = document.doc
+        var moved = false
+        for target in indices {
+            if let next = updated?.withLayerOpacity(target, value) {
+                updated = next
+                moved = true
+            }
+        }
+        if moved, let updated = updated {
             document.updateLiveEdit(updated)
         }
         if !stillDragging {
@@ -466,48 +683,60 @@ final class LayersPanelViewController: NSViewController {
     }
 }
 
-// MARK: - Table data source / delegate
+// MARK: - Table data source
 
 extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
-        document?.doc?.layerCount ?? 0
+        rows.count
     }
 
     func tableView(
         _ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int
     ) -> NSView? {
-        guard let document = document, let doc = document.doc else { return nil }
-        let idx = layerIndex(forRow: row)
-        guard let info = doc.layerInfo(idx) else { return nil }
+        guard let document = document, let doc = document.doc, row >= 0, row < rows.count
+        else { return nil }
+        var model = rows[row]
+        let idx = model.index
+        let visible = model.info.visible
 
         let cell = LayerCellView(frame: .zero)
-        let hasMask = doc.layerHasMask(idx)
-        let side = Int(hasMask ? LayerCellView.pairedThumbSide : LayerCellView.thumbSide)
-        var thumbnail: NSImage? = nil
-        if let thumb = doc.layerThumbnail(idx, maxSide: side), let cgImage = thumb.makeCGImage() {
-            thumbnail = NSImage(
+        let side = Int(model.hasMask ? LayerCellView.pairedThumbSide : LayerCellView.thumbSide)
+        // A GROUP has no pixels of its own: asking the core for its
+        // thumbnail would composite its whole subtree once per row on every
+        // reload, so the cell draws a folder glyph instead.
+        // The layer's own pixels: tagged with the document's space, so a
+        // wide-gamut layer's thumbnail matches the canvas rather than showing
+        // the same numbers read as sRGB.
+        if !model.isGroup, let thumb = doc.layerThumbnail(idx, maxSide: side),
+           let cgImage = thumb.makeCGImage(in: doc.colorSpace)
+        {
+            model.thumbnail = NSImage(
                 cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         }
-        cell.configure(
-            info: info, thumbnail: thumbnail, hasMask: hasMask,
-            maskThumbnail: hasMask ? maskThumbnail(doc, idx, maxSide: side) : nil,
-            maskEnabled: doc.layerMaskEnabled(idx),
-            isText: doc.textPayload(idx) != nil,
-            isAdjustment: doc.layerIsAdjustment(idx),
-            isLivePhoto: doc.livePhotoPayload(idx) != nil,
-            clipped: doc.layerClipped(idx),
-            selected: idx == document.activeLayerIndex, paintTarget: paintTarget)
+        if model.hasMask {
+            model.maskThumbnail = maskThumbnail(doc, idx, maxSide: side)
+        }
+        model.paintTarget = paintTarget
+        cell.configure(model)
         cell.onSelectTarget = { [weak self] target in
             self?.selectPaintTarget(target, layer: idx)
+        }
+        cell.onLoadSelection = { [weak self] target, mode in
+            self?.onLoadLayerSelection?(idx, target, mode)
         }
         cell.onEditSource = { [weak self] in
             self?.editLayerSource(idx)
         }
         cell.onToggleVisible = { [weak self] in
             guard let document = self?.document else { return }
-            document.applyEdit(info.visible ? "Hide Layer" : "Show Layer") {
-                $0.withLayerVisible(idx, !info.visible)
+            document.applyEdit(visible ? "Hide Layer" : "Show Layer") {
+                $0.withLayerVisible(idx, !visible)
             }
+        }
+        cell.onToggleExpanded = { [weak self] in
+            // Not an undo step, but a real document change: `open` is saved
+            // in the .rz record (ImageDocument.setGroupExpanded).
+            self?.document?.setGroupExpanded(idx, !model.expanded)
         }
         cell.onRename = { [weak self] newName in
             guard let document = self?.document else { return }
@@ -517,90 +746,23 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        LayerRowView(frame: .zero)
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        guard !isReloading, let document = document, document.doc != nil else { return }
-        let row = tableView.selectedRow
-        guard row >= 0 else { return }
-        let idx = layerIndex(forRow: row)
-        guard idx != document.activeLayerIndex else { return }
-        // Panel selection only retargets future edits: no undo, no dirty.
-        document.activeLayerIndex = idx
-        updateHeaderControls()
-        updateButtonStates()
-        onActiveLayerChange?()
-        // The paint-target ring follows the active layer (and the editor has
-        // just dropped any mask target the old layer had).
-        refreshTargetRings()
-    }
-
-    // MARK: - Drag reorder
-
-    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
-        let item = NSPasteboardItem()
-        item.setString(String(row), forType: Self.layerRowType)
-        return item
-    }
-
-    func tableView(
-        _ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
-        proposedDropOperation dropOperation: NSTableView.DropOperation
-    ) -> NSDragOperation {
-        guard info.draggingPasteboard.availableType(from: [Self.layerRowType]) != nil else {
-            return []
-        }
-        if dropOperation == .on {
-            tableView.setDropRow(row, dropOperation: .above)
-        }
-        return .move
-    }
-
-    func tableView(
-        _ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int,
-        dropOperation: NSTableView.DropOperation
-    ) -> Bool {
-        guard let document = document, let doc = document.doc,
-              let rowString = info.draggingPasteboard.string(forType: Self.layerRowType),
-              let sourceRow = Int(rowString)
-        else { return false }
-        let count = doc.layerCount
-        guard sourceRow >= 0, sourceRow < count else { return false }
-        // `row` is the insertion point in the current (top-first) table
-        // order; remove the dragged row first to get its final table row.
-        var targetRow = row
-        if targetRow > sourceRow { targetRow -= 1 }
-        guard targetRow != sourceRow, targetRow >= 0, targetRow < count else { return false }
-        let from = count - 1 - sourceRow
-        let to = count - 1 - targetRow
-        let before = document.doc
-        document.applyEdit("Reorder Layer") { $0.movingLayer(from: from, to: to) }
-        guard document.doc !== before else { return false }
-        // Keep the moved layer selected.
-        document.activeLayerIndex = to
-        reload()
-        onActiveLayerChange?()
-        return true
-    }
-}
-
-// MARK: - Row double-click and right-click menu
-
-extension LayersPanelViewController: NSMenuDelegate {
-    /// Double-click on a row: reopen whatever the layer was made from. The
-    /// first click has already selected the row, so this only has to route.
-    @objc private func rowDoubleClicked(_ sender: Any?) {
-        let row = tableView.clickedRow
-        guard row >= 0, row < tableView.numberOfRows else { return }
-        editLayerSource(layerIndex(forRow: row))
+        let view = LayerRowView(frame: .zero)
+        // The row model is the source of both, so the row view is right
+        // before any cell reaches it — AppKit builds this view first and
+        // draws its background whether or not a cell has landed yet.
+        guard row >= 0, row < rows.count else { return view }
+        view.depth = rows[row].depth
+        view.isPrimarySelection = rows[row].isPrimary
+        return view
     }
 
     /// Routes "edit this layer's source" to the editor by layer kind — the
-    /// kinds are mutually exclusive (one meta slot), and a plain raster layer
-    /// has no source to reopen, so the gesture is simply inert there. Both
-    /// the row's double-click and the thumbnail's own land here.
-    private func editLayerSource(_ idx: Int) {
+    /// kinds are mutually exclusive (one meta slot). A plain raster layer has
+    /// no source to reopen, so its double-click opens Layer Style instead
+    /// (Photoshop's gesture); described layers keep their own editors and
+    /// reach Layer Style through the row menu. Both the row's double-click
+    /// and the thumbnail's own land here.
+    func editLayerSource(_ idx: Int) {
         guard let doc = document?.doc else { return }
         if doc.layerIsAdjustment(idx) {
             onAdjustmentEdit?(idx)
@@ -608,65 +770,10 @@ extension LayersPanelViewController: NSMenuDelegate {
             onTextEdit?(idx)
         } else if doc.livePhotoPayload(idx) != nil {
             onLivePhotoEdit?(idx)
+        } else if doc.shapePayload(idx) != nil {
+            onShapeEdit?(idx)
+        } else {
+            onLayerStyleEdit?(idx)
         }
-    }
-
-    /// Builds the row menu for the row under the cursor, and SELECTS that row
-    /// first — so the menu, the panel footer and the Layer menu always act on
-    /// the same layer. A right-click below the last row (clickedRow == -1)
-    /// leaves the menu empty, which shows nothing.
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        let row = tableView.clickedRow
-        guard row >= 0, row < tableView.numberOfRows else { return }
-        if tableView.selectedRow != row {
-            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        }
-        let rename = NSMenuItem(
-            title: "Rename", action: #selector(renameClickedLayer(_:)), keyEquivalent: "")
-        rename.target = self
-        menu.addItem(rename)
-        // Only on a live photo layer, where it is the row's own version of
-        // the double-click: no other row kind has a frame to select.
-        if document?.doc?.livePhotoPayload(layerIndex(forRow: row)) != nil {
-            let frame = NSMenuItem(
-                title: "Select Frame…", action: #selector(selectClickedLayerFrame(_:)),
-                keyEquivalent: "")
-            frame.target = self
-            menu.addItem(frame)
-        }
-        menu.addItem(.separator())
-        // The SAME nil-target action the footer button and the Layer menu
-        // send, so it inherits the editor's validation: disabled on the last
-        // remaining layer, and while a canvas session or sheet is open.
-        menu.addItem(
-            NSMenuItem(
-                title: "Delete Layer",
-                action: #selector(EditorViewController.deleteLayer(_:)), keyEquivalent: ""))
-    }
-
-    /// Select Frame…: the clicked row's Live Photo timeline, the same picker
-    /// its double-click opens. `clickedRow` still names the right row here
-    /// (it stays valid until the next click), and menuNeedsUpdate has already
-    /// selected it.
-    @objc private func selectClickedLayerFrame(_ sender: Any?) {
-        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
-        guard row >= 0, row < tableView.numberOfRows else { return }
-        onLivePhotoEdit?(layerIndex(forRow: row))
-    }
-
-    /// Rename: put the keyboard in the row's name field with the name
-    /// selected, which is exactly the inline rename a click on the name
-    /// starts (and commits the same way). `clickedRow` stays valid until the
-    /// next click, so it still names the right row here; the selection made
-    /// in menuNeedsUpdate is the fallback.
-    @objc private func renameClickedLayer(_ sender: Any?) {
-        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
-        guard row >= 0, row < tableView.numberOfRows else { return }
-        tableView.scrollRowToVisible(row)
-        guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: true)
-                as? LayerCellView
-        else { return }
-        cell.beginRename()
     }
 }

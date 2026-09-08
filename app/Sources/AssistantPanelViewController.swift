@@ -9,6 +9,12 @@ final class AssistantPanelViewController: NSViewController {
     /// Called when the user clicks the Layers tab.
     var onShowLayers: (() -> Void)?
 
+    /// Called when the user clicks the Channels tab.
+    var onShowChannels: (() -> Void)?
+
+    /// Called when the user clicks the Info tab.
+    var onShowInfo: (() -> Void)?
+
     private var session: AssistantSession?
     private var busy = false
 
@@ -41,9 +47,12 @@ final class AssistantPanelViewController: NSViewController {
         root.wantsLayer = true
         root.layer?.backgroundColor = DS.chromeBackground.cgColor
 
-        let tabs = PanelTabsView(titles: ["Layers", "Assistant"], activeIndex: 1) {
-            [weak self] index in
+        let tabs = PanelTabsView(
+            titles: ["Layers", "Channels", "Assistant", "Info"], activeIndex: 2
+        ) { [weak self] index in
             if index == 0 { self?.onShowLayers?() }
+            if index == 1 { self?.onShowChannels?() }
+            if index == 3 { self?.onShowInfo?() }
         }
         tabs.translatesAutoresizingMaskIntoConstraints = false
 
@@ -95,7 +104,8 @@ final class AssistantPanelViewController: NSViewController {
             title: "Save Key", style: .primary, target: self, action: #selector(saveKey(_:)))
         let keyHint = NSTextField(
             wrappingLabelWithString:
-                "Stored in your keychain. Launching with ANTHROPIC_API_KEY set also works.")
+                "Stored user-only in Application Support. "
+                + "Launching with ANTHROPIC_API_KEY set also works.")
         keyHint.font = DS.mono(10)
         keyHint.textColor = DS.textFaint
         keyBox = NSStackView(views: [keyTitle, keyField, keySave, keyHint])
@@ -113,18 +123,22 @@ final class AssistantPanelViewController: NSViewController {
         root.addSubview(keyBox)
 
         NSLayoutConstraint.activate([
-            tabs.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
-            tabs.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            // The tab row runs edge to edge; the clear button (and spinner)
+            // sit in a slim strip below it, over the transcript's top edge.
+            tabs.topAnchor.constraint(equalTo: root.topAnchor),
+            tabs.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            tabs.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            tabs.heightAnchor.constraint(equalToConstant: DS.tabHeight),
 
-            clearButton.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
+            clearButton.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 4),
             clearButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
 
-            transcriptScroll.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 10),
+            transcriptScroll.topAnchor.constraint(equalTo: clearButton.bottomAnchor, constant: 4),
             transcriptScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             transcriptScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             transcriptScroll.bottomAnchor.constraint(equalTo: inputRow.topAnchor, constant: -10),
 
-            spinner.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
+            spinner.centerYAnchor.constraint(equalTo: clearButton.centerYAnchor),
             spinner.trailingAnchor.constraint(equalTo: clearButton.leadingAnchor, constant: -8),
 
             inputRow.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
@@ -156,9 +170,9 @@ final class AssistantPanelViewController: NSViewController {
         if APIKeyStore.save(key) {
             keyField.stringValue = ""
             refreshKeyState()
-            appendMeta("API key saved to the keychain.")
+            appendMeta("API key saved.")
         } else {
-            appendError("Could not save the key to the keychain.")
+            appendError("Could not write the key file in Application Support.")
         }
     }
 
@@ -218,7 +232,10 @@ final class AssistantPanelViewController: NSViewController {
         return """
             You are the assistant built into Rasterize, a macOS layered image editor. You edit \
             the user's open image by calling tools; the user sees every change live and each \
-            tool call is one undo step. \(context) Layer index 0 is the bottom layer. \
+            tool call is one undo step. \(context) Layer index 0 is the bottom layer; an \
+            index may name a layer GROUP, whose children come BEFORE it in the list and \
+            name it in parent — get_document reports each entry's kind, depth and \
+            children. \
             Coordinates start at the canvas top-left corner with y increasing downward. Use the \
             render tool to look at the canvas before visual edits and again afterwards to \
             verify the result. Keep replies to a sentence or two; never repeat tool output \

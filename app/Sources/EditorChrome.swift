@@ -142,7 +142,7 @@ final class ZoomPillView: NSView {
 
 // MARK: - Status segments
 
-/// One status-bar segment: 11px mono faint text with an optional 1px
+/// One status-bar segment: 10px mono faint text with an optional 1px
 /// leading separator, per the design's border-separated segments.
 final class StatusSegment: NSView {
     private let label = NSTextField(labelWithString: "")
@@ -152,7 +152,7 @@ final class StatusSegment: NSView {
         self.showsSeparator = separator
         super.init(frame: .zero)
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = DS.mono(11)
+        label.font = DS.mono(10)
         label.textColor = DS.textFaint
         label.lineBreakMode = .byTruncatingTail
         addSubview(label)

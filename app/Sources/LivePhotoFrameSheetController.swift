@@ -4,7 +4,10 @@ import AppKit
 /// Frame…, the layers panel's row menu, and a double-click on the row): a
 /// slider over the clip's timeline, previewed on the canvas exactly like the
 /// filter sheets preview theirs, committing the chosen moment as one undo
-/// step.
+/// step. Preview and Apply run the SAME op (`rerenderingDescribedLayer`
+/// through `settingLivePhotoFrame`) at the same anchor, so a frame lands
+/// exactly where the layer is — through its transform, fit-and-centred in
+/// the still's size, never stretched — and the mask and style ride along.
 ///
 /// It is its own file rather than another section of Sheets.swift because
 /// that file is frozen at its current size; it is built from the same shared
@@ -18,6 +21,10 @@ final class LivePhotoFrameSheetController: NSViewController {
     /// Cancel must leave exactly this state behind.
     private let layerIndex: Int
     private let original: LivePhotoPayload
+    /// The layer's anchor at open time (the still's top-left on the canvas):
+    /// every preview re-renders the chosen frame through the layer's own
+    /// transform at this very point, so it lands exactly where the layer is.
+    private let anchor: CGPoint?
 
     // In-context preview, the AdjustSheetController pattern: the chosen frame
     // is swapped into the captured doc handle and the flattened result is
@@ -42,6 +49,7 @@ final class LivePhotoFrameSheetController: NSViewController {
         self.original = payload
         self.payload = payload
         self.baseDoc = document.doc
+        self.anchor = document.doc?.describedAnchor(layer)
         super.init(nibName: nil, bundle: nil)
         renderer.onRender = { [weak self] cgImage in
             self?.canvas?.previewImage = cgImage
@@ -86,8 +94,9 @@ final class LivePhotoFrameSheetController: NSViewController {
         let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
         view = makeSheetView(
             title: "Select frame",
-            hint: "Frames come from the Live Photo's clip, scaled to the photo's size; at the "
-                + "key frame the layer shows the full-resolution photo itself.",
+            hint: "Frames come from the Live Photo's clip, scaled to the photo's size and "
+                + "re-rendered through the layer's transform; at the key frame the layer "
+                + "shows the full-resolution photo itself.",
             content: content,
             buttonRow: makeButtonRow(
                 cancel: cancelButton, apply: applyButton, leading: [keyFrameButton]))
@@ -98,21 +107,23 @@ final class LivePhotoFrameSheetController: NSViewController {
         readout.stringValue = LivePhoto.frameDescription(payload)
     }
 
-    /// Renders the chosen frame into the captured document and shows the
-    /// flattened result on the canvas. Decoding happens on the renderer's
-    /// queue — a 12 MP still is not something to decode on the main thread
-    /// per slider tick — and requests coalesce, so a fast scrub only renders
-    /// the moments it settles on.
+    /// Renders the chosen frame into the captured document — through the
+    /// layer's transform at its anchor, mask and style riding along, the
+    /// very op Apply commits — and shows the flattened result on the
+    /// canvas. Decoding happens on the renderer's queue (pure CoreGraphics,
+    /// no AppKit drawing) — a 12 MP still is not something to decode on the
+    /// main thread per slider tick — and requests coalesce, so a fast scrub
+    /// only renders the moments it settles on.
     private func requestPreview() {
-        guard let baseDoc = baseDoc else { return }
+        guard let baseDoc = baseDoc, let anchor = anchor else { return }
         let payload = self.payload
         let idx = layerIndex
         renderer.request {
-            guard let raster = LivePhoto.render(payload),
-                  let previewDoc = baseDoc.withLayerPixels(
-                    idx, rgba: raster.pixels, width: raster.width, height: raster.height)
-            else { return nil }
-            return previewDoc.flattened()?.makeCGImage()
+            // The re-rendered frame lands as the document's own numbers
+            // (the renderer draws into that space), so the preview is
+            // tagged with it too.
+            baseDoc.rerenderingDescribedLayer(idx, .livePhoto(payload), anchor: anchor)?
+                .flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 

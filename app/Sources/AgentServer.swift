@@ -31,10 +31,11 @@ final class AgentServer {
 
     /// What a pixel edit dropped from a layer, for the report back: a layer
     /// whose pixels are the RENDERING of a description — a text layer's
-    /// string, a live photo layer's frame — stops being that the moment
-    /// something paints over them.
-    private enum DroppedDescription: String {
+    /// string, a shape layer's geometry, a live photo layer's frame — stops
+    /// being that the moment something paints over them.
+    enum DroppedDescription: String {
         case text
+        case shape
         case livePhoto = "live photo"
     }
 
@@ -125,32 +126,82 @@ final class AgentServer {
         // Rendering
         "render": render,
         "sample_color": sampleColor,
+        // Colour management and metadata (AgentServer+Color.swift)
+        "get_color_profile": { $0.getColorProfile },
+        "assign_profile": { $0.assignProfile },
+        "convert_profile": { $0.convertProfile },
+        "set_resolution": { $0.setResolution },
+        "get_metadata": { $0.getMetadata },
         // Layer operations
         "set_active_layer": setActiveLayer,
         "new_layer": newLayer,
-        "duplicate_layer": duplicateLayer,
-        "delete_layer": deleteLayer,
-        "merge_down": mergeDown,
         "flatten_image": flattenImage,
         "reorder_layer": reorderLayer,
         "set_layer_properties": setLayerProperties,
         "transform_layer": transformLayer,
+        "distort_layer": { $0.distortLayer },
+        // Layer groups, locks, links and structure (AgentServer+Groups.swift)
+        "group_layers": { $0.groupLayers },
+        "ungroup_layers": { $0.ungroupLayers },
+        "set_layer_lock": { $0.setLayerLock },
+        "align_layers": { $0.alignLayers },
+        "distribute_layers": { $0.distributeLayers },
+        "link_layers": { $0.linkLayers },
+        "unlink_layers": { $0.unlinkLayers },
+        "layer_via_copy": { $0.layerViaCopy },
+        "layer_via_cut": { $0.layerViaCut },
+        "merge_visible": { $0.mergeVisible },
+        "stamp_visible": { $0.stampVisible },
+        "arrange_layer": { $0.arrangeLayer },
+        "auto_select_layer": { $0.autoSelectLayer },
+        "set_selected_layers": { $0.setSelectedLayers },
+        // …and the three older layer tools that now take a SET as well
+        // (same file, so the "one core call, never a loop" rule is stated
+        // once).
+        "duplicate_layer": { $0.duplicateLayer },
+        "delete_layer": { $0.deleteLayer },
+        "merge_down": { $0.mergeDown },
         // Layer masks and clipping
         "add_layer_mask": addLayerMask,
         "remove_layer_mask": removeLayerMask,
         "set_layer_mask_enabled": setLayerMaskEnabled,
         "set_layer_clipped": setLayerClipped,
+        // Layer styles (AgentServer+LayerStyle.swift)
+        "set_layer_style": { $0.setLayerStyle },
+        "set_global_light": { $0.setGlobalLight },
         // Adjustment layers and filters
         "add_adjustment_layer": addAdjustmentLayer,
         "edit_adjustment_layer": editAdjustmentLayer,
         "apply_filter": applyFilter,
+        // Auto Tone / Contrast / Color (AgentServer+Adjustments.swift):
+        // mirrors Image > Auto Tone, > Auto Contrast, > Auto Color.
+        "auto_tone": { $0.autoTone },
+        "auto_contrast": { $0.autoContrast },
+        "auto_color": { $0.autoColor },
+        // Statistics and the pixel readout (AgentServer+Info.swift):
+        // mirrors the Info panel's histogram and its cursor readout.
+        "histogram": { $0.histogram },
+        "sample_pixel": { $0.samplePixel },
         // Painting (brush, eraser, text)
         "brush_stroke": brushStroke,
         "eraser_stroke": eraserStroke,
         "add_text": addText,
-        // Text layers
-        "add_text_layer": addTextLayer,
-        "edit_text_layer": editTextLayer,
+        // Retouch strokes (AgentServer+Retouch.swift)
+        "clone_stamp": { $0.cloneStamp },
+        "dodge_burn": { $0.dodgeBurn },
+        // Retouching (AgentServer+Heal / +Patch / +ContentAwareFill / +RedEye.swift)
+        "heal_stroke": { $0.healStroke },
+        "spot_heal_stroke": { $0.spotHealStroke },
+        "patch_region": { $0.patchRegion },
+        "content_aware_fill": { $0.contentAwareFill },
+        "red_eye": { $0.redEye },
+        "red_eye_auto": { $0.redEyeAuto },
+        // Text layers (AgentServer+Text.swift)
+        "add_text_layer": { $0.addTextLayer },
+        "edit_text_layer": { $0.editTextLayer },
+        // Shape layers (AgentServer+Shapes.swift)
+        "add_shape_layer": { $0.addShapeLayer },
+        "edit_shape_layer": { $0.editShapeLayer },
         // Live photo layers (AgentServer+LivePhoto.swift)
         "add_live_photo_layer": addLivePhotoLayer,
         "set_live_photo_frame": setLivePhotoFrame,
@@ -166,10 +217,33 @@ final class AgentServer {
         "fill": fill,
         "gradient": gradient,
         "clear_selection": clearSelection,
+        // Channels (AgentServer+Channels.swift)
+        "list_channels": { $0.listChannels },
+        "add_channel": { $0.addChannel },
+        "duplicate_channel": { $0.duplicateChannel },
+        "delete_channel": { $0.deleteChannel },
+        "rename_channel": { $0.renameChannel },
+        "set_channel_options": { $0.setChannelOptions },
+        "invert_channel": { $0.invertChannel },
+        "load_selection": { $0.loadSelection },
+        "save_selection": { $0.saveSelection },
+        "apply_image": { $0.applyImage },
+        "calculations": { $0.calculations },
+        "add_luminosity_masks": { $0.addLuminosityMasks },
+        // Guides and the ruler origin (AgentServer+Guides.swift). The view
+        // PREFERENCES beside them — rulers, the grid, the snap toggles, the
+        // ruler unit — deliberately get no tool at all; that file's header
+        // records why.
+        "list_guides": { $0.listGuides },
+        "add_guide": { $0.addGuide },
+        "remove_guide": { $0.removeGuide },
+        "clear_guides": { $0.clearGuides },
+        "set_ruler_origin": { $0.setRulerOrigin },
         // Whole-document geometry
         "rotate": rotate,
         "flip": flip,
-        "crop": crop,
+        // crop's body (rect + straighten angle) lives in AgentServer+Retouch.swift
+        "crop": { $0.crop },
         "image_size": imageSize,
         "canvas_size": canvasSize,
         // Undo, export
@@ -197,14 +271,6 @@ final class AgentServer {
 
     // The dispatch switch's old inline one-liners, as named handlers the
     // table can reference.
-
-    private func duplicateLayer(_ a: [String: Any]) throws -> String {
-        try layerEdit(a, "Duplicate Layer") { $0.duplicatingLayer($1) }
-    }
-
-    private func deleteLayer(_ a: [String: Any]) throws -> String {
-        try layerEdit(a, "Delete Layer") { $0.removingLayer($1) }
-    }
 
     private func flattenImage(_ a: [String: Any]) throws -> String {
         try docEdit(a, "Flatten Image") { $0.flattening() }
@@ -269,7 +335,9 @@ final class AgentServer {
         return first
     }
 
-    private func summary(_ document: ImageDocument) -> [String: Any] {
+    // Internal, not private, like target and the helpers around it: the
+    // +Feature handler files report documents with it.
+    func summary(_ document: ImageDocument) -> [String: Any] {
         [
             "id": id(for: document),
             "title": document.displayName ?? "Untitled",
@@ -278,6 +346,7 @@ final class AgentServer {
             "height": document.doc?.height ?? 0,
             "layer_count": document.doc?.layerCount ?? 0,
             "active_layer": document.activeLayerIndex,
+            "selected_layers": document.selectedLayerIndices,
             "unsaved_changes": document.isDocumentEdited,
         ]
     }
@@ -313,6 +382,10 @@ final class AgentServer {
     private func getDocument(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
+        let tree = doc.layerTree
+        // Every row's content box in ONE bottom-up pass, never one descendant
+        // sweep per row (AgentServer+Groups.contentBoxes).
+        let boxes = Self.contentBoxes(doc, tree)
         let layers: [[String: Any]] = (0..<doc.layerCount).compactMap { index -> [String: Any]? in
             guard let info = doc.layerInfo(index) else { return nil }
             var layer: [String: Any] = [
@@ -329,17 +402,18 @@ final class AgentServer {
                 "mask_enabled": doc.layerMaskEnabled(index),
                 "clipped": doc.layerClipped(index),
             ]
+            // kind, depth, parent, children, open, locks, linked and the
+            // content box (AgentServer+Groups.swift).
+            layer.merge(
+                Self.structureFields(
+                    doc, index, tree, contentBox: index < boxes.count ? boxes[index] : nil)
+            ) { _, new in new }
             // A TEXT LAYER also carries the description its pixels were
-            // rendered from; only those layers can be re-rendered with
-            // edit_text_layer, and the key's absence says "plain raster".
+            // rendered from (typography, transform and origin included);
+            // only those layers can be re-rendered with edit_text_layer, and
+            // the key's absence says "plain raster".
             if let payload = doc.textPayload(index) {
-                layer["text"] = [
-                    "string": payload.string,
-                    "font": payload.font,
-                    "size": payload.size,
-                    "color": payload.color,
-                    "alignment": payload.alignment,
-                ]
+                layer["text"] = Self.textFields(payload, anchor: doc.describedAnchor(index))
             }
             // An ADJUSTMENT layer recolors everything below it while
             // compositing and its own pixels are ignored (the core's parse
@@ -348,17 +422,53 @@ final class AgentServer {
             let isAdjustment = doc.layerIsAdjustment(index)
             layer["is_adjustment"] = isAdjustment
             if isAdjustment, let payload = doc.adjustmentPayload(index) {
-                layer["adjustment"] = ["op": payload.op, "params": payload.params]
+                // Every key survives except a Color Lookup's table, which
+                // would swamp the reply (AgentServer+Adjustments.swift).
+                layer["adjustment"] = [
+                    "op": payload.op, "params": elidedAdjustmentParams(payload),
+                ]
+            }
+            // A SHAPE layer carries the parametric description its pixels
+            // were rendered from (position is its origin).
+            if let payload = doc.shapePayload(index) {
+                layer["shape"] = Self.shapeFields(payload, anchor: doc.describedAnchor(index))
             }
             // A LIVE PHOTO layer shows one frame of a clip and remembers
             // which; those are the layers set_live_photo_frame can re-render.
             if let payload = doc.livePhotoPayload(index) {
-                layer["live_photo"] = Self.livePhotoFields(payload)
+                layer["live_photo"] = Self.livePhotoFields(
+                    payload, anchor: doc.describedAnchor(index))
+            }
+            // A STYLED layer reports its full style object (the canonical
+            // JSON set_layer_style takes back).
+            if let style = Self.layerStyleFields(doc, index) {
+                layer["style"] = style
             }
             return layer
         }
         var result = summary(document)
         result["layers"] = layers
+        result["global_light"] = Self.globalLightFields(doc)
+        // Colour management: the document's profile, its print resolution
+        // and which metadata packets it carries (AgentServer+Color.swift).
+        result["color_profile"] = Self.colorProfileFields(doc, document)
+        result["resolution"] = Self.resolutionFields(doc)
+        var meta = Self.metadataFields(doc)
+        meta.merge(Self.notCapturedField(document)) { _, new in new }
+        if !meta.isEmpty { result["metadata"] = meta }
+        // The document's ALPHA CHANNELS — saved selections, never part of
+        // the picture (AgentServer+ChannelTargets.swift).
+        let channels = Self.channelFields(doc)
+        if !channels.isEmpty { result["channels"] = channels }
+        // The document's GUIDES — non-printing lines tools snap to, never
+        // part of the picture — and its ruler block (AgentServer+Guides.swift).
+        // The guides key is omitted when there are none, on the channels
+        // line's own pattern; the ruler block is always present, because a
+        // document always has an origin.
+        let guides = Self.guideFields(doc)
+        if !guides.isEmpty { result["guides"] = guides }
+        let ruler = Self.rulerFields(doc)
+        if !ruler.isEmpty { result["ruler"] = ruler }
         if let selection = editor(document)?.agentSelection {
             let b = selection.bounds
             let kind: String
@@ -374,7 +484,9 @@ final class AgentServer {
                 "width": Int(b.width), "height": Int(b.height),
             ]
         }
-        result["note"] = "index 0 is the bottom layer; offsets are from the canvas top-left, y down"
+        result["pixel_layer_count"] = tree.pixelLayerCount
+        result["selected_layers"] = document.selectedLayerIndices
+        result["note"] = Self.layerListNote
         return try jsonResult(result)
     }
 
@@ -385,12 +497,28 @@ final class AgentServer {
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
         let source: RasterImage?
         var what: String
-        if let layer = intArg(a, "layer") {
+        // The space the SOURCE pixels are in: a colour plane rendered as
+        // grey is coverage and is sRGB by construction; everything else is
+        // the document's.
+        var space = doc.colorSpace
+        if let channel = stringArg(a, "channel") {
+            // ONE plane as grayscale instead of the colour image, described
+            // by what the argument actually resolved to — an alpha channel
+            // belongs to no layer (AgentServer+ChannelTargets.swift).
+            let resolved = try Self.planeRenderImage(
+                doc, channel: channel, layer: intArg(a, "layer"))
+            source = resolved.image
+            what = resolved.what
+            space = ColorProfile.sRGB
+        } else if let layer = intArg(a, "layer") {
             guard layer >= 0, layer < doc.layerCount else {
                 throw ToolError(message: "Layer \(layer) is out of range (0..\(doc.layerCount - 1))")
             }
-            source = doc.layerImage(layer)
-            what = "layer \(layer) (\(doc.layerInfo(layer)?.name ?? ""))"
+            // A GROUP has no pixels of its own, so what it "looks like" is
+            // its own projection on a canvas-sized transparent buffer.
+            source = doc.layerIsGroup(layer) ? doc.layerCanvasImage(layer) : doc.layerImage(layer)
+            what = "\(doc.layerIsGroup(layer) ? "group" : "layer") \(layer) "
+                + "(\(doc.layerInfo(layer)?.name ?? ""))"
         } else {
             source = document.projection ?? doc.flattened()
             what = "flattened canvas"
@@ -409,16 +537,23 @@ final class AgentServer {
             }
             image = scaled
         }
-        guard let cgImage = image.makeCGImage(),
+        // This render's reader is a vision model whose decode is naive sRGB,
+        // so a wide-gamut document is CONVERTED rather than merely tagged
+        // (Bitmap.sRGBCopy, which returns an already-sRGB image untouched so
+        // the common case keeps its exact bytes).
+        let converted = !CFEqual(space, ColorProfile.sRGB)
+        guard let tagged = image.makeCGImage(in: space),
+            let cgImage = Bitmap.sRGBCopy(of: tagged),
             let png = NSBitmapImageRep(cgImage: cgImage)
                 .representation(using: .png, properties: [:])
         else {
             throw ToolError(message: "PNG encoding failed")
         }
         what += " of \(document.displayName ?? "Untitled")"
-        let text =
+        var text =
             "\(what): full size \(fullWidth)×\(fullHeight) px, rendered at "
             + "\(image.width)×\(image.height) px"
+        if converted { text += ", sRGB (document profile: \(doc.profileName))" }
         return try callResult(
             content: [
                 ["type": "image", "data": png.base64EncodedString(), "mimeType": "image/png"],
@@ -447,23 +582,34 @@ final class AgentServer {
         else {
             throw ToolError(message: "Could not sample the composite")
         }
-        return try jsonResult([
+        // The numbers are the DOCUMENT's, in its own space. A hex string
+        // carries no space and every colour ARGUMENT in this surface is
+        // sRGB (`parseColor`), so `hex` is a reading, not something to pass
+        // back: `paint_hex` is the CLOSEST sRGB spelling (ColorProfile
+        // .paintBytes), identical to `hex` on an sRGB document. A pixel
+        // outside the sRGB gamut has no sRGB spelling at all, and that is
+        // reported rather than left silent: otherwise "sample this and
+        // paint it over there" quietly paints a different colour.
+        let paint = ColorProfile.paintBytes(rgba, in: doc.nsColorSpace)
+        var result: [String: Any] = [
             "x": x, "y": y,
             "r": Int(rgba.r), "g": Int(rgba.g), "b": Int(rgba.b), "a": Int(rgba.a),
             "hex": RasterImage.hexString(rgba),
-        ])
+            "paint_hex": RasterImage.hexString(
+                (r: paint.bytes[0], g: paint.bytes[1], b: paint.bytes[2], a: paint.bytes[3])),
+            "paint_hex_exact": paint.exact,
+            "space": doc.profileName,
+        ]
+        if !paint.exact {
+            result["note"] =
+                "This pixel is outside the sRGB gamut, so no sRGB hex names it: "
+                + "painting paint_hex back gives the closest sRGB colour, which is "
+                + "duller than what was sampled."
+        }
+        return try jsonResult(result)
     }
 
     // MARK: - Layer operations
-
-    private func layerIndex(_ a: [String: Any], _ document: ImageDocument) throws -> Int {
-        let index = intArg(a, "index") ?? document.activeLayerIndex
-        let count = document.doc?.layerCount ?? 0
-        guard index >= 0, index < count else {
-            throw ToolError(message: "Layer \(index) is out of range (0..\(count - 1))")
-        }
-        return index
-    }
 
     /// Runs `transform` and registers it through applyEdit inside an
     /// explicit undo group, then force-closes any implicit event group
@@ -490,9 +636,11 @@ final class AgentServer {
 
     /// performGroupedEdit for an edit that REWRITES A LAYER'S PIXELS — a brush or
     /// eraser stroke on the layer itself, a fill, a gradient, add_text, a
-    /// filter or an adjustment. Those pixels stop being the rendering of a
-    /// text layer's description, so the description is DROPPED inside the
-    /// same edit (one undo step, one handle), and the caller tells the model.
+    /// filter, an adjustment, or a transform that could not compose into the
+    /// layer's description. Those pixels stop being the rendering of a
+    /// described layer's description, so the description is DROPPED inside
+    /// the same edit (one undo step, one handle), and the caller tells the
+    /// model.
     ///
     /// The UI asks the user first (ImageDocument.applyRasterizingEdit), but
     /// the agent must never: a modal alert on this dispatched-to-main path
@@ -503,55 +651,100 @@ final class AgentServer {
     /// `pixelLayer` is the layer whose own pixels the edit rewrites, or nil
     /// when it writes somewhere else (a layer MASK), which leaves a
     /// description valid. Returns the kind of description that was dropped.
+    ///
+    /// `lockKind` is which lock that rewrite answers to, and it is a
+    /// parameter for exactly one reason: a TRANSFORM rewrites a layer's
+    /// pixels — so it drops a description and belongs here — but it is a
+    /// POSITION edit, never a Pixels one (`doc_lock.rs`: it resamples the
+    /// whole buffer including its alpha, so a frozen alpha channel has no
+    /// meaning). Defaulting it to `RZ_EDIT_PIXELS` keeps every other caller
+    /// exactly as it was; `transform_layer` and `distort_layer` pass
+    /// `RZ_EDIT_POSITION` so a PIXELS-locked layer is transformable over MCP
+    /// the way it is in the app.
     @discardableResult
-    private func performPixelEdit(
+    func performPixelEdit(
         _ document: ImageDocument, _ actionName: String, pixelLayer: Int?,
+        lockKind: RzEditKind = RZ_EDIT_PIXELS,
         _ transform: (RasterDocument) -> RasterDocument?
     ) throws -> DroppedDescription? {
+        // Locks, in the ONE place every pixel edit passes through:
+        // `pixelLayer` is non-nil exactly when the edit rewrites THAT
+        // layer's own pixels (its planes included) and nil when it writes a
+        // mask or a channel — which is precisely what the Pixels lock is
+        // about, and precisely what it must not block. Transparency never
+        // blocks a pixel edit: the core restores the layer's alpha
+        // afterwards instead (AgentServer+Groups.rejectLockedEdit).
+        if let layer = pixelLayer { try rejectLockedEdit(document, layer, lockKind) }
         let dropped = pixelLayer.flatMap { Self.description(of: document, layer: $0) }
-        try performGroupedEdit(document, actionName) { doc in
-            guard let updated = transform(doc) else { return nil }
-            guard dropped != nil, let layer = pixelLayer else { return updated }
-            return updated.withLayerMeta(layer, nil) ?? updated
+        do {
+            try performGroupedEdit(document, actionName) { doc in
+                guard let updated = transform(doc) else { return nil }
+                guard dropped != nil, let layer = pixelLayer else { return updated }
+                return updated.withLayerMeta(layer, nil) ?? updated
+            }
+        } catch let error as ToolError {
+            // The one refusal the generic message leaves unexplained: a
+            // frozen alpha channel makes some edits no-ops BY DESIGN
+            // (AgentServer+Groups.frozenAlphaRefusal).
+            throw frozenAlphaRefusal(document, pixelLayer, lockKind, actionName) ?? error
         }
         return dropped
     }
 
-    /// The kind of description layer `idx` carries, or nil for plain pixels
-    /// (the app-side mirror of ImageDocument.layerDescribesSource).
-    private static func description(
+    /// The kind of description layer `idx` carries — by the `type` its meta
+    /// claims, whatever the payload version, so an undecodable description
+    /// is dropped rather than left stale — or nil for plain pixels (the
+    /// app-side mirror of ImageDocument.layerDescribesSource).
+    static func description(
         of document: ImageDocument, layer idx: Int
     ) -> DroppedDescription? {
         guard let doc = document.doc else { return nil }
-        if doc.textPayload(idx) != nil { return .text }
-        if doc.livePhotoPayload(idx) != nil { return .livePhoto }
-        return nil
+        return LayerDescription.claimedKind(of: doc.layerMeta(idx)).map(DroppedDescription.init)
     }
 
     /// A pixel-edit result, with the rasterization report appended when the
-    /// edit dropped a layer's description.
-    private func pixelEditResult(
-        _ fields: [String: Any], layer: Int, rasterized: DroppedDescription?
+    /// edit dropped a layer's description; `reason` says WHY this edit had
+    /// to rasterize when that is not obvious (a transform on a text layer
+    /// whose family is not installed here).
+    ///
+    /// `alsoRasterized` names the OTHER entries of a set edit that lost a
+    /// description — a transformed group's children, a link partner
+    /// (AgentServer+Distort.appendSetRasterization).
+    func pixelEditResult(
+        _ fields: [String: Any], layer: Int, rasterized: DroppedDescription?,
+        reason: String? = nil, alsoRasterized: [(layer: Int, kind: DescribedKind)] = []
     ) throws -> String {
         var result = fields
+        var note: String?
         switch rasterized {
         case .text:
             result["rasterized_text"] = true
-            result["note"] =
+            note =
                 "This edit painted over layer \(layer)'s pixels, so the layer is no longer "
-                + "editable as text: the string, font, size, color and alignment it was "
-                + "rendered from were dropped and edit_text_layer no longer works on it. The "
-                + "pixels are intact; undo restores the text layer."
+                + "editable as text: the description it was rendered from (its text, "
+                + "typography and transform) was dropped and edit_text_layer no longer works "
+                + "on it. The pixels are intact; undo restores the text layer."
+        case .shape:
+            result["rasterized_shape"] = true
+            note =
+                "This edit painted over layer \(layer)'s pixels, so the layer is no longer "
+                + "editable as a shape: the description it was rendered from (its kind, box, "
+                + "styling and transform) was dropped. The pixels are intact; undo restores "
+                + "the shape layer."
         case .livePhoto:
             result["rasterized_live_photo"] = true
-            result["note"] =
+            note =
                 "This edit painted over layer \(layer)'s pixels, so the layer is no longer "
-                + "linked to its Live Photo: the clip, the moment it was showing and "
-                + "set_live_photo_frame are gone from it. The pixels are intact; undo "
-                + "restores the link."
+                + "linked to its Live Photo: the clip, the moment it was showing, its "
+                + "transform and set_live_photo_frame are gone from it. The pixels are "
+                + "intact; undo restores the link."
         case nil:
             break
         }
+        if let note = note {
+            result["note"] = reason.map { note + " " + $0 } ?? note
+        }
+        Self.appendSetRasterization(&result, alsoRasterized)
         return try jsonResult(result)
     }
 
@@ -561,16 +754,6 @@ final class AgentServer {
     ) throws -> String {
         let document = try target(a)
         try performGroupedEdit(document, actionName, transform)
-        return try jsonResult(["ok": true, "document": summary(document)])
-    }
-
-    private func layerEdit(
-        _ a: [String: Any], _ actionName: String,
-        _ transform: @escaping (RasterDocument, Int) -> RasterDocument?
-    ) throws -> String {
-        let document = try target(a)
-        let index = try layerIndex(a, document)
-        try performGroupedEdit(document, actionName) { transform($0, index) }
         return try jsonResult(["ok": true, "document": summary(document)])
     }
 
@@ -586,7 +769,12 @@ final class AgentServer {
         document.activeLayerIndex = index
         NotificationCenter.default.post(
             name: .imageDocumentImageDidChange, object: document, userInfo: ["isLive": false])
-        return try jsonResult(["ok": true, "active_layer": index])
+        // Read back rather than echoed: an entry inside a COLLAPSED group has
+        // no row of its own, and the panel re-points the selection at the row
+        // that stands for it (LayersPanelViewController.rebuildRows), so the
+        // group is what every command will act on. Reporting the index asked
+        // for would describe a state the document is not in.
+        return try jsonResult(["ok": true, "active_layer": document.activeLayerIndex])
     }
 
     private func newLayer(_ a: [String: Any]) throws -> String {
@@ -594,165 +782,12 @@ final class AgentServer {
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
         let index = document.activeLayerIndex
         let name = stringArg(a, "name") ?? "Layer \(doc.layerCount + 1)"
+        // Above a GROUP the new entry lands above the whole subtree.
+        let landing = doc.insertionIndex(above: index)
         try performGroupedEdit(document, "New Layer") { $0.addingLayer(above: index, name: name) }
-        document.activeLayerIndex = min(index + 1, (document.doc?.layerCount ?? 1) - 1)
+        document.activeLayerIndex = min(landing, (document.doc?.layerCount ?? 1) - 1)
         return try jsonResult(
             ["ok": true, "new_layer_index": document.activeLayerIndex, "name": name])
-    }
-
-    private func mergeDown(_ a: [String: Any]) throws -> String {
-        let document = try target(a)
-        let index = try layerIndex(a, document)
-        guard index >= 1 else {
-            throw ToolError(message: "The bottom layer has nothing below it to merge into")
-        }
-        try performGroupedEdit(document, "Merge Down") { $0.mergingDown(index) }
-        document.activeLayerIndex = index - 1
-        return try jsonResult(["ok": true, "document": summary(document)])
-    }
-
-    private func reorderLayer(_ a: [String: Any]) throws -> String {
-        let document = try target(a)
-        guard let from = intArg(a, "from"), let to = intArg(a, "to") else {
-            throw ToolError(message: "reorder_layer requires from and to")
-        }
-        try performGroupedEdit(document, "Reorder Layer") { $0.movingLayer(from: from, to: to) }
-        return try jsonResult(["ok": true, "document": summary(document)])
-    }
-
-    private func setLayerProperties(_ a: [String: Any]) throws -> String {
-        let document = try target(a)
-        let index = try layerIndex(a, document)
-        var blendMode: RzBlendMode?
-        if let name = stringArg(a, "blend_mode") {
-            blendMode = RzBlendMode.allBlendModes.first {
-                $0.1.caseInsensitiveCompare(name) == .orderedSame
-            }?.0
-            guard blendMode != nil else {
-                let names = RzBlendMode.allBlendModes.map { $0.1 }.joined(separator: ", ")
-                throw ToolError(message: "Unknown blend mode \"\(name)\". One of: \(names)")
-            }
-        }
-        let name = stringArg(a, "name")
-        let opacity = doubleArg(a, "opacity")
-        let visible = boolArg(a, "visible")
-        let offsetX = intArg(a, "offset_x")
-        let offsetY = intArg(a, "offset_y")
-        guard name != nil || opacity != nil || visible != nil || blendMode != nil
-            || offsetX != nil || offsetY != nil
-        else {
-            throw ToolError(message: "set_layer_properties: nothing to change")
-        }
-        try performGroupedEdit(document, "Layer Properties") { doc in
-            var updated: RasterDocument? = doc
-            if let name = name { updated = updated?.withLayerName(index, name) }
-            if let opacity = opacity {
-                updated = updated?.withLayerOpacity(index, min(max(opacity, 0), 1))
-            }
-            if let mode = blendMode { updated = updated?.withLayerBlendMode(index, mode) }
-            if let visible = visible { updated = updated?.withLayerVisible(index, visible) }
-            if offsetX != nil || offsetY != nil {
-                let info = doc.layerInfo(index)
-                updated = updated?.withLayerOffset(
-                    index, offsetX ?? info?.offsetX ?? 0, offsetY ?? info?.offsetY ?? 0)
-            }
-            return updated
-        }
-        return try jsonResult(["ok": true, "document": summary(document)])
-    }
-
-    // MARK: - Layer masks
-
-    /// The mask-owning layer a call targets, verified to actually have a
-    /// mask so the failure names the fix instead of a generic edit error.
-    private func maskedLayerIndex(
-        _ a: [String: Any], _ document: ImageDocument, _ what: String
-    ) throws -> Int {
-        let index = try paintLayerIndex(a, document)
-        guard document.doc?.layerHasMask(index) == true else {
-            throw ToolError(
-                message: "Layer \(index) has no mask to \(what). Add one with add_layer_mask.")
-        }
-        return index
-    }
-
-    private func addLayerMask(_ a: [String: Any]) throws -> String {
-        let document = try target(a)
-        let index = try paintLayerIndex(a, document)
-        let kindName = stringArg(a, "kind") ?? "reveal_all"
-        let kind: RzMaskKind
-        var selection: [UInt8]? = nil
-        switch kindName {
-        case "reveal_all": kind = RZ_MASK_REVEAL_ALL
-        case "hide_all": kind = RZ_MASK_HIDE_ALL
-        case "from_selection":
-            // The window's live selection — the same one the marquee shows;
-            // the core crops the canvas-sized coverage to the layer's rect.
-            guard let mask = selectionMask(document) else {
-                throw ToolError(
-                    message: "kind \"from_selection\" needs an active selection, and there is "
-                        + "none. Make one with a select_* tool first, or use kind "
-                        + "\"reveal_all\" / \"hide_all\".")
-            }
-            kind = RZ_MASK_FROM_SELECTION
-            selection = mask
-        case let other:
-            throw ToolError(
-                message: "kind must be reveal_all, hide_all, or from_selection (got \"\(other)\")")
-        }
-        try performGroupedEdit(document, "Add Layer Mask") {
-            $0.addingLayerMask(index, kind: kind, selection: selection)
-        }
-        return try jsonResult(["ok": true, "layer": index, "kind": kindName, "mask_enabled": true])
-    }
-
-    private func removeLayerMask(_ a: [String: Any]) throws -> String {
-        let document = try target(a)
-        let apply = boolArg(a, "apply") ?? false
-        let index = try maskedLayerIndex(a, document, apply ? "apply" : "remove")
-        try performGroupedEdit(document, apply ? "Apply Layer Mask" : "Delete Layer Mask") {
-            $0.removingLayerMask(index, apply: apply)
-        }
-        return try jsonResult(["ok": true, "layer": index, "applied": apply])
-    }
-
-    private func setLayerMaskEnabled(_ a: [String: Any]) throws -> String {
-        let document = try target(a)
-        guard let enabled = boolArg(a, "enabled") else {
-            throw ToolError(message: "set_layer_mask_enabled requires enabled (true or false)")
-        }
-        let index = try maskedLayerIndex(a, document, enabled ? "enable" : "disable")
-        try performGroupedEdit(document, enabled ? "Enable Layer Mask" : "Disable Layer Mask") {
-            $0.withLayerMaskEnabled(index, enabled)
-        }
-        return try jsonResult(["ok": true, "layer": index, "mask_enabled": enabled])
-    }
-
-    // MARK: - Clipping masks
-
-    /// set_layer_clipped: the agent mirror of Layer > Create/Release
-    /// Clipping Mask, named the same way so the undo menu reads identically.
-    /// The core accepts a clipped BOTTOM layer (it composites as unclipped —
-    /// there is nothing below to clip to), so that call succeeds with a
-    /// note instead of erroring: the flag is real and matters the moment a
-    /// layer is reordered beneath it.
-    private func setLayerClipped(_ a: [String: Any]) throws -> String {
-        let document = try target(a)
-        let index = try paintLayerIndex(a, document)
-        guard let clipped = boolArg(a, "clipped") else {
-            throw ToolError(message: "set_layer_clipped requires clipped (true or false)")
-        }
-        try performGroupedEdit(document, clipped ? "Create Clipping Mask" : "Release Clipping Mask") {
-            $0.withLayerClipped(index, clipped: clipped)
-        }
-        var result: [String: Any] = ["ok": true, "layer": index, "clipped": clipped]
-        if clipped, index == 0 {
-            result["note"] =
-                "Layer 0 is the bottom layer: with no unclipped layer beneath it to clip "
-                + "to, it composites as if unclipped. The flag is stored and takes effect "
-                + "if a layer is ever moved below it."
-        }
-        return try jsonResult(result)
     }
 
     // MARK: - Layer transform
@@ -761,7 +796,7 @@ final class AgentServer {
     /// Transform options bar offers ("bicubic" IS Catmull-Rom). image_size's
     /// spellings are accepted too, so one vocabulary covers both tools; the
     /// canonical name is what the result echoes back.
-    private static let transformSamplers: [String: (name: String, filter: RzResizeFilter)] = [
+    static let transformSamplers: [String: (name: String, filter: RzResizeFilter)] = [
         "nearest": ("nearest", RZ_FILTER_NEAREST),
         "bilinear": ("bilinear", RZ_FILTER_BILINEAR),
         "bicubic": ("bicubic", RZ_FILTER_CATMULL_ROM),
@@ -772,8 +807,9 @@ final class AgentServer {
 
     /// The core's ceiling on one layer's pixels (doc.rs MAX_PIXELS), mirrored
     /// so an oversized request is refused with a message that names the cap
-    /// instead of a bare NULL from the core.
-    private static let maxLayerPixels = 100_000_000.0
+    /// instead of a bare NULL from the core. The number itself lives with
+    /// the transform model, which shares it with the distort drag clamp.
+    static let maxLayerPixels = LayerTransform.maxTransformPixels
 
     /// A finite number argument; nil when the caller omitted it.
     private func finiteArg(_ a: [String: Any], _ key: String) throws -> Double? {
@@ -804,7 +840,7 @@ final class AgentServer {
     /// the 0.001 floor. Anything smaller than half a hundredth keeps two
     /// significant digits instead, so the echo stays tidy but never claims a
     /// value the call would have rejected.
-    private static func transformNumber(_ value: Double) -> Double {
+    static func transformNumber(_ value: Double) -> Double {
         guard value.isFinite, value != 0 else { return 0 }
         let rounded = (value * 100).rounded() / 100
         if rounded != 0 { return rounded }
@@ -819,7 +855,14 @@ final class AgentServer {
     /// session commits, so identical parameters give identical pixels.
     private func transformLayer(_ a: [String: Any]) throws -> String {
         let document = try target(a)
-        let index = try paintLayerIndex(a, document)
+        // A group transforms every descendant with the same matrix.
+        let index = try structuralLayerIndex(a, document)
+        // A transform is a POSITION edit, never a pixel one (doc_lock.rs):
+        // a transparency-locked layer still transforms. The SET version,
+        // because the op below is transform_layerS: a locked DESCENDANT or a
+        // locked LINK PARTNER refuses the call too, and must be the entry the
+        // refusal names.
+        try rejectLockedMove(document, [index])
         guard let doc = document.doc, let info = doc.layerInfo(index) else {
             throw ToolError(message: "Layer \(index) could not be read")
         }
@@ -840,10 +883,13 @@ final class AgentServer {
         }
 
         // The pivot: a named corner of the layer's CURRENT bounds, overridden
-        // per axis by an explicit canvas coordinate.
+        // per axis by an explicit canvas coordinate. A described layer's
+        // centre is its description's exact centre — the UI session's too
+        // (EditorViewController+DescribedTransform.swift) — so a rotate and
+        // a rotate-back share the pivot and return the anchor exactly.
         let anchor: CGPoint
         switch stringArg(a, "around") ?? "center" {
-        case "center": anchor = CGPoint(x: rect.midX, y: rect.midY)
+        case "center": anchor = doc.describedPivot(index) ?? CGPoint(x: rect.midX, y: rect.midY)
         case "top_left": anchor = CGPoint(x: rect.minX, y: rect.minY)
         case let other:
             throw ToolError(
@@ -916,16 +962,58 @@ final class AgentServer {
                     + "away from 0.")
         }
 
-        // performPixelEdit is the pixel-rewrite chokepoint: a transform
-        // resamples the pixels a described layer was rendered from, so the
-        // description is dropped in the SAME edit (one undo step) and
-        // reported back — the agent must never raise the UI's modal prompt.
+        let applied: [String: Any] = [
+            "rotate": Self.transformNumber(transform.degrees),
+            "scale_x": Self.transformNumber(Double(transform.scaleX)),
+            "scale_y": Self.transformNumber(Double(transform.scaleY)),
+            "translate_x": Self.transformNumber(translateX ?? 0),
+            "translate_y": Self.transformNumber(translateY ?? 0),
+            "pivot_x": Self.transformNumber(Double(pivot.x)),
+            "pivot_y": Self.transformNumber(Double(pivot.y)),
+            "sampler": sampler.name,
+        ]
+        // A described layer composes the matrix into its description and
+        // re-renders (AgentServer+Distort.swift); nil means it did not (no
+        // description, its source cannot render, or the composition was
+        // refused) and the rasterizing path below applies and reports as
+        // before.
+        // …and only for a LONE entry. A matrix composes into ONE description,
+        // so a layer that transforms as a SET — a group, or a layer with
+        // LINKED partners — has to resample instead, exactly as the UI's ⌘T
+        // does over a multi-entry session (MultiLayerEdit.swift). Without
+        // this, a linked text layer would compose its own transform and its
+        // partners would stay behind.
+        if doc.movingSet([index]).count == 1,
+           let composed = try transformDescribedLayer(
+               document, layer: index, matrix: matrix, sampler: sampler, applied: applied) {
+            return composed
+        }
+        // performPixelEdit is the pixel-rewrite chokepoint: a transform that
+        // did not compose resamples the pixels a described layer was
+        // rendered from, so the description is dropped in the SAME edit (one
+        // undo step) and reported back — the agent must never raise the UI's
+        // modal prompt.
+        // Every OTHER entry the set transform resamples — a group's
+        // descendants, a link partner — loses its description in the SAME
+        // edit, exactly as the UI's MultiLayerEdit.transformedSet does: the
+        // core preserves `meta` while it replaces the pixels, so without this
+        // a text layer inside a transformed group would keep a description
+        // that no longer matches its own picture.
+        let partners = doc.movingSet([index]).filter { $0 != index }
+        let alsoRasterized = doc.describedEntries(in: partners)
         let rasterized: DroppedDescription?
         do {
             rasterized = try performPixelEdit(
-                document, "Transform Layer", pixelLayer: index
+                document, "Transform Layer", pixelLayer: index,
+                lockKind: RZ_EDIT_POSITION
             ) { doc in
-                doc.transformingLayer(index, matrix, sampler: sampler.filter)
+                // transform_layerS, not transform_layer: it is the group- and
+                // link-aware op — a group transforms every descendant with
+                // the same matrix, and a linked entry's partners follow, both
+                // of which the single-layer kernel cannot do (it answers NULL
+                // for a group outright).
+                doc.transformLayers([index], matrix, sampler: sampler.filter)?
+                    .droppingDescriptions(in: alsoRasterized.map { $0.layer })
             }
         } catch is ToolError {
             // performGroupedEdit's message is generic; everything the core can
@@ -948,35 +1036,52 @@ final class AgentServer {
                     "x": after?.offsetX ?? 0, "y": after?.offsetY ?? 0,
                     "width": after?.width ?? 0, "height": after?.height ?? 0,
                 ],
-                "applied": [
-                    "rotate": Self.transformNumber(transform.degrees),
-                    "scale_x": Self.transformNumber(Double(transform.scaleX)),
-                    "scale_y": Self.transformNumber(Double(transform.scaleY)),
-                    "translate_x": Self.transformNumber(translateX ?? 0),
-                    "translate_y": Self.transformNumber(translateY ?? 0),
-                    "pivot_x": Self.transformNumber(Double(pivot.x)),
-                    "pivot_y": Self.transformNumber(Double(pivot.y)),
-                    "sampler": sampler.name,
-                ],
-            ], layer: index, rasterized: rasterized)
+                "applied": applied,
+            ], layer: index, rasterized: rasterized,
+            reason: Self.unrenderableReason(document, layer: index, before: doc),
+            alsoRasterized: alsoRasterized)
     }
 
     // MARK: - Filters and geometry
 
     private func applyFilter(_ a: [String: Any]) throws -> String {
         let document = try target(a)
-        let index = intArg(a, "layer") ?? document.activeLayerIndex
-        let count = document.doc?.layerCount ?? 0
-        guard index >= 0, index < count else {
-            throw ToolError(message: "Layer \(index) is out of range (0..\(count - 1))")
+        // Structural, then the group guard once the target is known below —
+        // the same shape the strokes use, and the reason apply_filter no
+        // longer answers a group index with the generic "check the
+        // parameters" (the core's layerImage is NULL for a group, so the
+        // whole transform returned nil).
+        let index = try structuralLayerIndex(a, document)
+        let filter = try requiredString(a, "filter")
+        // Validate an adjustment op's params ONCE, here, where we can still
+        // throw: `filtered` is non-throwing and is also called from the
+        // plane path's non-throwing closure, so a `try?` down there would
+        // swallow the message and report a generic failure instead of
+        // naming the key. nil for every legacy filter, whose flat arguments
+        // are untouched — and which refuse a stray `params` in there rather
+        // than dropping it (AgentServer+Adjustments.swift).
+        let adjustParams = try adjustmentFilterParams(a, filter: filter)
+        // A colour plane or an alpha channel runs the SAME op on that plane
+        // alone (AgentServer+ChannelTargets.swift); it must not go through
+        // ImageDocument.applyToActiveLayer, which can raise a modal alert on
+        // this dispatched-to-main path.
+        let planeTarget = try paintTarget(a, document, allowMask: false)
+        // A group has no pixels of its own, and no colour plane of its own
+        // either; a document CHANNEL is not the layer's at all and is fine.
+        if planeTarget == .layer || planeTarget.isPlane {
+            try rejectGroupPixelEdit(document, index)
+        }
+        if planeTarget != .layer {
+            return try applyPlaneFilter(
+                document, target: planeTarget, layer: index, filter: filter
+            ) { self.filtered($0, filter, a, adjustParams) }
         }
         try rejectAdjustmentPixelEdit(document, index)
-        let filter = try requiredString(a, "filter")
         let rasterized = try performPixelEdit(
             document, "Apply \(filter)", pixelLayer: index
         ) { doc in
             guard let layer = doc.layerImage(index),
-                let filtered = self.filtered(layer, filter, a)
+                let filtered = self.filtered(layer, filter, a, adjustParams)
             else { return nil }
             return doc.withLayerPixels(index, filtered)
         }
@@ -986,9 +1091,17 @@ final class AgentServer {
     }
 
     private func filtered(
-        _ image: RasterImage, _ filter: String, _ a: [String: Any]
+        _ image: RasterImage, _ filter: String, _ a: [String: Any],
+        _ adjustParams: [String: Any]?
     ) -> RasterImage? {
         switch filter {
+        case "exposure", "vibrance", "hue_saturation", "color_balance",
+            "black_and_white", "photo_filter", "channel_mixer", "selective_color",
+            "shadows_highlights", "white_balance", "gradient_map", "color_lookup":
+            // The destructive twin of the adjustment layer of the same
+            // name: the SAME core op (rz_image_adjust_op), parameters
+            // already validated in applyFilter above.
+            return adjustmentFilter(image, filter, adjustParams ?? [:])
         case "grayscale": return image.grayscaled()
         case "invert": return image.inverted()
         case "sepia": return image.sepia()
@@ -1025,15 +1138,17 @@ final class AgentServer {
     /// would silently change nothing. The agent mirror of the UI's
     /// refuseAdjustmentPixelEdit alert, word for word. Mask, move, transform,
     /// property and stacking tools deliberately do NOT come through here.
-    private func rejectAdjustmentPixelEdit(_ document: ImageDocument, _ index: Int) throws {
+    /// Internal, not private: the +Feature pixel-edit handlers refuse
+    /// through it too.
+    func rejectAdjustmentPixelEdit(_ document: ImageDocument, _ index: Int) throws {
         guard document.doc?.layerIsAdjustment(index) == true else { return }
         throw ToolError(
             message: "Adjustment layers have no pixels to edit. Paint on the layer's mask "
                 + "instead, or target another layer.")
     }
 
-    /// The `op` argument of the adjustment tools, as one of the nine ops the
-    /// core's schema (core/src/adjust.rs) interprets.
+    /// The `op` argument of the adjustment tools, as one of the twenty-one
+    /// ops the core's schema (core/src/adjust.rs) interprets.
     private func adjustmentOp(_ name: String) throws -> AdjustmentLayerOp {
         guard let op = AdjustmentLayerOp(rawValue: name) else {
             let names = AdjustmentLayerOp.allCases.map { $0.rawValue }.joined(separator: ", ")
@@ -1072,6 +1187,10 @@ final class AgentServer {
         case .threshold: allowed = ["level"]
         case .posterize: allowed = ["levels"]
         case .invert, .grayscale, .sepia: allowed = []
+        case .exposure, .vibrance, .hueSaturation, .colorBalance, .blackAndWhite,
+            .photoFilter, .channelMixer, .selectiveColor, .shadowsHighlights,
+            .whiteBalance, .gradientMap, .colorLookup:
+            allowed = AdjustmentSchema.inputKeys(for: op)
         }
         let unknown = params.keys.filter { !allowed.contains($0) }.sorted()
         if let first = unknown.first {
@@ -1166,6 +1285,13 @@ final class AgentServer {
             }
         case .invert, .grayscale, .sepia:
             break // no params; the unknown-key check above already refused any
+        case .exposure, .vibrance, .hueSaturation, .colorBalance, .blackAndWhite,
+            .photoFilter, .channelMixer, .selectiveColor, .shadowsHighlights,
+            .whiteBalance, .gradientMap, .colorLookup:
+            // The phase-5 ops share ONE table-driven validator
+            // (AdjustmentSchema), which returns rather than falls through:
+            // color_lookup's `file` expansion REPLACES the params object.
+            return try AdjustmentSchema.validate(params, for: op)
         }
         return params
     }
@@ -1189,10 +1315,11 @@ final class AgentServer {
         let name = stringArg(a, "name") ?? op.displayName
         let below = document.activeLayerIndex
         let selection = selectionMask(document)
+        let landing = document.doc?.insertionIndex(above: below) ?? below + 1
         try performGroupedEdit(document, "New \(op.displayName) Layer") {
             $0.addingAdjustmentLayer(above: below, name: name, meta: meta, selection: selection)
         }
-        let index = min(below + 1, (document.doc?.layerCount ?? 1) - 1)
+        let index = min(landing, (document.doc?.layerCount ?? 1) - 1)
         document.activeLayerIndex = index
         // The edit's own notification went out before the active layer
         // moved; this one lands the UI's paint target on the new mask.
@@ -1244,60 +1371,78 @@ final class AgentServer {
             }
             op = known
         }
-        let params = try adjustmentParams(a, for: op)
+        // The one merge this tool does, and only for color_lookup, whose
+        // table get_document has to elide (AgentServer+Adjustments.swift).
+        let params = try adjustmentParams(
+            mergingStoredLut(a, op: op, current: doc.adjustmentPayload(index)), for: op)
         guard let meta = AdjustmentLayerPayload(op: op, params: params).json() else {
             throw ToolError(message: "Could not encode the adjustment parameters")
         }
         try performGroupedEdit(document, "Edit \(op.displayName) Layer") {
             $0.withLayerMeta(index, meta)
         }
+        // Through the SAME elision get_document uses: a Color Lookup layer's
+        // base64 table is up to ~575 KB, and echoing it back would put in the
+        // reply exactly what `elidedAdjustmentParams` exists to keep out.
         return try jsonResult([
-            "ok": true, "layer": index, "op": op.rawValue, "params": params,
+            "ok": true, "layer": index, "op": op.rawValue,
+            "params": elidedAdjustmentParams(AdjustmentLayerPayload(op: op, params: params)),
         ])
     }
 
     // MARK: - Painting (brush, eraser, text)
 
-    /// The layer a painting call targets ("layer" arg, default active) —
-    /// same convention as apply_filter.
-    private func paintLayerIndex(_ a: [String: Any], _ document: ImageDocument) throws -> Int {
-        let index = intArg(a, "layer") ?? document.activeLayerIndex
-        let count = document.doc?.layerCount ?? 0
-        guard index >= 0, index < count else {
-            throw ToolError(message: "Layer \(index) is out of range (0..\(count - 1))")
-        }
+    /// The layer a PIXEL call targets ("layer" arg, default active) — same
+    /// convention as apply_filter.
+    ///
+    /// It refuses a GROUP, because a group has no pixels of its own: putting
+    /// the guard in the default helper is fail-safe (a new pixel tool
+    /// inherits it) and the handful of tools that legitimately accept a
+    /// group take `structuralLayerIndex` instead. The tools whose TARGET
+    /// decides — the strokes and apply_filter, where a mask or a channel is a
+    /// legitimate target on a group — take `structuralLayerIndex` and call
+    /// `rejectGroupPixelEdit` themselves once the target is known.
+    func paintLayerIndex(_ a: [String: Any], _ document: ImageDocument) throws -> Int {
+        let index = try structuralLayerIndex(a, document)
+        try rejectGroupPixelEdit(document, index)
         return index
     }
+
 
     /// Builds a canvas-sized premultiplied RGBA8 overlay (row 0 = top,
     /// drawing coordinates top-left-origin — the same format the canvas
     /// view's stroke pipeline uses), lets `draw` fill it, and composites
-    /// it onto `layer` through the regular performGroupedEdit path. With
-    /// `toMask` the very same overlay is painted into the layer's MASK
-    /// instead (white reveals, black hides, the overlay's own alpha is
-    /// the blend — `mode` and `alpha` do not apply there).
+    /// it onto `layer` through the regular performGroupedEdit path. With a
+    /// COVERAGE `target` — the layer's mask, one of its colour planes or a
+    /// document channel — the very same overlay is painted there instead
+    /// (white reveals, black hides, the overlay's own alpha is the blend —
+    /// `mode` and `alpha` do not apply).
     ///
     /// Returns the kind of description painting the layer's pixels dropped
-    /// (see performPixelEdit); a MASK stroke never drops one.
+    /// (see performPixelEdit); a MASK or CHANNEL stroke never drops one.
     @discardableResult
     private func paintOverlay(
         _ document: ImageDocument, layer: Int, actionName: String,
-        mode: RzCompositeMode, alpha: Double, toMask: Bool = false,
+        mode: RzCompositeMode, alpha: Double, target: PaintTarget = .layer,
+        blend: RzBlendMode? = nil, onOpRefusal: (() -> Void)? = nil,
         draw: (CGContext) -> Void
     ) throws -> DroppedDescription? {
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
+        // A MASK stroke rewrites no layer pixel, so `pixelLayer` below is nil
+        // and performPixelEdit's lock check never sees it — but Lock All
+        // freezes the mask too (doc_lock.rs), and the refusal must say so.
+        if target == .mask { try rejectLockedEdit(document, layer, RZ_EDIT_MASK) }
         let width = doc.width
         let height = doc.height
         var data = [UInt8](repeating: 0, count: width * height * 4)
         return try performPixelEdit(
-            document, actionName, pixelLayer: toMask ? nil : layer
+            document, actionName, pixelLayer: pixelLayer(for: target, layer: layer)
         ) { current in
             data.withUnsafeMutableBufferPointer { buffer -> RasterDocument? in
                 guard let base = buffer.baseAddress,
-                    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
                     let context = CGContext(
                         data: base, width: width, height: height, bitsPerComponent: 8,
-                        bytesPerRow: width * 4, space: colorSpace,
+                        bytesPerRow: width * 4, space: doc.drawingSpace,
                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
                 else { return nil }
                 context.translateBy(x: 0, y: CGFloat(height))
@@ -1308,9 +1453,22 @@ final class AgentServer {
                     selection.clip(context)
                 }
                 draw(context)
-                if toMask {
-                    return current.paintingLayerMask(
-                        layer, overlay: base, w: width, h: height)
+                if target.isCoverage {
+                    return commitCoverage(
+                        current, target: target, layer: layer, overlay: base, width: width,
+                        height: height, onRefusal: onOpRefusal)
+                }
+                if let blend = blend, blend != RZ_BLEND_NORMAL {
+                    // The Blend option: composite through the layer
+                    // blend-mode set instead of plain source-over. Unlike
+                    // the classic op, this one also refuses when the blend
+                    // changes no pixel (Multiply by white) — the latch
+                    // lets the caller report that as a no-op, not an error.
+                    let out = current.paintingLayerBlend(
+                        layer, overlay: base, w: width, h: height,
+                        mode: blend, alpha: alpha)
+                    if out == nil { onOpRefusal?() }
+                    return out
                 }
                 return current.paintingLayer(
                     layer, overlay: base, w: width, h: height, mode: mode, alpha: alpha)
@@ -1318,7 +1476,9 @@ final class AgentServer {
         }
     }
 
-    private func parsePoints(_ a: [String: Any]) throws -> [CGPoint] {
+    // Internal, not private: the +Feature stroke handlers parse the same
+    // points argument.
+    func parsePoints(_ a: [String: Any]) throws -> [CGPoint] {
         guard let raw = a["points"] as? [Any], !raw.isEmpty else {
             throw ToolError(message: "points must be a non-empty array of [x, y] pairs")
         }
@@ -1330,20 +1490,33 @@ final class AgentServer {
                 let x = (pair[0] as? NSNumber)?.doubleValue,
                 let y = (pair[1] as? NSNumber)?.doubleValue
             {
-                return CGPoint(x: x, y: y)
+                return try strokePoint(x, y)
             }
             if let object = entry as? [String: Any],
                 let x = (object["x"] as? NSNumber)?.doubleValue,
                 let y = (object["y"] as? NSNumber)?.doubleValue
             {
-                return CGPoint(x: x, y: y)
+                return try strokePoint(x, y)
             }
             throw ToolError(message: "Each point must be [x, y] or {\"x\": …, \"y\": …}")
         }
     }
 
+    /// One stroke point, validated: finite and within ±100,000 canvas px —
+    /// far past any real canvas, but a hard wall against coordinates that
+    /// would make the soft-dab walk (one stamp per few px of arc length)
+    /// loop effectively forever.
+    private func strokePoint(_ x: Double, _ y: Double) throws -> CGPoint {
+        guard x.isFinite, y.isFinite, abs(x) <= 100_000, abs(y) <= 100_000 else {
+            throw ToolError(
+                message: "Stroke points must be finite canvas coordinates within "
+                    + "±100,000 px — got (\(x), \(y)). Keep strokes near the canvas.")
+        }
+        return CGPoint(x: x, y: y)
+    }
+
     /// Hex color: #RGB, #RRGGBB, or #RRGGBBAA ('#' optional).
-    private func parseColor(_ a: [String: Any], _ key: String, fallback: NSColor) throws
+    func parseColor(_ a: [String: Any], _ key: String, fallback: NSColor) throws
         -> NSColor
     {
         guard var hex = stringArg(a, key)?.trimmingCharacters(in: .whitespaces) else {
@@ -1366,91 +1539,93 @@ final class AgentServer {
             alpha: alpha)
     }
 
-    /// The brush/eraser "target" argument: the layer's pixels (default) or
-    /// the layer's mask.
-    private func paintTargetsMask(_ a: [String: Any]) throws -> Bool {
-        switch stringArg(a, "target") ?? "layer" {
-        case "layer": return false
-        case "mask": return true
-        case let other:
-            throw ToolError(message: "target must be \"layer\" or \"mask\" (got \"\(other)\")")
-        }
-    }
-
     private func paintStroke(_ a: [String: Any], erase: Bool) throws -> String {
         let document = try target(a)
-        let requestedMask = try paintTargetsMask(a)
-        let index = try paintLayerIndex(a, document)
-        // Strokes on an ADJUSTMENT layer always paint its MASK, whatever
-        // target asked for — the compositor ignores such a layer's pixels,
-        // and the UI's paint target enforces the same routing. Not an
-        // error; the result reports target "mask".
-        let isAdjustment = document.doc?.layerIsAdjustment(index) == true
-        if isAdjustment, document.doc?.layerHasMask(index) != true {
-            throw ToolError(
-                message: "Layer \(index) is an adjustment layer, so strokes paint its MASK "
-                    + "— but its mask was deleted. Add one with add_layer_mask.")
-        }
-        let toMask = requestedMask || isAdjustment
-        let layer =
-            toMask
-            ? try maskedLayerIndex(a, document, erase ? "erase" : "paint")
-            : index
+        // Structural, not the pixel helper: whether a GROUP is a legal target
+        // depends on the `target` argument, which is parsed below — a group's
+        // canvas-sized mask and the document's channels are both paintable on
+        // one (rejectGroupPixelEdit).
+        let index = try structuralLayerIndex(a, document)
         let points = try parsePoints(a)
         let size = CGFloat(min(max(doubleArg(a, "size") ?? 16, 1), 512))
         let opacity = min(max(doubleArg(a, "opacity") ?? 1, 0), 1)
-        // In ERASE mode only the overlay's alpha matters. A MASK is coverage
-        // rather than color — white reveals, black hides, whatever color was
-        // asked for — and it carries the opacity in the stroke's own alpha,
-        // since the mask-painting call takes no separate alpha.
-        let color: NSColor
-        if toMask {
-            let level: CGFloat = erase ? 0 : 1
-            color = NSColor(
-                srgbRed: level, green: level, blue: level, alpha: CGFloat(opacity))
-        } else if erase {
-            color = .black
-        } else {
-            color = try parseColor(a, "color", fallback: .black)
+        let tip = try strokeTip(a)
+        let blend = try blendModeArg(a)
+        if blend != nil, erase {
+            throw ToolError(
+                message: "eraser_stroke has no blend_mode — erasing removes alpha; blend "
+                    + "modes apply to brush_stroke and clone_stamp.")
         }
-        let actionName: String
-        if toMask {
-            actionName = erase ? "Erase Mask" : "Paint Mask"
-        } else {
-            actionName = erase ? "Eraser Stroke" : "Brush Stroke"
-        }
-        let rasterized = try paintOverlay(
-            document, layer: layer, actionName: actionName,
-            mode: erase ? RZ_COMPOSITE_ERASE : RZ_COMPOSITE_OVER, alpha: opacity,
-            toMask: toMask
-        ) { context in
-            context.setFillColor(color.cgColor)
-            context.setStrokeColor(color.cgColor)
-            if points.count == 1 {
-                let p = points[0]
-                context.fillEllipse(
-                    in: CGRect(
-                        x: p.x - size / 2, y: p.y - size / 2, width: size, height: size))
-                return
+        // The whole routing decision — the widened target vocabulary, the
+        // adjustment-layer forcing, the coverage colour, the blend_mode
+        // refusals and the undo name (AgentServer+ChannelTargets.swift).
+        let (target, layer, actionName, color, targetNote) = try resolvePaintTarget(
+            a, document, requestedLayer: index, erase: erase, blend: blend)
+        // The group guard, now that the target is known: only the two targets
+        // that write the LAYER's own pixels refuse one.
+        if target == .layer || target.isPlane { try rejectGroupPixelEdit(document, layer) }
+        // Latched when the PAINT OP answers nil for "nothing would change":
+        // a blend mode's identity blend, or a coverage stroke on a plane or
+        // a channel that painted what was already there. A no-op to report,
+        // never a parameter error.
+        var opRefused = false
+        let rasterized: DroppedDescription?
+        do {
+            rasterized = try paintOverlay(
+                document, layer: layer, actionName: actionName,
+                mode: erase ? RZ_COMPOSITE_ERASE : RZ_COMPOSITE_OVER, alpha: opacity,
+                target: target, blend: blend, onOpRefusal: { opRefused = true }
+            ) { context in
+                context.setFillColor(color.cgColor)
+                context.setStrokeColor(color.cgColor)
+                // Any non-default tip stamps SoftBrush falloff dabs — the
+                // interactive stamped pipeline — instead of a hard path. Dabs
+                // deposit at the tip's FLOW, inside ONE transparency layer
+                // capped at the color's own alpha (a mask stroke's opacity
+                // rides there): per-dab opacity would compound where dabs
+                // overlap, pushing a 50% stroke's core toward 100%, where the
+                // hard path paints the whole polyline at one uniform alpha.
+                if SoftBrush.isStamped(tip: tip, size: size),
+                   let dab = SoftBrush.dab(
+                       color: color.withAlphaComponent(tip.flow), diameter: size,
+                       hardness: tip.hardness, space: document.drawingSpace) {
+                    let alpha = (color.usingColorSpace(.sRGB) ?? color).alphaComponent
+                    context.saveGState()
+                    context.setAlpha(alpha)
+                    context.beginTransparencyLayer(auxiliaryInfo: nil)
+                    let spacing = SoftBrush.spacing(for: size, percent: tip.spacingPercent)
+                    for center in SoftBrush.stampCenters(along: points, spacing: spacing) {
+                        SoftBrush.stamp(dab, in: context, at: center, diameter: size, tip: tip)
+                    }
+                    context.endTransparencyLayer()
+                    context.restoreGState()
+                    return
+                }
+                if points.count == 1 {
+                    let p = points[0]
+                    context.fillEllipse(
+                        in: CGRect(
+                            x: p.x - size / 2, y: p.y - size / 2, width: size, height: size))
+                    return
+                }
+                context.setLineWidth(size)
+                context.setLineCap(.round)
+                context.setLineJoin(.round)
+                context.move(to: points[0])
+                for point in points.dropFirst() {
+                    context.addLine(to: point)
+                }
+                context.strokePath()
             }
-            context.setLineWidth(size)
-            context.setLineCap(.round)
-            context.setLineJoin(.round)
-            context.move(to: points[0])
-            for point in points.dropFirst() {
-                context.addLine(to: point)
-            }
-            context.strokePath()
+        } catch let error as ToolError {
+            guard opRefused else { throw error }
+            return try noOpStrokeResult(document, target: target, layer: layer, blend: blend)
         }
         var fields: [String: Any] = [
             "ok": true, "action": actionName, "layer": layer, "points": points.count,
-            "target": toMask ? "mask" : "layer",
+            "target": target.agentName(in: document.doc),
         ]
-        if isAdjustment, !requestedMask {
-            fields["note"] =
-                "Layer \(layer) is an adjustment layer (no pixels to paint), so the stroke "
-                + "was routed to its mask."
-        }
+        if let targetNote = targetNote { fields["note"] = targetNote }
         return try pixelEditResult(fields, layer: layer, rasterized: rasterized)
     }
 
@@ -1500,212 +1675,20 @@ final class AgentServer {
             ], layer: layer, rasterized: rasterized)
     }
 
-    // MARK: - Text layers
-
-    /// The family a text layer defaults to: the one the text tool's options
-    /// bar starts on, so an agent-made layer looks like a hand-made one.
-    /// Falls back to the system font's family when it is not installed.
-    private static let defaultTextFamily: String = {
-        let preferred = "Helvetica Neue"
-        if NSFontManager.shared.availableFontFamilies.contains(preferred) { return preferred }
-        return NSFont.systemFont(ofSize: 12).familyName ?? preferred
-    }()
-
-    /// The `font` argument of the text-layer tools: an installed font
-    /// FAMILY, since the description stores a family and rebuilds the face
-    /// from it. nil when the caller named none, so the caller can keep what
-    /// the layer already says.
-    private func textFamily(_ a: [String: Any], size: Double) throws -> String? {
-        guard let name = stringArg(a, "font") else { return nil }
-        guard
-            NSFontManager.shared.font(
-                withFamily: name, traits: [], weight: 5, size: CGFloat(size)) != nil
-        else {
-            throw ToolError(
-                message: "No font family named \"\(name)\" is installed. A text layer stores a "
-                    + "font FAMILY (\"Helvetica Neue\", \"Times New Roman\", …), not a "
-                    + "PostScript face name; omit font to keep the current one.")
-        }
-        return name
-    }
-
-    /// The `alignment` argument of the text-layer tools ("left" | "center" |
-    /// "right"). nil when the caller named none, so the caller can keep what
-    /// the layer already says.
-    private func textAlignment(_ a: [String: Any]) throws -> String? {
-        guard let name = stringArg(a, "alignment") else { return nil }
-        guard TextLayerPayload.alignments.contains(name) else {
-            throw ToolError(
-                message: "alignment must be left, center, or right (got \"\(name)\")")
-        }
-        return name
-    }
-
-    /// The width the text lays out (and wraps) in: `wrap_width`, or from the
-    /// text's left edge to the canvas's right edge — the same default
-    /// add_text uses. The description has no wrap field, so an edit that
-    /// omits it re-wraps at this default rather than at whatever width the
-    /// layer was first laid out in.
-    private func textWrapWidth(
-        _ a: [String: Any], from x: Double, canvasWidth: Int
-    ) throws -> CGFloat {
-        guard let given = doubleArg(a, "wrap_width") else {
-            return CGFloat(max(Double(canvasWidth) - x, 10))
-        }
-        guard given.isFinite, given >= 1 else {
-            throw ToolError(message: "wrap_width must be at least 1 px")
-        }
-        return CGFloat(min(given, 1e6))
-    }
-
-    /// What a text-layer tool reports back: where the layer landed (the ink
-    /// box plus a few px of slack for antialiasing and glyph overhang, so
-    /// these are the layer's real bounds as get_document reports them) and
-    /// the parameters it is now rendered from.
-    private func textLayerResult(
-        layer: Int, name: String, payload: TextLayerPayload, raster: TextLayerRaster,
-        wrapWidth: CGFloat
-    ) throws -> String {
-        try jsonResult([
-            "ok": true,
-            "layer": layer,
-            "name": name,
-            "bounds": [
-                "x": raster.offsetX, "y": raster.offsetY,
-                "width": raster.width, "height": raster.height,
-            ],
-            "text": [
-                "string": payload.string, "font": payload.font,
-                "size": payload.size, "color": payload.color,
-                "alignment": payload.alignment,
-            ],
-            "wrap_width": Int(wrapWidth.rounded()),
-            "note": "Re-editable: change it with edit_text_layer. Painting on this layer "
-                + "(brush, eraser, fill, gradient, add_text, apply_filter) drops the text "
-                + "and leaves plain pixels.",
-        ])
-    }
-
-    /// Creates a RE-EDITABLE text layer above the active one: the string,
-    /// font, size, color and alignment become the layer's description and
-    /// the pixels are only their rendering. Mirrors the text tool's own commit
-    /// (EditorViewController.commitTextLayer) so both paths produce
-    /// identical layers.
-    private func addTextLayer(_ a: [String: Any]) throws -> String {
-        let document = try target(a)
-        guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
-        let text = try requiredString(a, "text")
-        guard let x = doubleArg(a, "x"), let y = doubleArg(a, "y") else {
-            throw ToolError(
-                message: "add_text_layer requires x and y (the top-left of the text block)")
-        }
-        let size = min(max(doubleArg(a, "size") ?? 48, 4), 1000)
-        let family = try textFamily(a, size: size) ?? Self.defaultTextFamily
-        let color = try parseColor(a, "color", fallback: .black)
-        let alignment = try textAlignment(a) ?? "left"
-        let payload = TextLayerPayload(
-            string: text, family: family, size: size, color: color, alignment: alignment)
-        let wrapWidth = try textWrapWidth(a, from: x, canvasWidth: doc.width)
-        guard
-            let raster = TextLayer.render(
-                payload, origin: CGPoint(x: x, y: y), wrapWidth: wrapWidth)
-        else {
-            throw ToolError(
-                message: "Could not lay the text out — check that text is not empty and that "
-                    + "x, y, size and wrap_width are sane numbers.")
-        }
-        let below = document.activeLayerIndex
-        let name = TextLayer.layerName(for: text)
-        // The core has no "layer from a buffer" constructor: add an empty
-        // layer, then give it the pixels, the offset and the description.
-        // Every op is pure, so only the final handle is committed — one
-        // undo step.
-        try performGroupedEdit(document, "Add Text Layer") { doc in
-            let idx = below + 1
-            guard let added = doc.addingLayer(above: below, name: name),
-                let filled = added.withLayerPixels(
-                    idx, rgba: raster.pixels, width: raster.width, height: raster.height),
-                let moved = filled.withLayerOffset(idx, raster.offsetX, raster.offsetY)
-            else { return nil }
-            return moved.withTextPayload(idx, payload)
-        }
-        let index = min(below + 1, (document.doc?.layerCount ?? 1) - 1)
-        document.activeLayerIndex = index
-        // The edit's own notification went out before the active layer
-        // moved, so the panel and status bar need this one to catch up.
-        NotificationCenter.default.post(
-            name: .imageDocumentImageDidChange, object: document, userInfo: ["isLive": false])
-        return try textLayerResult(
-            layer: index, name: name, payload: payload, raster: raster, wrapWidth: wrapWidth)
-    }
-
-    /// Re-renders an existing text layer from a changed description: any
-    /// field the call omits keeps the value the layer already carries.
-    /// Pixels, offset and description are replaced in one undo step.
-    private func editTextLayer(_ a: [String: Any]) throws -> String {
-        let document = try target(a)
-        let index = try paintLayerIndex(a, document)
-        guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
-        guard let info = doc.layerInfo(index) else {
-            throw ToolError(message: "Layer \(index) could not be read")
-        }
-        guard let current = doc.textPayload(index) else {
-            throw ToolError(
-                message: "Layer \(index) (\"\(info.name)\") is not a text layer — it is plain "
-                    + "pixels with no text to re-render (get_document reports a \"text\" "
-                    + "object on the layers that have one). Make re-editable text with "
-                    + "add_text_layer, or paint characters onto this layer with add_text.")
-        }
-        let text = stringArg(a, "text") ?? current.string
-        guard !text.isEmpty else {
-            throw ToolError(
-                message: "text cannot be empty; remove the layer with delete_layer instead.")
-        }
-        let size = doubleArg(a, "size").map { min(max($0, 4), 1000) } ?? current.size
-        let family = try textFamily(a, size: size) ?? current.font
-        let color = try parseColor(a, "color", fallback: current.nsColor)
-        let alignment = try textAlignment(a) ?? current.alignment
-        let payload = TextLayerPayload(
-            string: text, family: family, size: size, color: color, alignment: alignment)
-        // Lay the new description out at the very origin the layer's pixels
-        // were rendered from (the old description's padding is what its
-        // offset includes), exactly as re-opening it with the text tool does.
-        let origin = TextLayer.editorOrigin(
-            offsetX: info.offsetX, offsetY: info.offsetY, payload: current)
-        let wrapWidth = try textWrapWidth(a, from: Double(origin.x), canvasWidth: doc.width)
-        guard let raster = TextLayer.render(payload, origin: origin, wrapWidth: wrapWidth) else {
-            throw ToolError(
-                message: "Could not lay the text out — check size and wrap_width.")
-        }
-        let name = TextLayer.layerName(for: text)
-        // The name follows the text only while it still IS the text: a name
-        // somebody typed themselves survives the re-render.
-        let nameFollowsText = info.name == TextLayer.layerName(for: current.string)
-        try performGroupedEdit(document, "Edit Text Layer") { doc in
-            guard let filled = doc.withLayerPixels(
-                    index, rgba: raster.pixels, width: raster.width, height: raster.height),
-                let moved = filled.withLayerOffset(index, raster.offsetX, raster.offsetY),
-                let described = moved.withTextPayload(index, payload)
-            else { return nil }
-            guard nameFollowsText else { return described }
-            return described.withLayerName(index, name) ?? described
-        }
-        return try textLayerResult(
-            layer: index, name: nameFollowsText ? name : info.name, payload: payload,
-            raster: raster, wrapWidth: wrapWidth)
-    }
-
     // MARK: - Selection, fill, gradient
 
-    private func editor(_ document: ImageDocument) -> EditorViewController? {
+    // Internal, not private: the +Feature stroke handlers reach the shared
+    // selection through it.
+    func editor(_ document: ImageDocument) -> EditorViewController? {
         document.windowControllers
             .compactMap { $0.contentViewController as? EditorViewController }
             .first
     }
 
     /// The document's live selection mask (nil when nothing is selected
-    /// or the document has no editor window).
-    private func selectionMask(_ document: ImageDocument) -> [UInt8]? {
+    /// or the document has no editor window). Internal, like the arg
+    /// helpers: the +Feature handlers cut with the same selection.
+    func selectionMask(_ document: ImageDocument) -> [UInt8]? {
         editor(document)?.agentSelection?.maskBytes()
     }
 
@@ -1745,8 +1728,10 @@ final class AgentServer {
     }
 
     /// Applies a combine/modify result: an empty (nil) result deselects,
-    /// reported in-band rather than as an error.
-    private func setCombined(
+    /// reported in-band rather than as an error. Internal, not private: the
+    /// channel tools route an empty plane straight here rather than through
+    /// applySelection, which throws on one.
+    func setCombined(
         _ editorVC: EditorViewController, _ selection: CanvasSelection?,
         extra: [String: Any] = [:]
     ) throws -> String {
@@ -1862,18 +1847,21 @@ final class AgentServer {
     private func fill(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         let index = try paintLayerIndex(a, document)
-        try rejectAdjustmentPixelEdit(document, index)
-        guard let x = intArg(a, "x"), let y = intArg(a, "y") else {
-            throw ToolError(message: "fill requires x and y (the seed point)")
-        }
-        let rgba = try colorRGBA(parseColor(a, "color", fallback: .black))
-        let tolerance = intArg(a, "tolerance") ?? 32
-        let contiguous = boolArg(a, "contiguous") ?? true
+        // A colour plane or an alpha channel fills THAT plane instead
+        // (AgentServer+ChannelTargets), mirroring the Fill tool's redirect in
+        // EditorViewController+PlanePaint.
+        let planeTarget = try paintTarget(a, document, allowMask: false)
+        let arguments = try fillArguments(a, document)
         let mask = selectionMask(document)
+        if planeTarget != .layer {
+            return try fillPlane(
+                document, target: planeTarget, layer: index, arguments, mask: mask)
+        }
+        try rejectAdjustmentPixelEdit(document, index)
         let rasterized = try performPixelEdit(document, "Fill", pixelLayer: index) { doc in
             doc.bucketFilled(
-                index, x: x, y: y, tolerance: tolerance, rgba: rgba,
-                contiguous: contiguous, mask: mask)
+                index, x: arguments.x, y: arguments.y, tolerance: arguments.tolerance,
+                rgba: arguments.rgba, contiguous: arguments.contiguous, mask: mask)
         }
         return try pixelEditResult(
             ["ok": true, "layer": index], layer: index, rasterized: rasterized)
@@ -1882,30 +1870,20 @@ final class AgentServer {
     private func gradient(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         let index = try paintLayerIndex(a, document)
-        try rejectAdjustmentPixelEdit(document, index)
-        guard let x0 = doubleArg(a, "x0"), let y0 = doubleArg(a, "y0"),
-            let x1 = doubleArg(a, "x1"), let y1 = doubleArg(a, "y1")
-        else {
-            throw ToolError(message: "gradient requires x0, y0, x1, y1")
-        }
-        let start = try colorRGBA(parseColor(a, "start_color", fallback: .black))
-        let end: [UInt8]
-        if stringArg(a, "end_color") != nil {
-            end = try colorRGBA(parseColor(a, "end_color", fallback: .clear))
-        } else {
-            end = [0, 0, 0, 0] // fade to transparent
-        }
-        let kind: RzGradientKind
-        switch stringArg(a, "shape") ?? "linear" {
-        case "linear": kind = RZ_GRADIENT_LINEAR
-        case "radial": kind = RZ_GRADIENT_RADIAL
-        default: throw ToolError(message: "shape must be \"linear\" or \"radial\"")
-        }
+        // As in fill: a plane or channel target lays the ramp down THAT plane
+        // (AgentServer+ChannelTargets), mirroring the Gradient tool.
+        let planeTarget = try paintTarget(a, document, allowMask: false)
+        let arguments = try gradientArguments(a, document)
         let mask = selectionMask(document)
+        if planeTarget != .layer {
+            return try gradientPlane(
+                document, target: planeTarget, layer: index, arguments, mask: mask)
+        }
+        try rejectAdjustmentPixelEdit(document, index)
         let rasterized = try performPixelEdit(document, "Gradient", pixelLayer: index) { doc in
             doc.gradiented(
-                index, from: CGPoint(x: x0, y: y0), to: CGPoint(x: x1, y: y1),
-                start: start, end: end, kind: kind, mask: mask)
+                index, from: arguments.from, to: arguments.to, start: arguments.start,
+                end: arguments.end, kind: arguments.kind, mask: mask)
         }
         return try pixelEditResult(
             ["ok": true, "layer": index], layer: index, rasterized: rasterized)
@@ -1930,45 +1908,49 @@ final class AgentServer {
             ["ok": true, "layer": index], layer: index, rasterized: rasterized)
     }
 
-    /// sRGB straight-alpha bytes of a parsed color.
-    private func colorRGBA(_ color: NSColor) throws -> [UInt8] {
-        guard let c = color.usingColorSpace(.sRGB) else {
+    /// The DOCUMENT's straight-alpha bytes of a parsed color — the agent's
+    /// spelling of `EditorViewController.colorBytes`, sharing its one
+    /// conversion (`ColorProfile.bytes`). `fill` and `gradient` hand these
+    /// bytes straight to the core instead of drawing through a
+    /// document-space context, so an AUTHORED `#RRGGBB` has to convert here
+    /// to land the same colour `brush_stroke` and `add_shape_layer` paint.
+    /// EVERY hex over the wire is authored: a hex string carries no space,
+    /// so a colour read back out of the document travels as
+    /// `sample_color`'s `paint_hex`, the sRGB spelling this converts back
+    /// into the pixel it came from. Internal, not private: the plane
+    /// fill/gradient mirrors in AgentServer+ChannelTargets reduce these
+    /// same document bytes to coverage gray, exactly as the Fill tool's
+    /// redirect does (EditorViewController+PlanePaint).
+    func colorRGBA(_ color: NSColor, in document: ImageDocument) throws -> [UInt8] {
+        guard let bytes = ColorProfile.bytes(color, in: document.nsColorSpace) else {
             throw ToolError(message: "Could not convert the color")
         }
-        return [
-            UInt8((c.redComponent * 255).rounded()),
-            UInt8((c.greenComponent * 255).rounded()),
-            UInt8((c.blueComponent * 255).rounded()),
-            UInt8((c.alphaComponent * 255).rounded()),
-        ]
+        return bytes
     }
 
+    // Whole-document geometry goes through applyingDocumentGeometry
+    // (DescribedLayerGeometry.swift) — the Image menu's own path — which
+    // composes the op into every described layer's description.
     private func rotate(_ a: [String: Any]) throws -> String {
         let degrees = intArg(a, "degrees") ?? 90
-        let actionName = "Rotate \(degrees)°"
+        let op: DocumentGeometry
         switch degrees {
-        case 90: return try docEdit(a, actionName) { $0.rotated90() }
-        case 180: return try docEdit(a, actionName) { $0.rotated180() }
-        case 270, -90: return try docEdit(a, actionName) { $0.rotated270() }
+        case 90: op = .rotate90
+        case 180: op = .rotate180
+        case 270, -90: op = .rotate270
         default: throw ToolError(message: "degrees must be 90, 180, 270, or -90 (clockwise)")
         }
+        return try docEdit(a, op.actionName) { $0.applyingDocumentGeometry(op) }
     }
 
     private func flip(_ a: [String: Any]) throws -> String {
+        let op: DocumentGeometry
         switch try requiredString(a, "axis") {
-        case "horizontal": return try docEdit(a, "Flip Horizontal") { $0.flippedH() }
-        case "vertical": return try docEdit(a, "Flip Vertical") { $0.flippedV() }
+        case "horizontal": op = .flipHorizontal
+        case "vertical": op = .flipVertical
         default: throw ToolError(message: "axis must be \"horizontal\" or \"vertical\"")
         }
-    }
-
-    private func crop(_ a: [String: Any]) throws -> String {
-        guard let x = intArg(a, "x"), let y = intArg(a, "y"),
-            let w = intArg(a, "width"), let h = intArg(a, "height")
-        else {
-            throw ToolError(message: "crop requires x, y, width, height")
-        }
-        return try docEdit(a, "Crop") { $0.cropped(x: x, y: y, w: w, h: h) }
+        return try docEdit(a, op.actionName) { $0.applyingDocumentGeometry(op) }
     }
 
     private func imageSize(_ a: [String: Any]) throws -> String {
@@ -1985,7 +1967,13 @@ final class AgentServer {
             }
             return match
         } ?? RZ_FILTER_LANCZOS3
-        return try docEdit(a, "Image Size") { $0.resized(w: w, h: h, filter: filter) }
+        // The channel budget, asked as the Image Size sheet asks it: the core
+        // refuses the resize outright when the channels would no longer fit,
+        // and a generic failure would tell a model to fix the one thing that
+        // is right (the size).
+        try requireChannelBudget(try target(a), width: w, height: h)
+        let op = DocumentGeometry.resize(width: w, height: h, filter: filter)
+        return try docEdit(a, op.actionName) { $0.applyingDocumentGeometry(op) }
     }
 
     private func canvasSize(_ a: [String: Any]) throws -> String {
@@ -2003,6 +1991,8 @@ final class AgentServer {
         guard let anchor = anchors[anchorName] else {
             throw ToolError(message: "anchor must be one of \(anchors.keys.sorted())")
         }
+        // The same channel-budget question the Canvas Size sheet asks first.
+        try requireChannelBudget(document, width: w, height: h)
         // Matches the Canvas Size sheet: the anchor's column/row chooses how
         // much of the size delta lands left/above the old canvas origin.
         let originX = Int((Double(w - doc.width) * Double(anchor.col) / 2.0).rounded())
@@ -2050,7 +2040,7 @@ final class AgentServer {
             }
             return try jsonResult(["ok": true, "path": url.path, "format": "rz"])
         }
-        guard let image = document.projection ?? document.doc?.flattened() else {
+        guard let doc = document.doc, let image = document.projection ?? doc.flattened() else {
             throw ToolError(message: "Could not flatten the document")
         }
         let format = ExportFormat.allCases.first {
@@ -2062,12 +2052,24 @@ final class AgentServer {
             throw ToolError(message: "Cannot infer the format; pass format as one of: \(names)")
         }
         let quality = intArg(a, "jpeg_quality") ?? document.jpegExportQuality
+        let embed = boolArg(a, "embed_profile") ?? document.embedColorProfile
+        let strip = boolArg(a, "strip_metadata") ?? document.stripMetadata
+        let report: RasterSaveReport
         do {
-            try image.save(to: url, format: format.rzFormat, jpegQuality: quality)
+            // The document-level save, so the profile, the EXIF/XMP/IPTC
+            // packets and the print resolution ride along; the warm
+            // projection is the composite, so nothing re-flattens.
+            report = try doc.saveImage(
+                image, to: url, format: format.rzFormat, jpegQuality: quality,
+                embedProfile: embed, stripMetadata: strip)
         } catch {
             throw ToolError(message: error.localizedDescription)
         }
-        return try jsonResult(["ok": true, "path": url.path, "format": format.displayName])
+        var result: [String: Any] = ["ok": true, "path": url.path, "format": format.displayName]
+        // What the chosen format could and could not carry, so a model never
+        // has to guess whether the profile survived (AgentServer+Color.swift).
+        result.merge(Self.savedFields(doc, document, report: report)) { _, new in new }
+        return try jsonResult(result)
     }
 
     // MARK: - Argument helpers
@@ -2080,7 +2082,7 @@ final class AgentServer {
         (a[key] as? NSNumber)?.doubleValue ?? (a[key] as? String).flatMap(Double.init)
     }
 
-    private func boolArg(_ a: [String: Any], _ key: String) -> Bool? {
+    func boolArg(_ a: [String: Any], _ key: String) -> Bool? {
         // Like intArg/doubleArg, a string spelling of the value is accepted.
         if let number = a[key] as? NSNumber { return number.boolValue }
         switch a[key] as? String {
@@ -2140,6 +2142,11 @@ private func agentToolTrampoline(
     let name = String(cString: toolName)
     let arguments = String(cString: argumentsJSON)
     let run = { server.execute(tool: name, argumentsJSON: arguments) }
-    let result = Thread.isMainThread ? run() : DispatchQueue.main.sync(execute: run)
+    // Held for the whole call: without it App Nap demotes the app after its
+    // first multi-second tool and every later one runs ~5x slower for the
+    // rest of the session (`AppActivity` carries the measurements).
+    let result = AppActivity.userInitiated("running the \(name) tool") {
+        Thread.isMainThread ? run() : DispatchQueue.main.sync(execute: run)
+    }
     return result.withCString { rz_agent_string_create($0) }
 }

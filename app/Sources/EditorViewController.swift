@@ -1,129 +1,162 @@
 import AppKit
 
-/// What brush and eraser edit on the active layer: its pixels, or its layer
-/// mask. Pure UI state owned by EditorViewController — not undoable, not
-/// persisted, and reset to `.layer` whenever the active layer changes, its
-/// mask goes away, or the document is replaced.
-enum PaintTarget {
-    case layer
-    case mask
-}
-
 final class EditorViewController: NSViewController {
     // Not private: the per-feature extension files (EditorViewController+…)
     // are handlers of this controller and need the document they act on.
     weak var document: ImageDocument?
 
-    private let scrollView = NSScrollView()
+    // Not private, like `document` and `canvas`: EditorViewController
+    // +Rulers.swift owns the two constraints that move the well's top and
+    // leading edges when the rulers appear, and creates them against it.
+    let scrollView = NSScrollView()
     // Not private, like `document` above: the extension files need the two
     // things every editor command works against.
     let canvas = ImageCanvasView()
     private var didRunInitialZoom = false
 
-    // Design chrome: 58px toolbar, floating zoom pill, 30px status bar with
-    // border-separated mono segments.
-    private var toolPill: ToolPillControl!
-    private let toolbarBar = BarView(border: .bottom)
+    // The two ruler strips and the corner box they meet in (RulerView.swift;
+    // laid out, wired and refreshed by EditorViewController+Rulers.swift),
+    // plus the two constraint pairs its visibility toggle swaps — the
+    // scrollTrailingToRoot/scrollTrailingToPanel template below.
+    let hRuler = RulerView(orientation: .horizontal)
+    let vRuler = RulerView(orientation: .vertical)
+    let rulerCorner = RulerCornerView()
+    var scrollTopToOptions: NSLayoutConstraint!
+    var scrollTopToHRuler: NSLayoutConstraint!
+    var scrollLeadingToRail: NSLayoutConstraint!
+    var scrollLeadingToVRuler: NSLayoutConstraint!
+
+    // Design chrome: fixed 36px options bar under the title bar, 48px left
+    // tool rail, floating zoom pill, 26px status bar with mono segments.
+    // Not private, like `canvas`: the +ToolOptions extension file builds the
+    // bar's descriptor clusters and the rail mirrors its swatches.
+    var toolRail: ToolRailView!
+    let optionsBar = ToolOptionsBar()
     private let zoomPill = ZoomPillView(frame: .zero)
     private let statusDims = StatusSegment(separator: false)
-    private let statusLayer = StatusSegment(separator: true)
-    private let statusBlend = StatusSegment(separator: true)
+    private let statusMode = StatusSegment(separator: true)
+    private let statusSelection = StatusSegment(separator: true)
     private let statusTool = StatusSegment(separator: false)
-    private let statusZoom = StatusSegment(separator: true)
 
     private(set) var currentTool: EditorTool = .select
 
-    // Options bar (between the window content top and the scroll view).
-    private let optionsBar = NSStackView()
-    private let sizeLabel = NSTextField(labelWithString: "Size")
-    private let sizeSlider = NSSlider(value: 24, minValue: 1, maxValue: 200, target: nil, action: nil)
-    private let sizeField = NSTextField(string: "24")
-    private let opacityLabel = NSTextField(labelWithString: "Opacity")
-    private let opacitySlider = NSSlider(
-        value: 1.0, minValue: 0.05, maxValue: 1.0, target: nil, action: nil)
-    private let opacityValueLabel = NSTextField(labelWithString: "100%")
-    private let colorWell = NSColorWell()
-    private let fontLabel = NSTextField(labelWithString: "Font")
-    private let fontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let fontSizeField = NSTextField(string: "48")
-    private let alignmentControl = NSSegmentedControl(frame: .zero)
-    private let toleranceLabel = NSTextField(labelWithString: "Tolerance")
-    private let toleranceSlider = NSSlider(
-        value: 32, minValue: 0, maxValue: 255, target: nil, action: nil)
-    private let toleranceValueLabel = NSTextField(labelWithString: "32")
-    private let contiguousCheck = NSButton(
-        checkboxWithTitle: "Contiguous", target: nil, action: nil)
-    private let gradientShapePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let gradientEndLabel = NSTextField(labelWithString: "End")
-    private let gradientEndWell = NSColorWell()
-    // Eyedropper readout: a swatch of the last sampled color plus its hex
-    // and R G B A values. Display only — the sample itself lands in the
-    // shared paint color.
-    private let sampleSwatch = NSBox()
-    private let sampleValueLabel = NSTextField(labelWithString: "Click to sample")
-    // Free Transform: numerics bound both ways to the session's parameters,
-    // plus the sampler the single commit-time resample will use.
-    private let transformAngleLabel = NSTextField(labelWithString: "Angle°")
-    private let transformAngleField = NSTextField(string: "0")
-    private let transformScaleXLabel = NSTextField(labelWithString: "Scale X%")
-    private let transformScaleXField = NSTextField(string: "100")
-    private let transformScaleYLabel = NSTextField(labelWithString: "Y%")
-    private let transformScaleYField = NSTextField(string: "100")
-    private let transformSizeLabel = NSTextField(labelWithString: "W")
-    private let transformSizeWField = NSTextField(string: "0")
-    private let transformSizeHLabel = NSTextField(labelWithString: "H")
-    private let transformSizeHField = NSTextField(string: "0")
-    private let transformSamplerLabel = NSTextField(labelWithString: "Sampler")
-    private let transformSamplerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    // Eyedropper readout shown in the options bar: the last sampled pixel.
+    // Display only — the sample itself lands in the shared paint color.
+    var lastSampleColor: NSColor?
+    var lastSampleText = "—"
+    // The Info readout's coalescing key: an extension cannot declare stored
+    // state, and EditorViewController+Info compares against this before
+    // building a PixelReadout — the same pattern lastSampleText follows.
+    var lastCursorPixel: (x: Int, y: Int)?
 
-    /// Magic wand / bucket fill color tolerance (max per-channel diff).
-    private var tolerance = 32
-    private var scrollTopToRoot: NSLayoutConstraint!
-    private var scrollTopToOptions: NSLayoutConstraint!
+    // True after a rail swatch pointed the shared color panel at this
+    // editor; deinit then clears the panel's (unretained) target.
+    private var colorPanelTargetsSelf = false
 
-    // Right panel (Layers/Assistant tabs, toggled by View > Show/Hide Layers).
-    private var layersPanel: LayersPanelViewController!
+    // Right panel (Layers/Channels/Assistant tabs, toggled by View >
+    // Show/Hide Layers). The tab state is internal, like `document` above:
+    // the +Feature extension files are handlers of this controller, and
+    // EditorViewController+Channels owns the Channels tab's entry points.
+    var layersPanel: LayersPanelViewController!
+    var channelsPanel: ChannelsPanelViewController!
+    // Internal, like the panels above: EditorViewController+Info is a
+    // handler of this controller, and an extension cannot see a private
+    // member.
+    var infoPanel: InfoPanelViewController!
     private var assistantPanel: AssistantPanelViewController!
     private var panelSeparator: NSBox!
     private var scrollTrailingToRoot: NSLayoutConstraint!
     private var scrollTrailingToPanel: NSLayoutConstraint!
-    private var layersPanelVisible = true
-    /// 0 = Layers, 1 = Assistant.
-    private var panelTab = 0
+    var layersPanelVisible = true
+    /// 0 = Layers, 1 = Channels, 2 = Assistant, 3 = Info.
+    var panelTab = 0
 
-    // Move-tool drag state: the active layer's offset when the drag began.
-    private var moveStartOffset: (x: Int, y: Int)?
+    // Move-tool drag state: the delta ALREADY APPLIED since the press, not
+    // any layer's start offset — a group has no offset of its own, so the
+    // gesture tracks its own total (MultiLayerEdit.swift.moveDidBegin says
+    // why). Internal, like `transformSession` below: the gesture itself lives
+    // in MultiLayerEdit.swift, and a stored property cannot.
+    var moveAppliedDelta: (x: Int, y: Int)?
+    // …and the union box of the moving set at the press, which is what a
+    // snap needs and a pure delta cannot supply: the gesture reports an
+    // offset, and nothing during it otherwise knows where the moving set
+    // actually is. Written by moveDidBegin and read by moveDidUpdate, both
+    // in MultiLayerEdit.swift — it lives here for the same reason
+    // moveAppliedDelta does, that a stored property cannot live in an
+    // extension.
+    var movePressBox: CGRect?
 
-    // The open Free Transform session (see TransformSession), and the flag
+    // The snapping engine's folded layer content boxes, cached against the
+    // document HANDLE they were measured from (handles are copy-on-write
+    // values, so identity is the right key). Invalidated in imageDidChange
+    // on a settled change only: the fold is a per-pixel sweep per leaf, and
+    // a Move drag posts that notification on every mouse-moved event.
+    // Internal, not private: DragSnapping.swift fills and reads it.
+    var snapBoxes: (doc: RasterDocument, boxes: [CGRect?])?
+
+    // The open Free Transform session (see TransformSession, which lives in
+    // MultiLayerEdit.swift together with the preview it feeds), and the flag
     // that marks the document change its own commit causes — every OTHER
-    // change under an open session ends it.
-    private var transformSession: TransformSession?
+    // change under an open session ends it. Internal, not private: a stored
+    // property cannot live in an extension, so the session STAYS here while
+    // everything that reads it moved out.
+    var transformSession: TransformSession?
     private var isCommittingTransform = false
 
     // Brush/eraser drag state: the document handle when the stroke began.
     // Every stroke tick repaints the whole overlay onto this base, so the
     // live projection always shows the committed result. Mask strokes leave
     // it nil — they never live-edit, they commit once on mouse-up.
-    private var strokeBase: RasterDocument?
-    private var strokeTargetsMask = false
+    // private(set), not private: EditorViewController+Heal.commitHealOverlay
+    // solves against this pre-stroke handle at mouse-up.
+    private(set) var strokeBase: RasterDocument?
+    // …and which coverage target it commits to. Internal, like the panels
+    // above: EditorViewController+Channels.commitCoverageOverlay switches
+    // on it at mouse-up.
+    var strokeTarget: PaintTarget = .layer
+    // The tool the stroke began with, so ticks route to the right op
+    // (dodge/burn is a retouch op, everything else paints the overlay).
+    // private(set) for the same reason: +Heal dispatches .heal vs .spotHeal
+    // on the tool the stroke began with.
+    private(set) var strokeTool: EditorTool = .brush
+    // The Blend option, latched at stroke begin (brush and clone only):
+    // non-Normal ticks composite through the core's blend-mode paint op.
+    private var strokeBlendMode = RZ_BLEND_NORMAL
+
+    // The open crop session (logic in EditorViewController+Crop.swift; the
+    // canvas draws its overlay and routes the gesture).
+    var cropSession: CropSession?
+    var shapeEditSession: ShapeEditSession?
 
     // What brush/eraser edit (see PaintTarget), plus the layer it was chosen
     // for: selecting a different layer drops the choice back to .layer.
     private(set) var paintTarget: PaintTarget = .layer
     private var paintTargetLayer = 0
+    /// …and, for a `.channel` target, the STABLE ID of the channel it names
+    /// (0 for every other target). `.channel` carries a list position, and a
+    /// delete, a duplicate above it or an undo renumbers the list under it —
+    /// a range check alone would then leave the target silently pointing at
+    /// the neighbour. `channelTargetResolved()` re-finds the index by this
+    /// id, exactly as the Channels panel's eye column re-finds its own rows
+    /// (`resolveChannelVisibility`); this is that set's single-value twin.
+    private(set) var paintTargetChannelID: UInt64 = 0
 
-    // Last-used paint options (session-only; no persistence).
-    private var brushSize: CGFloat = 24
-    private var brushOpacity: CGFloat = 1.0
-    private var paintColor: NSColor = .black
-    private var fontFamily = "Helvetica Neue"
-    private var fontSize: CGFloat = 48
+    // Live copies of the shared colors and text parameters — the canvas and
+    // payload builders read these as native types; ToolOptionsStore keeps
+    // the persisted form. Internal: the +ToolOptions descriptors bind them.
+    var paintColor: NSColor =
+        TextLayer.color(fromHex: ToolOptionsStore.shared.sharedState.foreground) ?? .black
+    var backgroundColor: NSColor =
+        TextLayer.color(fromHex: ToolOptionsStore.shared.sharedState.background) ?? .white
+    var fontFamily = ToolOptionsStore.shared.text.family
+    var fontSize = CGFloat(min(max(ToolOptionsStore.shared.text.size, 6), 500))
     /// Text-tool line alignment, in the options bar's segment order
     /// (0 left, 1 center, 2 right).
-    private var textAlignment: NSTextAlignment = .left
+    var textAlignment: NSTextAlignment = EditorViewController.alignmentSegmentValues[
+        min(max(ToolOptionsStore.shared.text.alignmentIndex, 0), 2)]
     /// Sampler a Free Transform commit resamples with; remembered between
     /// sessions, like the paint options above.
-    private var transformSampler = RZ_FILTER_CATMULL_ROM
+    var transformSampler = RZ_FILTER_CATMULL_ROM
 
     private static let zoomLadder: [CGFloat] = [
         0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32,
@@ -141,6 +174,14 @@ final class EditorViewController: NSViewController {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        // The shared color panel's target is unretained: if a rail swatch
+        // pointed it at this editor, a pick after the window closes would
+        // message a freed controller. There is no target getter, so the
+        // guard is the flag set when this editor took the panel over.
+        if colorPanelTargetsSelf {
+            NSColorPanel.shared.setTarget(nil)
+            NSColorPanel.shared.setAction(nil)
+        }
     }
 
     // MARK: - View construction
@@ -173,31 +214,96 @@ final class EditorViewController: NSViewController {
 
         if let document = document, let doc = document.doc {
             canvas.frame = NSRect(origin: .zero, size: doc.canvasSize)
-            canvas.image = document.projection?.makeCGImage()
+            // The space FIRST: the overlay a stroke paints into is built
+            // lazily from it, and a stale one would round-trip the document's
+            // pixels through the wrong space.
+            canvas.documentColorSpace = doc.drawingSpace
+            canvas.image = document.projection?.makeCGImage(in: doc.colorSpace)
         }
         canvas.onSelectionChange = { [weak self] _ in self?.updateStatus() }
         canvas.onStrokeBegin = { [weak self] in
-            guard let self = self, let document = self.document, let doc = document.doc,
-                  doc.layerInfo(document.activeLayerIndex)?.visible == true
-            else { return false } // hidden layer: refuse instead of painting invisibly
-            // An adjustment layer's pixels are ignored by the compositor, so
-            // strokes ALWAYS land on its mask; with the mask deleted there
-            // is nothing left to paint — refuse (the canvas beeps).
+            guard let self = self, let document = self.document, let doc = document.doc
+            else { return false }
+            self.strokeTool = self.currentTool
             let idx = document.activeLayerIndex
             let isAdjustment = doc.layerIsAdjustment(idx)
-            if isAdjustment, !doc.layerHasMask(idx) { return false }
+            // Only brush and eraser ever paint COVERAGE; clone and dodge run
+            // their own pixel ops and cannot reach a coverage target at all.
+            let paintsMaskTool = self.strokeTool == .brush || self.strokeTool == .eraser
+            // True when the target names a channel this document still has —
+            // the one case where the active layer has nothing to do with the
+            // edit. (`paintsCoverageTarget` is what validates the index.)
+            let onChannel = self.paintTarget.isChannel && self.paintsCoverageTarget
+            // A channel is the ONLY target that can still stand under a tool
+            // that cannot reach it: `toolReachableTarget` exempts it from the
+            // coercion a mask or a colour plane takes (so its Duplicate /
+            // Delete / Options / Invert commands keep working whatever tool is
+            // picked), and the status bar, the row's ring and both unringed
+            // layer wells then all say the channel is the target. Such a
+            // stroke therefore REFUSES, rather than quietly rewriting the
+            // photograph under indicators that name the channel.
+            guard !onChannel || paintsMaskTool else { return false }
+            // A hidden layer: refuse instead of painting invisibly. A CHANNEL
+            // is canvas-sized document state that the layer's eye says nothing
+            // about, so a channel stroke is exempt — a `.mask` or `.plane`
+            // target still belongs to the hidden layer and keeps refusing.
+            // (The agent's brush_stroke {target: "channel:…"} has always been
+            // exempt; this is the UI agreeing with it.)
+            guard doc.layerInfo(idx)?.visible == true || onChannel else { return false }
+            // An adjustment layer's pixels are ignored by the compositor, so
+            // strokes ALWAYS land on its mask; with the mask deleted there
+            // is nothing left to paint — refuse (the canvas beeps). Clone
+            // and dodge rewrite pixels, which an adjustment layer hasn't
+            // got, so they refuse outright.
+            if self.strokeTool == .clone || self.strokeTool == .dodge
+                || self.strokeTool == .heal || self.strokeTool == .spotHeal, isAdjustment {
+                return false
+            }
+            if isAdjustment, !doc.layerHasMask(idx), !onChannel { return false }
             // Decided once per stroke so a target change mid-drag can never
-            // split it across the layer and its mask.
-            let targetsMask = isAdjustment || self.paintsActiveMask
-            self.strokeTargetsMask = targetsMask
-            self.canvas.paintsMask = targetsMask
-            guard !targetsMask else {
-                // Mask strokes ghost on the canvas and commit in one step
-                // from onCommitMaskOverlay: no live-edit session.
+            // split it across two targets. A CHANNEL is document state: an
+            // adjustment layer neither forces it nor blocks it (the layer is
+            // not being painted at all), and `paintsCoverageTarget` is what
+            // validates its index.
+            let target: PaintTarget = paintsMaskTool && self.paintsCoverageTarget
+                ? self.paintTarget
+                : (isAdjustment ? .mask : .layer)
+            self.strokeTarget = target
+            self.canvas.paintTarget = target
+            // Locks, once per stroke, against the target the stroke really
+            // hits. A MASK edit answers to the Mask kind — Photoshop lets a
+            // pixel-locked layer's mask be painted, and only Lock All
+            // freezes it — while the layer's own pixels and its colour
+            // PLANES answer to Pixels. A CHANNEL is canvas-sized document
+            // state that belongs to no layer, so it is exempt, exactly as
+            // it is exempt from the hidden-layer refusal above. Transparency
+            // lock refuses nothing here: the core restores the layer's alpha
+            // after the stroke, so the paint lands and stays inside the
+            // existing shape.
+            if !onChannel {
+                let editKind: RzEditKind = target == .mask ? RZ_EDIT_MASK : RZ_EDIT_PIXELS
+                if self.refuseLockedEdit(layer: idx, kind: editKind) { return false }
+                // A GROUP has no pixels of its own, so every tick's
+                // `paintingLayer` would answer nil and the whole stroke
+                // would be a silent no-op (+Groups.swift). A COLOUR PLANE
+                // reads the same pixels — `paintingLayerPlane` goes through
+                // the core's `raster_layer` too — and the agent's mirror
+                // already covers both (AgentServer+Channels).
+                if target == .layer || target.isPlane, self.refuseGroupPixelEdit() {
+                    return false
+                }
+            }
+            guard !target.isCoverage else {
+                // Coverage strokes ghost on the canvas and commit in one
+                // step from onCommitMaskOverlay: no live-edit session.
                 self.strokeBase = nil
                 return true
             }
             self.strokeBase = doc
+            // Blend applies to strokes that PAINT layer pixels: brush and
+            // clone. The eraser is its own composite op and dodge is a
+            // retouch op, so both stay Normal whatever their store says.
+            self.strokeBlendMode = self.paintStrokeBlendMode()
             document.beginLiveEdit()
             return true
         }
@@ -207,27 +313,47 @@ final class EditorViewController: NSViewController {
             let idx = document.activeLayerIndex
             // nil = the stroke has missed the layer's extent entirely so far;
             // skip the tick (the projection is already correct).
-            if let updated = base.paintingLayer(idx, overlay: data, w: base.width, h: base.height,
-                                                mode: mode, alpha: alpha) {
+            let updated: RasterDocument?
+            if self.strokeTool == .dodge {
+                // The overlay is coverage here; exposure/range/burn come
+                // from the tool's options.
+                let options = ToolOptionsStore.shared.dodge
+                updated = base.dodgeBurnLayer(
+                    idx, overlay: data, w: base.width, h: base.height,
+                    exposure: min(max(options.opacity, 0), 100) / 100,
+                    range: min(max(options.rangeIndex, 0), 2), burn: options.burn)
+            } else if mode == RZ_COMPOSITE_OVER, self.strokeBlendMode != RZ_BLEND_NORMAL {
+                updated = base.paintingLayerBlend(
+                    idx, overlay: data, w: base.width, h: base.height,
+                    mode: self.strokeBlendMode, alpha: alpha)
+            } else {
+                updated = base.paintingLayer(
+                    idx, overlay: data, w: base.width, h: base.height, mode: mode, alpha: alpha)
+            }
+            if let updated = updated {
                 document.updateLiveEdit(updated)
             }
         }
-        canvas.onCommitMaskOverlay = { [weak self] data, actionName in
-            guard let self = self, let document = self.document else { return }
-            let idx = document.activeLayerIndex
-            guard document.doc?.layerHasMask(idx) == true else {
-                NSSound.beep()
-                return
-            }
-            document.applyEdit(actionName) { doc in
-                doc.paintingLayerMask(idx, overlay: data, w: doc.width, h: doc.height)
-            }
-        }
+        canvas.onCommitMaskOverlay = { [weak self] data, _ in self?.commitCoverageOverlay(data) }
+        canvas.onCommitStrokeOverlay = { [weak self] d, n in self?.commitHealOverlay(d, n) }
+        canvas.onStrokeSourceImage = { [weak self] in self?.strokeSourceImage() }
+        canvas.onPatchSourceImage = { [weak self] in self?.patchSourceImage() }
+        canvas.onPatchCommit = { [weak self] result in self?.patchCommitted(result) }
+        canvas.onRedEyeCommit = { [weak self] rect in self?.redEyeRectDragged(rect) }
         canvas.onStrokeEnd = { [weak self] actionName in
             guard let self = self, let document = self.document else { return }
-            let wasMask = self.strokeTargetsMask
+            let wasMask = self.strokeTarget != .layer
             let base = self.strokeBase
-            self.strokeTargetsMask = false
+            self.strokeTarget = .layer
+            // The canvas's mirror goes back to the editor's REAL target: the
+            // stroke latched its own into it at mouse-down, and setPaintTarget
+            // (the only other writer) never runs again when `paintTarget`
+            // itself never changed. Left stale, a clone or dodge stroke made
+            // with a channel row selected would leave the canvas drawing the
+            // active-layer boundary over a canvas-sized channel, and washing
+            // a sheet's grayscale plane preview in that channel's own
+            // rubylith — the two things this mirror exists to get right.
+            self.canvas.paintTarget = self.paintTarget
             self.strokeBase = nil
             // A mask stroke already committed itself (onCommitMaskOverlay)
             // and never opened a live-edit session.
@@ -256,7 +382,9 @@ final class EditorViewController: NSViewController {
         }
         canvas.onStrokeCancel = { [weak self] in
             guard let self = self, let document = self.document else { return }
-            self.strokeTargetsMask = false
+            self.strokeTarget = .layer
+            // …and the canvas's mirror with it (see onStrokeEnd).
+            self.canvas.paintTarget = self.paintTarget
             // An abandoned mask stroke never touched the document (strokeBase
             // is nil): dropping the overlay is the whole rollback.
             guard let base = self.strokeBase else { return }
@@ -267,56 +395,36 @@ final class EditorViewController: NSViewController {
             document.endLiveEdit("Cancel Stroke")
         }
         canvas.onTextClick = { [weak self] point in self?.textClicked(point) }
-        canvas.onCommitText = { [weak self] payload, origin, wrapWidth, editingLayer in
-            self?.commitTextLayer(payload, origin: origin, wrapWidth: wrapWidth,
-                                  editing: editingLayer)
+        canvas.onCommitText = { [weak self] payload, origin, editingLayer in
+            self?.commitTextLayer(payload, origin: origin, editing: editingLayer)
         }
         canvas.onTextSessionEnd = { [weak self] in
             // Drops the layer-hidden preview a re-edit session put up.
             self?.canvas.previewImage = nil
         }
-        canvas.onToolKey = { [weak self] tool in self?.selectTool(tool) }
+        canvas.onToolKey = { [weak self] tool in self?.selectToolForKey(tool) }
         canvas.onQuickMaskKey = { [weak self] in self?.toggleQuickMask(nil) }
         canvas.onWandClick = { [weak self] point, mode in self?.wandClicked(point, mode: mode) }
         canvas.onFillClick = { [weak self] point in self?.fillClicked(point) }
         canvas.onEyedropper = { [weak self] point in self?.sampleColor(at: point) }
         canvas.onGradientCommit = { [weak self] a, b in self?.gradientCommitted(a, b) }
-        canvas.onBrushSizeKey = { [weak self] newSize in
-            guard let self = self else { return }
-            self.brushSize = newSize
-            self.sizeSlider.doubleValue = Double(newSize)
-            self.sizeField.integerValue = Int(newSize.rounded())
-            self.canvas.brushSize = newSize
+        canvas.onBrushSizeKey = { [weak self] newSize in self?.brushSizeKeyChanged(newSize) }
+        canvas.onMoveBegin = { [weak self] point, modifiers in
+            self?.moveDidBegin(at: point, modifiers: modifiers)
         }
-        canvas.onMoveBegin = { [weak self] in
-            guard let self = self, let document = self.document, let doc = document.doc,
-                  let info = doc.layerInfo(document.activeLayerIndex)
-            else { return }
-            self.moveStartOffset = (info.offsetX, info.offsetY)
-            document.beginLiveEdit()
-        }
-        canvas.onMoveUpdate = { [weak self] dx, dy in
-            guard let self = self, let document = self.document, let doc = document.doc,
-                  let start = self.moveStartOffset
-            else { return }
-            let idx = document.activeLayerIndex
-            if let updated = doc.withLayerOffset(idx, start.x + dx, start.y + dy) {
-                document.updateLiveEdit(updated)
-            }
+        canvas.onMoveUpdate = { [weak self] dx, dy, modifiers in
+            self?.moveDidUpdate(dx, dy, modifiers)
         }
         canvas.onMoveEnd = { [weak self] in
             guard let self = self, let document = self.document else { return }
-            self.moveStartOffset = nil
+            self.moveAppliedDelta = nil
+            // The press-time box and the smart guides belong to the gesture
+            // that earned them, and neither survives the mouse coming up
+            // (MultiLayerEdit.moveDidEnd).
+            self.moveDidEnd()
             document.endLiveEdit("Move Layer")
         }
-        canvas.onMoveNudge = { [weak self] dx, dy in
-            guard let self = self, let document = self.document else { return }
-            let idx = document.activeLayerIndex
-            document.applyEdit("Move Layer") { doc in
-                guard let info = doc.layerInfo(idx) else { return nil }
-                return doc.withLayerOffset(idx, info.offsetX + dx, info.offsetY + dy)
-            }
-        }
+        canvas.onMoveNudge = { [weak self] dx, dy in self?.moveNudge(dx, dy) }
         canvas.onTransformMouseDown = { [weak self] point, modifiers in
             self?.transformMouseDown(point, modifiers)
         }
@@ -325,54 +433,78 @@ final class EditorViewController: NSViewController {
         }
         canvas.onTransformMouseUp = { [weak self] _, _ in
             self?.transformSession?.drag = nil
+            // Same rule as the Move drag: the alignment lines a transform
+            // drag earned come off the screen when it ends.
+            self?.pushSmartGuides([])
         }
         canvas.onTransformCommit = { [weak self] in self?.commitTransformSession() }
         canvas.onTransformCancel = { [weak self] in self?.endTransformSession() }
         canvas.onTransformNudge = { [weak self] dx, dy in self?.transformNudge(dx, dy) }
+        canvas.onCropMouseDown = { [weak self] point in self?.cropMouseDown(point) }
+        canvas.onCropMouseDragged = { [weak self] point, modifiers in
+            self?.cropMouseDragged(point, modifiers)
+        }
+        canvas.onCropMouseUp = { [weak self] point in self?.cropMouseUp(point) }
+        canvas.onCropCommit = { [weak self] in self?.commitCropSession() }
+        canvas.onCropCancel = { [weak self] in self?.resetCropSession() }
+        canvas.onShapeCommit = { [weak self] box, flipped in
+            self?.commitShapeLayer(box: box, flipped: flipped)
+        }
+        canvas.onShapeEditMouseDown = { [weak self] point in self?.shapeEditMouseDown(point) }
+        canvas.onShapeEditMouseDragged = { [weak self] point, modifiers in
+            self?.shapeEditMouseDragged(point, modifiers)
+        }
+        canvas.onShapeEditMouseUp = { [weak self] in self?.shapeEditSession?.drag = nil }
+        canvas.onShapeEditCommit = { [weak self] in self?.commitShapeEditSession() }
+        canvas.onShapeEditCancel = { [weak self] in self?.cancelShapeEditSession() }
+        canvas.onCursorMove = { [weak self] point in self?.cursorMoved(to: point) }
+        // Guides (EditorViewController+Guides.swift): the canvas routes the
+        // press, the drag, the release, ⌫ and Escape; the geometry is the
+        // extension's.
+        canvas.onGuideMouseDown = { [weak self] point, modifiers in
+            self?.guideMouseDown(point, modifiers) ?? false
+        }
+        canvas.onGuideMouseDragged = { [weak self] point, modifiers in
+            self?.guideMouseDragged(point, modifiers)
+        }
+        canvas.onGuideMouseUp = { [weak self] in self?.guideMouseUp() }
+        canvas.onGuideDelete = { [weak self] in self?.guideDragDelete() }
+        canvas.onGuideCancel = { [weak self] in self?.guideDragCancel() }
+        // The engine the canvas's own point drags snap against, built at
+        // each of their mouse-downs (DragSnapping.swift).
+        canvas.onSnapEngine = { [weak self] in
+            self?.makeSnapEngine(for: .canvasPoint) ?? .inactive
+        }
+        canvas.onZoomClick = { [weak self] point, out in self?.zoomStep(at: point, out: out) }
+        canvas.onZoomTo = { [weak self] target in self?.applyZoom(target) }
+        canvas.onZoomRect = { [weak self] rect in self?.zoomToRect(rect) }
 
-        buildOptionsBar()
-        canvas.brushSize = brushSize
         canvas.paintColor = paintColor
-        canvas.brushOpacity = brushOpacity
-        canvas.textFont = currentFont()
-        canvas.textAlignment = textAlignment
+        canvas.textStyle = currentTextStyle()
+        syncCanvasPaintState()
 
-        // Toolbar: pill tool group left, ghost zoom cluster, on a card bar
-        // with a subtle bottom border. The pill's contents — including
-        // which tools share a button — come from EditorTool.toolbarGroups.
-        toolbarBar.translatesAutoresizingMaskIntoConstraints = false
-        toolPill = ToolPillControl(groups: EditorTool.toolbarGroups)
-        toolPill.translatesAutoresizingMaskIntoConstraints = false
-        let zoomOutButton = GhostButton(
-            symbol: "minus.magnifyingglass", fallback: "−", caption: "Zoom Out",
-            tooltip: "Zoom Out", action: #selector(zoomOutAction(_:)))
-        let zoomInButton = GhostButton(
-            symbol: "plus.magnifyingglass", fallback: "+", caption: "Zoom In",
-            tooltip: "Zoom In", action: #selector(zoomInAction(_:)))
-        let fitButton = GhostButton(
-            symbol: "arrow.up.left.and.down.right.magnifyingglass", fallback: "⤢",
-            caption: "Fit", tooltip: "Zoom to Fit", action: #selector(zoomFitAction(_:)))
-        let actualButton = GhostButton(
-            symbol: "1.magnifyingglass", fallback: "1", caption: "Actual",
-            tooltip: "Actual Size", action: #selector(zoomActualAction(_:)))
-        let toolbarStack = NSStackView(views: [
-            toolPill, zoomOutButton, zoomInButton, fitButton, actualButton,
-            NSView(),
-        ])
-        toolbarStack.translatesAutoresizingMaskIntoConstraints = false
-        toolbarStack.orientation = .horizontal
-        toolbarStack.alignment = .centerY
-        toolbarStack.spacing = 14
-        toolbarStack.setCustomSpacing(20, after: toolPill)
-        toolbarBar.addSubview(toolbarStack)
+        // Fixed-height options bar under the title bar; the +ToolOptions
+        // extension builds its per-tool clusters.
+        optionsBar.translatesAutoresizingMaskIntoConstraints = false
+        optionsBar.onAnyEdit = { [weak self] in self?.toolOptionsEdited() }
+
+        // Left tool rail: the slots — including which tools share one —
+        // come from EditorTool.railGroups; its swatches are the shared
+        // foreground/background colors.
+        toolRail = ToolRailView(groups: EditorTool.railGroups)
+        toolRail.translatesAutoresizingMaskIntoConstraints = false
+        toolRail.foregroundSwatchColor = paintColor
+        toolRail.backgroundSwatchColor = backgroundColor
+        toolRail.onPickForeground = { [weak self] in self?.pickForegroundColor() }
+        toolRail.onPickBackground = { [weak self] in self?.pickBackgroundColor() }
 
         let statusBar = BarView(border: .top)
         statusBar.translatesAutoresizingMaskIntoConstraints = false
-        let statusLeft = NSStackView(views: [statusDims, statusLayer, statusBlend])
+        let statusLeft = NSStackView(views: [statusDims, statusMode, statusSelection])
         statusLeft.translatesAutoresizingMaskIntoConstraints = false
         statusLeft.orientation = .horizontal
         statusLeft.spacing = 14
-        let statusRight = NSStackView(views: [statusTool, statusZoom])
+        let statusRight = NSStackView(views: [statusTool])
         statusRight.translatesAutoresizingMaskIntoConstraints = false
         statusRight.orientation = .horizontal
         statusRight.spacing = 14
@@ -393,6 +525,12 @@ final class EditorViewController: NSViewController {
             self?.syncPaintTarget()
             self?.updateStatus()
             self?.updateActiveLayerRect()
+            // The active layer is not a document change and posts no
+            // notification, yet the "<layer> Mask" row is computed from it —
+            // and so is the canvas's mask base and rubylith.
+            self?.channelsPanel?.activeLayerChanged()
+            self?.infoPanel?.activeLayerChanged()
+            self?.refreshChannelDisplay()
         }
         layersPanel.onPaintTargetChange = { [weak self] target in
             self?.setPaintTarget(target)
@@ -403,16 +541,55 @@ final class EditorViewController: NSViewController {
         layersPanel.onTextEdit = { [weak self] idx in
             self?.editTextLayer(idx)
         }
+        layersPanel.onShapeEdit = { [weak self] idx in
+            self?.editShapeLayer(idx)
+        }
         layersPanel.onLivePhotoEdit = { [weak self] idx in
             self?.editLivePhotoLayer(idx)
         }
+        layersPanel.onLayerStyleEdit = { [weak self] idx in
+            self?.editLayerStyle(idx)
+        }
+        layersPanel.onShowChannels = { [weak self] in self?.showChannelsTab() }
         layersPanel.onShowAssistant = { [weak self] in
-            self?.panelTab = 1
+            self?.panelTab = 2
             self?.updatePanelVisibility()
+        }
+        layersPanel.onShowInfo = { [weak self] in self?.showInfoTab() }
+        layersPanel.onLoadLayerSelection = { [weak self] idx, target, mode in
+            self?.loadLayerSelection(layer: idx, target: target, mode: mode)
         }
         addChild(layersPanel)
         let panelView = layersPanel.view
         panelView.translatesAutoresizingMaskIntoConstraints = false
+
+        channelsPanel = ChannelsPanelViewController()
+        channelsPanel.document = document
+        channelsPanel.onShowLayers = { [weak self] in
+            self?.panelTab = 0
+            self?.updatePanelVisibility()
+        }
+        channelsPanel.onShowAssistant = { [weak self] in
+            self?.panelTab = 2
+            self?.updatePanelVisibility()
+        }
+        channelsPanel.onSelectTarget = { [weak self] target in
+            self?.setChannelRowTarget(target)
+        }
+        channelsPanel.onVisibilityChange = { [weak self] visibility in
+            self?.channelViewChanged(visibility)
+        }
+        channelsPanel.onLoadSelection = { [weak self] source, mode in
+            self?.loadRowSelection(source, mode: mode)
+        }
+        channelsPanel.onRenameChannel = { [weak self] id, name in
+            self?.renameChannel(id: id, to: name)
+        }
+        channelsPanel.onShowInfo = { [weak self] in self?.showInfoTab() }
+        addChild(channelsPanel)
+        let channelsView = channelsPanel.view
+        channelsView.translatesAutoresizingMaskIntoConstraints = false
+        channelsView.isHidden = true
 
         assistantPanel = AssistantPanelViewController()
         assistantPanel.document = document
@@ -420,45 +597,60 @@ final class EditorViewController: NSViewController {
             self?.panelTab = 0
             self?.updatePanelVisibility()
         }
+        assistantPanel.onShowChannels = { [weak self] in self?.showChannelsTab() }
+        assistantPanel.onShowInfo = { [weak self] in self?.showInfoTab() }
         addChild(assistantPanel)
         let assistantView = assistantPanel.view
         assistantView.translatesAutoresizingMaskIntoConstraints = false
         assistantView.isHidden = true
 
+        infoPanel = InfoPanelViewController()
+        infoPanel.document = document
+        infoPanel.onShowLayers = { [weak self] in
+            self?.panelTab = 0
+            self?.updatePanelVisibility()
+        }
+        infoPanel.onShowChannels = { [weak self] in self?.showChannelsTab() }
+        infoPanel.onShowAssistant = { [weak self] in
+            self?.panelTab = 2
+            self?.updatePanelVisibility()
+        }
+        addChild(infoPanel)
+        let infoView = infoPanel.view
+        infoView.translatesAutoresizingMaskIntoConstraints = false
+        infoView.isHidden = true
+
         panelSeparator = NSBox()
         panelSeparator.boxType = .separator
         panelSeparator.translatesAutoresizingMaskIntoConstraints = false
 
-        root.addSubview(toolbarBar)
         root.addSubview(optionsBar)
+        root.addSubview(toolRail)
         root.addSubview(scrollView)
         root.addSubview(zoomPill)
         root.addSubview(panelSeparator)
         root.addSubview(panelView)
+        root.addSubview(channelsView)
         root.addSubview(assistantView)
+        root.addSubview(infoView)
         root.addSubview(statusBar)
 
-        guard let toolbarStackView = toolbarBar.subviews.first else {
-            fatalError("toolbar stack missing")
-        }
         NSLayoutConstraint.activate([
-            toolbarBar.topAnchor.constraint(equalTo: root.topAnchor),
-            toolbarBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            toolbarBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            toolbarBar.heightAnchor.constraint(equalToConstant: DS.toolbarHeight),
-
-            toolbarStackView.leadingAnchor.constraint(
-                equalTo: toolbarBar.leadingAnchor, constant: 14),
-            toolbarStackView.trailingAnchor.constraint(
-                equalTo: toolbarBar.trailingAnchor, constant: -14),
-            toolbarStackView.centerYAnchor.constraint(equalTo: toolbarBar.centerYAnchor),
-
-            optionsBar.topAnchor.constraint(equalTo: toolbarBar.bottomAnchor),
+            // The bar is fixed-height and always present, so the canvas
+            // well's frame never depends on which tool is active.
+            optionsBar.topAnchor.constraint(equalTo: root.topAnchor),
             optionsBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             optionsBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            optionsBar.heightAnchor.constraint(equalToConstant: 30),
+            optionsBar.heightAnchor.constraint(equalToConstant: DS.optionsBarHeight),
 
-            scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            toolRail.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            toolRail.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
+            toolRail.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+            toolRail.widthAnchor.constraint(equalToConstant: DS.railWidth),
+
+            // The well's top and leading edges are the two the rulers move,
+            // so their constraints are created as a swappable pair in
+            // installRulers(in:) rather than pinned here.
             scrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             zoomPill.leadingAnchor.constraint(
@@ -466,19 +658,32 @@ final class EditorViewController: NSViewController {
             zoomPill.bottomAnchor.constraint(
                 equalTo: scrollView.bottomAnchor, constant: -16),
 
+            // The four panels and the separator pin to the OPTIONS BAR,
+            // not to the well's top: the rulers push the well down, and
+            // following it would leave a notch beside the horizontal strip.
             panelView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             panelView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
-            panelView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            panelView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
             panelView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+
+            channelsView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            channelsView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
+            channelsView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
+            channelsView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             assistantView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             assistantView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
-            assistantView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            assistantView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
             assistantView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+
+            infoView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            infoView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
+            infoView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
+            infoView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             panelSeparator.trailingAnchor.constraint(equalTo: panelView.leadingAnchor),
             panelSeparator.widthAnchor.constraint(equalToConstant: 1),
-            panelSeparator.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            panelSeparator.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
             panelSeparator.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             statusBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -495,238 +700,18 @@ final class EditorViewController: NSViewController {
                 equalTo: statusBar.trailingAnchor, constant: -14),
             statusRight.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
         ])
-        // The scroll view's top swaps between the toolbar's bottom (select/
-        // move tools, options bar hidden) and the options bar's bottom.
-        scrollTopToRoot = scrollView.topAnchor.constraint(equalTo: toolbarBar.bottomAnchor)
-        scrollTopToOptions = scrollView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor)
         // The scroll view's trailing swaps between the panel separator
         // (layers visible) and the window edge (layers hidden).
         scrollTrailingToRoot = scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor)
         scrollTrailingToPanel = scrollView.trailingAnchor.constraint(
             equalTo: panelSeparator.leadingAnchor)
         scrollTrailingToPanel.isActive = true
+        // The strips, the corner box, their gestures and the top/leading
+        // constraint pairs (EditorViewController+Rulers.swift).
+        installRulers(in: root)
 
         view = root
         updateOptionsBar()
-    }
-
-    private func buildOptionsBar() {
-        optionsBar.translatesAutoresizingMaskIntoConstraints = false
-        optionsBar.orientation = .horizontal
-        optionsBar.alignment = .centerY
-        optionsBar.spacing = 8
-        optionsBar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
-
-        for label in [
-            sizeLabel, opacityLabel, fontLabel, transformAngleLabel, transformScaleXLabel,
-            transformScaleYLabel, transformSizeLabel, transformSizeHLabel,
-            transformSamplerLabel,
-        ] {
-            label.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        }
-
-        sizeSlider.isContinuous = true
-        sizeSlider.controlSize = .small
-        sizeSlider.target = self
-        sizeSlider.action = #selector(sizeSliderChanged(_:))
-        sizeSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
-        sizeSlider.doubleValue = Double(brushSize)
-
-        let sizeFormatter = NumberFormatter()
-        sizeFormatter.numberStyle = .none
-        sizeFormatter.allowsFloats = false
-        sizeFormatter.minimum = 1
-        sizeFormatter.maximum = 200
-        sizeField.formatter = sizeFormatter
-        sizeField.controlSize = .small
-        sizeField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        sizeField.integerValue = Int(brushSize)
-        sizeField.target = self
-        sizeField.action = #selector(sizeFieldChanged(_:))
-        sizeField.widthAnchor.constraint(equalToConstant: 44).isActive = true
-
-        opacitySlider.isContinuous = true
-        opacitySlider.controlSize = .small
-        opacitySlider.target = self
-        opacitySlider.action = #selector(opacitySliderChanged(_:))
-        opacitySlider.widthAnchor.constraint(equalToConstant: 100).isActive = true
-        opacitySlider.doubleValue = Double(brushOpacity)
-
-        opacityValueLabel.font = NSFont.monospacedDigitSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        opacityValueLabel.alignment = .right
-        opacityValueLabel.widthAnchor.constraint(equalToConstant: 40).isActive = true
-
-        colorWell.color = paintColor
-        colorWell.target = self
-        colorWell.action = #selector(colorChanged(_:))
-        colorWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        colorWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
-
-        let families = NSFontManager.shared.availableFontFamilies.sorted()
-        fontPopup.controlSize = .small
-        fontPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        fontPopup.addItems(withTitles: families)
-        if !families.contains(fontFamily) {
-            fontFamily = families.first ?? NSFont.systemFont(ofSize: fontSize).fontName
-        }
-        fontPopup.selectItem(withTitle: fontFamily)
-        fontPopup.target = self
-        fontPopup.action = #selector(fontFamilyChanged(_:))
-        fontPopup.widthAnchor.constraint(equalToConstant: 160).isActive = true
-
-        let fontSizeFormatter = NumberFormatter()
-        fontSizeFormatter.numberStyle = .none
-        fontSizeFormatter.allowsFloats = false
-        fontSizeFormatter.minimum = 6
-        fontSizeFormatter.maximum = 500
-        fontSizeField.formatter = fontSizeFormatter
-        fontSizeField.controlSize = .small
-        fontSizeField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        fontSizeField.integerValue = Int(fontSize)
-        fontSizeField.target = self
-        fontSizeField.action = #selector(fontSizeChanged(_:))
-        fontSizeField.widthAnchor.constraint(equalToConstant: 44).isActive = true
-
-        // Alignment: a compact 3-segment control in the payload's order
-        // (left, center, right). SF Symbols on the systems that have them,
-        // short labels otherwise.
-        alignmentControl.segmentCount = 3
-        alignmentControl.trackingMode = .selectOne
-        alignmentControl.controlSize = .small
-        alignmentControl.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        let alignmentSegments = [
-            ("text.alignleft", "Left"), ("text.aligncenter", "Center"),
-            ("text.alignright", "Right"),
-        ]
-        for (segment, (symbol, label)) in alignmentSegments.enumerated() {
-            if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) {
-                alignmentControl.setImage(image, forSegment: segment)
-            } else {
-                alignmentControl.setLabel(label, forSegment: segment)
-            }
-            alignmentControl.setToolTip("Align \(label.lowercased())", forSegment: segment)
-        }
-        alignmentControl.selectedSegment = Self.alignmentIndex(textAlignment)
-        alignmentControl.target = self
-        alignmentControl.action = #selector(alignmentChanged(_:))
-
-        toleranceSlider.isContinuous = true
-        toleranceSlider.controlSize = .small
-        toleranceSlider.target = self
-        toleranceSlider.action = #selector(toleranceChanged(_:))
-        toleranceSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
-
-        toleranceValueLabel.font = NSFont.monospacedDigitSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        toleranceValueLabel.alignment = .right
-        toleranceValueLabel.widthAnchor.constraint(equalToConstant: 32).isActive = true
-
-        contiguousCheck.state = .on
-        contiguousCheck.controlSize = .small
-        contiguousCheck.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-
-        gradientShapePopup.controlSize = .small
-        gradientShapePopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        gradientShapePopup.addItems(withTitles: ["Linear", "Radial"])
-        gradientShapePopup.widthAnchor.constraint(equalToConstant: 90).isActive = true
-
-        // Default end color: fade to transparent.
-        gradientEndWell.color = .clear
-        gradientEndWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        gradientEndWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
-
-        // Eyedropper readout: swatch + monospaced hex / R G B A values of the
-        // last sampled pixel. A plain bordered box, not a color well — it
-        // displays the sample, it is not an editable color.
-        sampleSwatch.boxType = .custom
-        sampleSwatch.titlePosition = .noTitle
-        sampleSwatch.borderWidth = 1
-        sampleSwatch.borderColor = NSColor.separatorColor
-        sampleSwatch.cornerRadius = 3
-        sampleSwatch.fillColor = .clear
-        sampleSwatch.widthAnchor.constraint(equalToConstant: 24).isActive = true
-        sampleSwatch.heightAnchor.constraint(equalToConstant: 16).isActive = true
-        sampleValueLabel.font = NSFont.monospacedSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .regular)
-
-        // Free Transform numerics: the session's parameters, editable. Angle
-        // in degrees (clockwise), scales in percent, and the layer's own
-        // scaled pixel size — W/H write the scales through the base size.
-        let angleFormatter = NumberFormatter()
-        angleFormatter.numberStyle = .decimal
-        angleFormatter.usesGroupingSeparator = false
-        angleFormatter.maximumFractionDigits = 2
-        angleFormatter.minimum = -360
-        angleFormatter.maximum = 360
-        transformAngleField.formatter = angleFormatter
-        transformAngleField.controlSize = .small
-        transformAngleField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        transformAngleField.target = self
-        transformAngleField.action = #selector(transformAngleChanged(_:))
-        transformAngleField.widthAnchor.constraint(equalToConstant: 56).isActive = true
-
-        for field in [transformScaleXField, transformScaleYField] {
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .decimal
-            formatter.usesGroupingSeparator = false
-            formatter.maximumFractionDigits = 2
-            formatter.minimum = NSNumber(value: -Self.maxScalePercent)
-            formatter.maximum = NSNumber(value: Self.maxScalePercent)
-            field.formatter = formatter
-            field.controlSize = .small
-            field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-            field.target = self
-            field.widthAnchor.constraint(equalToConstant: 60).isActive = true
-        }
-        transformScaleXField.action = #selector(transformScaleXChanged(_:))
-        transformScaleYField.action = #selector(transformScaleYChanged(_:))
-
-        // W/H: the layer's OWN scaled dimensions (|scale| × base pixel
-        // size), not the rotated bounding box — that is what keeps them
-        // cleanly two-way bindable. Whole pixels; the scale clamp bounds
-        // them, so the formatter only rules out empty/zero/negative input.
-        for field in [transformSizeWField, transformSizeHField] {
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .decimal
-            formatter.usesGroupingSeparator = false
-            formatter.maximumFractionDigits = 0
-            formatter.minimum = 1
-            field.formatter = formatter
-            field.controlSize = .small
-            field.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-            field.target = self
-            field.widthAnchor.constraint(equalToConstant: 60).isActive = true
-        }
-        transformSizeWField.action = #selector(transformSizeWChanged(_:))
-        transformSizeHField.action = #selector(transformSizeHChanged(_:))
-
-        transformSamplerPopup.controlSize = .small
-        transformSamplerPopup.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-        transformSamplerPopup.addItems(withTitles: Self.transformSamplers.map { $0.title })
-        transformSamplerPopup.selectItem(at: Self.transformSamplerIndex(transformSampler))
-        transformSamplerPopup.target = self
-        transformSamplerPopup.action = #selector(transformSamplerChanged(_:))
-        transformSamplerPopup.widthAnchor.constraint(equalToConstant: 170).isActive = true
-
-        let controls: [NSView] = [
-            sizeLabel, sizeSlider, sizeField,
-            opacityLabel, opacitySlider, opacityValueLabel,
-            colorWell,
-            toleranceLabel, toleranceSlider, toleranceValueLabel, contiguousCheck,
-            gradientShapePopup, gradientEndLabel, gradientEndWell,
-            sampleSwatch, sampleValueLabel,
-            fontLabel, fontPopup, fontSizeField, alignmentControl,
-            transformAngleLabel, transformAngleField,
-            transformScaleXLabel, transformScaleXField,
-            transformScaleYLabel, transformScaleYField,
-            transformSizeLabel, transformSizeWField,
-            transformSizeHLabel, transformSizeHField,
-            transformSamplerLabel, transformSamplerPopup,
-        ]
-        for control in controls {
-            optionsBar.addArrangedSubview(control)
-        }
     }
 
     override func viewDidLoad() {
@@ -746,9 +731,22 @@ final class EditorViewController: NSViewController {
         center.addObserver(
             self, selector: #selector(imageDidChange(_:)),
             name: .imageDocumentImageDidChange, object: document)
+        // The view chrome is an APP-WIDE preference, so every open editor
+        // answers the change and not only the window that made it
+        // (EditorViewController+Rulers.swift).
+        center.addObserver(
+            self, selector: #selector(viewChromeDidChange(_:)),
+            name: .editorViewChromeDidChange, object: nil)
         updateStatus()
         updateActiveLayerRect()
         updateZoomLabel()
+        // A document arrives already carrying its guides and its ruler
+        // origin (they are .rz state), and the notification that refreshes
+        // both caches only fires on a CHANGE — so the first read has to
+        // happen here, or a file saved with guides would show none until
+        // something edited it.
+        refreshCanvasGuides()
+        refreshRulers()
     }
 
     override func viewDidAppear() {
@@ -769,65 +767,176 @@ final class EditorViewController: NSViewController {
     // MARK: - Tools
 
     func selectTool(_ tool: EditorTool) {
+        // A planned tool has no behavior yet; menu validation already
+        // disables its items, this backstops the rail and bare keys.
+        guard !tool.planned else {
+            NSSound.beep()
+            return
+        }
         // Switching tools leaves the transform session, which commits it
-        // rather than silently dropping the drag.
+        // rather than silently dropping the drag; leaving the crop tool
+        // quietly drops its (uncommitted) box.
         commitPendingTransform()
         if currentTool == .text, tool != .text {
             canvas.commitTextSession()
         }
+        if currentTool == .crop, tool != .crop {
+            endCropSession()
+        }
+        // Leaving a reopened shape commits it (the text session's rule);
+        // an untouched session commits nothing.
+        if shapeEditSession != nil, tool != currentTool {
+            commitShapeEditSession()
+        }
         currentTool = tool
         canvas.tool = tool
-        // Only brush and eraser edit masks; picking one of the other paint
-        // tools silently points the target back at the layer rather than
-        // blocking the tool or painting the wrong thing.
-        if tool == .fill || tool == .gradient || tool == .text {
-            setPaintTarget(.layer)
+        // Picking a tool that cannot reach the standing target silently
+        // points the target back at the layer rather than blocking the tool
+        // or painting the wrong thing — one rule
+        // (`toolReachableTarget`, EditorViewController+Channels), applied
+        // here on the tool edge and inside `setPaintTarget` on the target
+        // edge, so the two orders agree.
+        let reachable = toolReachableTarget(paintTarget)
+        if reachable != paintTarget {
+            setPaintTarget(reachable)
         }
+        if tool == .crop {
+            beginCropSession()
+        }
+        syncCanvasPaintState()
         updateOptionsBar()
         reflectSelectedTool(tool)
         updateStatus()
     }
 
-    // MARK: - Paint target (layer vs. its mask)
-
-    /// True when brush/eraser strokes should land on the active layer's
-    /// mask: the chosen target, confirmed against the live document.
-    private var paintsActiveMask: Bool {
-        guard paintTarget == .mask, let document = document, let doc = document.doc else {
-            return false
+    /// A bare tool key. A key shared by several tools (the shape group's R)
+    /// cycles them on repeated presses; a key owned by one tool just selects
+    /// it, exactly as before.
+    func selectToolForKey(_ tool: EditorTool) {
+        let peers = EditorTool.allCases.filter {
+            $0.keyCharacter == tool.keyCharacter && !$0.planned
         }
-        return doc.layerHasMask(document.activeLayerIndex)
+        guard let first = peers.first else {
+            NSSound.beep()
+            return
+        }
+        if let index = peers.firstIndex(of: currentTool), peers.count > 1 {
+            selectTool(peers[(index + 1) % peers.count])
+        } else {
+            selectTool(first)
+        }
     }
 
-    /// Points brush/eraser at the layer or at its mask (a mask target falls
-    /// back to the layer when there is no mask), and mirrors the choice into
-    /// the canvas and the layers panel's focus ring. An adjustment layer's
-    /// PIXEL target is never selectable — the compositor ignores its pixels
-    /// — so any request lands on the mask while one exists.
+    /// Pushes the options-store state the canvas consumes — the active
+    /// paint tool's size and opacity, the shared color, the selection
+    /// gesture options, the shape style, scrubby zoom — into the canvas.
+    func syncCanvasPaintState() {
+        let store = ToolOptionsStore.shared
+        canvas.paintColor = paintColor
+        if let paint = store.paintOptions(for: currentTool) {
+            canvas.brushSize = CGFloat(min(max(paint.size, 1), 200))
+            canvas.brushOpacity = CGFloat(min(max(paint.opacity, 0), 100) / 100)
+            canvas.brushHardness = CGFloat(min(max(paint.hardness, 0), 100) / 100)
+            canvas.brushFlow = CGFloat(min(max(paint.flow, 1), 100) / 100)
+            canvas.brushSpacingPercent = CGFloat(min(max(paint.spacing, 1), 200))
+            canvas.brushAngle = CGFloat(min(max(paint.angle, -180), 180))
+            canvas.brushRoundness = CGFloat(min(max(paint.roundness, 1), 100) / 100)
+            canvas.brushSmoothing = CGFloat(min(max(paint.smoothing, 0), 100) / 100)
+            canvas.brushPressureSize = paint.pressureSize
+            canvas.brushAirbrush = paint.airbrush
+            canvas.strokeAligned = currentTool == .heal && paint.aligned // heal-only option
+        }
+        let modes: [SelectionCombineMode] = [.replace, .add, .subtract, .intersect]
+        canvas.selectionCombineBase = modes[min(max(store.select.modeIndex, 0), 3)]
+        canvas.selectionFeather = max(store.select.feather, 0)
+        canvas.scrubbyZoom = store.view.scrubbyZoom
+        // The whole of this phase's view chrome as ONE value (Guides.swift
+        // says why it is one), built in ONE place — the grid's spacing is
+        // derived from the document as well as from the preferences, so
+        // `imageDidChange` refreshes it too. The snap engine is NOT pushed
+        // here: the canvas asks for it at each gesture's mouse-down instead
+        // (`onSnapEngine`, DragSnapping.swift).
+        refreshCanvasChrome()
+        syncCanvasShapeStyle()
+    }
+
+    /// Bare [ and ] on the canvas: steps the active paint tool's size and
+    /// mirrors it into the store, the canvas and the options bar.
+    func brushSizeKeyChanged(_ newSize: CGFloat) {
+        guard var paint = ToolOptionsStore.shared.paintOptions(for: currentTool) else { return }
+        paint.size = Double(newSize)
+        ToolOptionsStore.shared.setPaintOptions(paint, for: currentTool)
+        // Re-read rather than trusting `newSize`: the store floors each tool's
+        // size at what that tool can actually do something with, and stepping
+        // a healing brush below three must show the size that was stored.
+        syncCanvasPaintState()
+        optionsBar.refreshValues()
+    }
+
+    // MARK: - Paint target (layer, its mask, a colour plane, a channel)
+
+    /// Points every edit at the layer, its mask, one of its colour planes or
+    /// one of the document's alpha channels (a mask target falls back to the
+    /// layer when there is no mask, a channel target when the channel has
+    /// gone), and mirrors the choice into the canvas, both panels and the
+    /// document's own filter/adjustment hook.
+    ///
+    /// An adjustment layer's PIXEL target is never selectable — the
+    /// compositor ignores its pixels — so a `.layer` or `.plane` request
+    /// lands on the mask while one exists. A `.channel` request is document
+    /// state and is deliberately left alone.
+    ///
+    /// A target the current tool cannot reach lands on the layer first
+    /// (`toolReachableTarget`): this is the ONE writer of `paintTarget`, so
+    /// coercing here is what makes "pick the Red row, then the Clone Stamp"
+    /// and "pick the Clone Stamp, then the Red row" end in the same state.
     func setPaintTarget(_ target: PaintTarget) {
         let idx = document?.activeLayerIndex ?? 0
-        var target = target
-        if document?.doc?.layerIsAdjustment(idx) == true,
+        var target = toolReachableTarget(target)
+        if !target.isChannel,
+           document?.doc?.layerIsAdjustment(idx) == true,
            document?.doc?.layerHasMask(idx) == true {
             target = .mask
         }
         if target == .mask, document?.doc?.layerHasMask(idx) != true {
             target = .layer
         }
+        target = channelTargetClamped(target)
         let changed = target != paintTarget
         paintTarget = target
+        // The identity of the channel just chosen, so a later renumbering can
+        // find it again (channelTargetResolved). Recorded here rather than at
+        // every call site because this is the ONE writer of paintTarget.
+        paintTargetChannelID = channelIdentity(of: target)
         paintTargetLayer = idx
-        canvas.paintsMask = target == .mask
+        canvas.paintTarget = target
         layersPanel?.setPaintTarget(target)
-        if changed { updateStatus() }
+        channelsPanel?.setPaintTarget(target)
+        document?.planeEditTarget = target
+        if changed {
+            updateStatus()
+            refreshChannelDisplay()
+        }
     }
 
-    /// Drops a mask target that no longer applies — the active layer changed
-    /// underneath it, or its mask was deleted, applied, or undone away — and
-    /// forces the mask target whenever the active layer is an adjustment
-    /// layer (its pixels are pointless to paint).
-    private func syncPaintTarget() {
+    /// Drops a target that no longer applies — the active layer changed
+    /// underneath a mask target, its mask was deleted, applied, or undone
+    /// away, or a channel has gone — and forces the mask target whenever the
+    /// active layer is an adjustment layer (its pixels are pointless to
+    /// paint). A colour plane survives a layer change: planes always exist,
+    /// and painting Red on another layer is meaningful.
+    func syncPaintTarget() {
         let idx = document?.activeLayerIndex ?? 0
+        // A CHANNEL is document state and survives any layer change; it only
+        // goes away when the channel itself does — but the list renumbers
+        // under it, so the index is re-found by identity, never range-checked
+        // in place.
+        if case .channel = paintTarget {
+            paintTargetLayer = idx
+            let resolved = channelTargetResolved()
+            if resolved != paintTarget { setPaintTarget(resolved) }
+            return
+        }
         if document?.doc?.layerIsAdjustment(idx) == true,
            document?.doc?.layerHasMask(idx) == true {
             setPaintTarget(.mask)
@@ -842,11 +951,11 @@ final class EditorViewController: NSViewController {
         }
     }
 
-    /// Mirrors tool selection into the toolbar pill (display only). A
-    /// grouped segment also starts standing for this tool, so the group
-    /// remembers what was last used in it.
+    /// Mirrors tool selection into the rail (display only). A grouped slot
+    /// also starts standing for this tool, so the group remembers what was
+    /// last used in it.
     func reflectSelectedTool(_ tool: EditorTool) {
-        toolPill?.setSelectedTool(tool)
+        toolRail?.setSelectedTool(tool)
     }
 
     @objc func selectSelectTool(_ sender: Any?) { selectTool(.select) }
@@ -861,56 +970,25 @@ final class EditorViewController: NSViewController {
     @objc func selectGradientTool(_ sender: Any?) { selectTool(.gradient) }
     @objc func selectTextTool(_ sender: Any?) { selectTool(.text) }
     @objc func selectEyedropperTool(_ sender: Any?) { selectTool(.eyedropper) }
+    @objc func selectCropTool(_ sender: Any?) { selectTool(.crop) }
+    @objc func selectCloneTool(_ sender: Any?) { selectTool(.clone) }
+    @objc func selectDodgeTool(_ sender: Any?) { selectTool(.dodge) }
+    @objc func selectHealTool(_ sender: Any?) { selectTool(.heal) }
+    @objc func selectSpotHealTool(_ sender: Any?) { selectTool(.spotHeal) }
+    @objc func selectPatchTool(_ sender: Any?) { selectTool(.patch) }
+    @objc func selectRedEyeTool(_ sender: Any?) { selectTool(.redEye) }
+    @objc func selectShapeRectTool(_ sender: Any?) { selectTool(.shapeRect) }
+    @objc func selectShapeEllipseTool(_ sender: Any?) { selectTool(.shapeEllipse) }
+    @objc func selectShapeLineTool(_ sender: Any?) { selectTool(.shapeLine) }
+    @objc func selectZoomTool(_ sender: Any?) { selectTool(.zoom) }
+    @objc func selectHandTool(_ sender: Any?) { selectTool(.hand) }
 
-    private func updateOptionsBar() {
-        // A Free Transform session takes the whole bar over: it is modal on
-        // the canvas, so the active tool's own options cannot be used.
-        let transforming = isTransforming
-        let tool = currentTool
-        let paintTool = !transforming && (tool == .brush || tool == .eraser)
-        let toleranceTool = !transforming && (tool == .wand || tool == .fill)
-        for control in [sizeLabel, sizeSlider, sizeField] as [NSView] {
-            control.isHidden = !paintTool
-        }
-        for control in [opacityLabel, opacitySlider, opacityValueLabel] as [NSView] {
-            control.isHidden = !paintTool
-        }
-        colorWell.isHidden = transforming
-            || !(tool == .brush || tool == .text || tool == .fill || tool == .gradient)
-        let textTool = !transforming && tool == .text
-        fontLabel.isHidden = !textTool
-        fontPopup.isHidden = !textTool
-        fontSizeField.isHidden = !textTool
-        alignmentControl.isHidden = !textTool
-        for control in [toleranceLabel, toleranceSlider, toleranceValueLabel] as [NSView] {
-            control.isHidden = !toleranceTool
-        }
-        contiguousCheck.isHidden = !toleranceTool
-        let gradientTool = !transforming && tool == .gradient
-        gradientShapePopup.isHidden = !gradientTool
-        gradientEndLabel.isHidden = !gradientTool
-        gradientEndWell.isHidden = !gradientTool
-        let eyedropperTool = !transforming && tool == .eyedropper
-        sampleSwatch.isHidden = !eyedropperTool
-        sampleValueLabel.isHidden = !eyedropperTool
-        for control in [
-            transformAngleLabel, transformAngleField, transformScaleXLabel, transformScaleXField,
-            transformScaleYLabel, transformScaleYField, transformSizeLabel, transformSizeWField,
-            transformSizeHLabel, transformSizeHField, transformSamplerLabel, transformSamplerPopup,
-        ] as [NSView] {
-            control.isHidden = !transforming
-        }
-
-        // Tools with nothing to configure hide the bar rather than show an
-        // empty one. Subject select is deliberately among them: the whole
-        // point of it is that there is no tolerance to tune.
-        let barHidden = !transforming
-            && (tool == .select || tool == .ellipseSelect || tool == .lasso || tool == .move
-                || tool == .subject)
-        optionsBar.isHidden = barHidden
-        scrollTopToRoot.isActive = false
-        scrollTopToOptions.isActive = false
-        (barHidden ? scrollTopToRoot : scrollTopToOptions).isActive = true
+    /// Rebuilds the fixed-height options bar for the current state. The
+    /// descriptor lists live in EditorViewController+ToolOptions.swift; a
+    /// Free Transform session takes the whole bar over (it is modal on the
+    /// canvas, so the active tool's own options cannot be used).
+    func updateOptionsBar() {
+        presentToolOptions()
     }
 
     // MARK: - Agent access to the selection
@@ -924,34 +1002,37 @@ final class EditorViewController: NSViewController {
 
     // MARK: - Wand, fill, gradient actions
 
-    @objc private func toleranceChanged(_ sender: Any?) {
-        tolerance = Int(toleranceSlider.doubleValue.rounded())
-        toleranceValueLabel.stringValue = "\(tolerance)"
-    }
-
-    private var contiguous: Bool { contiguousCheck.state == .on }
-
-    /// sRGB bytes of a color (straight alpha).
-    private func colorBytes(_ color: NSColor) -> [UInt8] {
-        let c = color.usingColorSpace(.sRGB) ?? .black
-        return [
-            UInt8((c.redComponent * 255).rounded()),
-            UInt8((c.greenComponent * 255).rounded()),
-            UInt8((c.blueComponent * 255).rounded()),
-            UInt8((c.alphaComponent * 255).rounded()),
-        ]
+    /// The DOCUMENT's bytes of a color (straight alpha): an AUTHORED colour
+    /// converts into the document's space exactly once, here, and a colour
+    /// SAMPLED from the document is already in that space and passes through
+    /// untouched — which is what makes Fill, Gradient and Plane Paint agree
+    /// with the Brush, and the eyedropper round trip exact (ColorProfile).
+    /// Internal, like the panels above: EditorViewController+PlanePaint
+    /// builds a plane fill's gray with it.
+    func colorBytes(_ color: NSColor) -> [UInt8] {
+        // The conversion itself is `ColorProfile.bytes`, shared with the
+        // agent's `colorRGBA`, so the tools and their MCP mirrors cannot
+        // drift. Opaque black is the same refusal the old `?? .black` gave.
+        ColorProfile.bytes(color, in: document?.nsColorSpace ?? .sRGB) ?? [0, 0, 0, 255]
     }
 
     private func wandClicked(_ point: CGPoint, mode: SelectionCombineMode) {
+        let options = ToolOptionsStore.shared.select
         guard let doc = document?.doc,
             let mask = doc.magicWand(
-                x: Int(point.x), y: Int(point.y), tolerance: tolerance,
-                contiguous: contiguous),
-            let selection = CanvasSelection(
+                x: Int(point.x), y: Int(point.y),
+                tolerance: Int(options.tolerance.rounded()),
+                contiguous: options.contiguous),
+            var selection = CanvasSelection(
                 shape: .mask(mask), canvasWidth: doc.width, canvasHeight: doc.height)
         else {
             NSSound.beep()
             return
+        }
+        // The bar's Feather applies here too — the wand commits outside the
+        // canvas's commitSelection, so it feathers its own result.
+        if options.feather > 0, let feathered = selection.feathered(by: options.feather) {
+            selection = feathered
         }
         // An all-zero combination comes back nil and deselects.
         canvas.setSelection(CanvasSelection.combine(canvas.selection, with: selection, mode: mode))
@@ -959,18 +1040,33 @@ final class EditorViewController: NSViewController {
 
     private func fillClicked(_ point: CGPoint) {
         guard let document = document else { return }
+        // A colour plane or a channel fills through the plane round trip.
+        // Deliberately NOT `isCoverage`: a `.mask` target with the fill tool
+        // active is reachable (selectTool only resets on a TOOL change, so
+        // the user can pick fill and then click the mask well) and must keep
+        // filling the layer's pixels exactly as today.
+        if paintTarget.targetsPlaneOrChannel {
+            fillPlane(at: point)
+            return
+        }
         // A canvas click can't be blocked by menu validation: refuse a fill
-        // aimed at an adjustment layer's (ignored) pixels with the alert.
-        guard !refuseAdjustmentPixelEdit() else { return }
+        // aimed at an adjustment layer's (ignored) pixels — or at a LOCKED
+        // layer — with the alert that names the reason.
+        guard !refuseAdjustmentPixelEdit(), !refuseGroupPixelEdit() else { return }
+        guard !refuseLockedEdit(layer: document.activeLayerIndex, kind: RZ_EDIT_PIXELS)
+        else { return }
+        let options = ToolOptionsStore.shared.fill
         let idx = document.activeLayerIndex
-        let rgba = colorBytes(paintColor)
+        // The bar's opacity rides in the fill color's own alpha.
+        let opacity = min(max(options.opacity, 0), 100) / 100
+        let rgba = colorBytes(paintColor.withAlphaComponent(
+            paintColor.alphaComponent * CGFloat(opacity)))
         let mask = canvas.selection?.maskBytes()
-        let tolerance = tolerance
-        let contiguous = contiguous
         document.applyRasterizingEdit("Fill", layer: idx) { doc in
             doc.bucketFilled(
-                idx, x: Int(point.x), y: Int(point.y), tolerance: tolerance,
-                rgba: rgba, contiguous: contiguous, mask: mask)
+                idx, x: Int(point.x), y: Int(point.y),
+                tolerance: Int(options.tolerance.rounded()),
+                rgba: rgba, contiguous: options.contiguous, mask: mask)
         }
     }
 
@@ -982,239 +1078,86 @@ final class EditorViewController: NSViewController {
     /// step, no change counting.
     private func sampleColor(at point: CGPoint) {
         guard let document = document,
-              let projection = document.projection ?? document.doc?.flattened(),
-              let sample = projection.pixelRGBA(
-                x: Int(floor(point.x)), y: Int(floor(point.y)))
+              let projection = document.projection ?? document.doc?.flattened()
         else { return }
+        let options = ToolOptionsStore.shared.sample
+        // Sample size: a point, or the plain mean of the 3×3 / 5×5 window
+        // (out-of-bounds pixels just drop out of the mean).
+        let reach = [0, 1, 2][min(max(options.sampleSizeIndex, 0), 2)]
+        // The core's sampler (rz_image_sample), which the Info panel and
+        // sample_pixel read through too: the plain truncating mean of the
+        // block with out-of-bounds pixels dropped, and a CENTRE that may
+        // itself be outside — a sample at the canvas edge stays a sample
+        // rather than an edge pin, exactly as it has always behaved here.
+        guard let sample = projection.sample(
+            x: Int(floor(point.x)), y: Int(floor(point.y)), reach: reach)
+        else { return }
+        // The pixel's numbers are the DOCUMENT's, so the swatch is built in
+        // the document's space and converted nowhere: the hex readout reports
+        // what the pixel actually holds, and painting it back is a no-op.
         setPaintColor(NSColor(
-            srgbRed: CGFloat(sample.r) / 255, green: CGFloat(sample.g) / 255,
-            blue: CGFloat(sample.b) / 255, alpha: CGFloat(sample.a) / 255))
-        sampleSwatch.fillColor = paintColor
-        sampleValueLabel.stringValue =
-            "\(RasterImage.hexString(sample))  \(sample.r) \(sample.g) \(sample.b) \(sample.a)"
+            colorSpace: document.nsColorSpace,
+            components: [
+                CGFloat(sample.r) / 255, CGFloat(sample.g) / 255,
+                CGFloat(sample.b) / 255, CGFloat(sample.a) / 255,
+            ],
+            count: 4))
+        lastSampleColor = paintColor
+        lastSampleText = RasterImage.hexString(sample)
+        if options.copyOnPick {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(lastSampleText, forType: .string)
+        }
+        optionsBar.refreshValues()
     }
 
     private func gradientCommitted(_ a: CGPoint, _ b: CGPoint) {
         guard let document = document else { return }
+        // Same plane redirect as fillClicked, and for the same reason a
+        // `.mask` target is deliberately excluded.
+        if paintTarget.targetsPlaneOrChannel {
+            gradientPlane(from: a, to: b)
+            return
+        }
         // Same rule as fillClicked: a gradient drag ends on the canvas,
         // outside menu validation's reach.
-        guard !refuseAdjustmentPixelEdit() else { return }
+        guard !refuseAdjustmentPixelEdit(), !refuseGroupPixelEdit() else { return }
+        guard !refuseLockedEdit(layer: document.activeLayerIndex, kind: RZ_EDIT_PIXELS)
+        else { return }
+        let options = ToolOptionsStore.shared.gradient
         let idx = document.activeLayerIndex
-        let start = colorBytes(paintColor)
-        let end = colorBytes(gradientEndWell.color)
+        // Foreground → background (the rail's swatches); Reverse swaps them
+        // and the bar's opacity rides in both colors' alpha.
+        let opacity = CGFloat(min(max(options.opacity, 0), 100) / 100)
+        let fade: (NSColor) -> [UInt8] = { [weak self] color in
+            self?.colorBytes(color.withAlphaComponent(color.alphaComponent * opacity))
+                ?? [0, 0, 0, 0]
+        }
+        let start = fade(options.reverse ? backgroundColor : paintColor)
+        let end = fade(options.reverse ? paintColor : backgroundColor)
         let kind: RzGradientKind =
-            gradientShapePopup.indexOfSelectedItem == 1
-            ? RZ_GRADIENT_RADIAL : RZ_GRADIENT_LINEAR
+            options.typeIndex == 1 ? RZ_GRADIENT_RADIAL : RZ_GRADIENT_LINEAR
         let mask = canvas.selection?.maskBytes()
         document.applyRasterizingEdit("Gradient", layer: idx) { doc in
             doc.gradiented(idx, from: a, to: b, start: start, end: end, kind: kind, mask: mask)
         }
     }
 
-    private func currentFont() -> NSFont {
-        NSFontManager.shared.font(withFamily: fontFamily, traits: [], weight: 5, size: fontSize)
-            ?? .systemFont(ofSize: fontSize)
-    }
-
-    // MARK: - Text layers
-
-    /// A text-tool click: re-open the topmost VISIBLE text layer under the
-    /// point, or start a new text entry there.
-    private func textClicked(_ point: CGPoint) {
-        guard let doc = document?.doc, let idx = topmostTextLayer(at: point, in: doc) else {
-            canvas.beginTextSession(at: point)
-            return
-        }
-        // A click puts the caret where it landed, so nothing is preselected.
-        openTextSession(layer: idx, selectAll: false)
-    }
-
-    /// Double-clicking a TEXT layer in the layers panel: switch to the text
-    /// tool and reopen the layer's description with the whole string
-    /// selected, so typing replaces it and the options bar exposes the font,
-    /// size, color and alignment. The layer needn't be under the cursor or
-    /// even visible — the panel already said which one.
-    func editTextLayer(_ idx: Int) {
-        guard let doc = document?.doc, doc.textPayload(idx) != nil else {
-            NSSound.beep()
-            return
-        }
-        // A click that ends an open session only ends it — the rule the
-        // canvas follows too — because committing may insert a layer and
-        // renumber everything above it, `idx` included.
-        if canvas.hasActiveTextSession {
-            canvas.commitTextSession()
-            return
-        }
-        // The session belongs to the text tool; entering it also drops any
-        // mask paint target and swaps the options bar over.
-        selectTool(.text)
-        openTextSession(layer: idx, selectAll: true)
-    }
-
-    /// Opens the on-canvas editor on text layer `idx`, restoring its
-    /// description into the options bar and the session. Shared by the
-    /// text-tool click and the layers panel's double-click.
-    private func openTextSession(layer idx: Int, selectAll: Bool) {
-        guard let document = document, let doc = document.doc,
-              let info = doc.layerInfo(idx), let payload = doc.textPayload(idx)
-        else {
-            NSSound.beep()
-            return
-        }
-        // Editing a layer makes it the active one (the commit replaces its
-        // content, and the panel should show what is being edited).
-        if document.activeLayerIndex != idx {
-            document.activeLayerIndex = idx
-            syncPaintTarget()
-            layersPanel.reload()
-            updateStatus()
-            updateActiveLayerRect()
-        }
-        // The options bar reflects what is being edited, and the session
-        // draws with those very parameters.
-        applyTextOptions(payload)
-        // Hide the layer's own raster underneath the session, or the old
-        // glyphs ghost behind every edit to the string. An already-hidden
-        // layer has nothing to hide: the pure op returns nil and the session
-        // runs over the unmodified canvas, which is correct.
-        canvas.previewImage = doc.withLayerVisible(idx, false)?.flattened()?.makeCGImage()
-        canvas.beginTextSession(
-            at: TextLayer.editorOrigin(
-                offsetX: info.offsetX, offsetY: info.offsetY, payload: payload),
-            string: payload.string, editingLayer: idx, selectAll: selectAll)
-    }
-
-    /// The topmost visible layer that carries a text description and whose
-    /// extent contains `point` (image pixel coordinates). Plain raster layers
-    /// above it do not block the hit.
-    private func topmostTextLayer(at point: CGPoint, in doc: RasterDocument) -> Int? {
-        for idx in stride(from: doc.layerCount - 1, through: 0, by: -1) {
-            guard let info = doc.layerInfo(idx), info.visible else { continue }
-            let rect = CGRect(
-                x: CGFloat(info.offsetX), y: CGFloat(info.offsetY),
-                width: CGFloat(info.width), height: CGFloat(info.height))
-            guard rect.contains(point), doc.textPayload(idx) != nil else { continue }
-            return idx
-        }
-        return nil
-    }
-
-    /// Restores a layer's text parameters into the options bar and the
-    /// canvas. The session deliberately draws with the description's OWN
-    /// face, so a family that is not installed here still previews exactly
-    /// what the re-render will produce.
-    private func applyTextOptions(_ payload: TextLayerPayload) {
-        let font = payload.nsFont
-        if let family = font.familyName, fontPopup.itemTitles.contains(family) {
-            fontFamily = family
-            fontPopup.selectItem(withTitle: family)
-        }
-        fontSize = min(max(font.pointSize, 6), 500)
-        fontSizeField.integerValue = Int(fontSize.rounded())
-        paintColor = payload.nsColor
-        colorWell.color = paintColor
-        textAlignment = payload.nsAlignment
-        alignmentControl.selectedSegment = Self.alignmentIndex(textAlignment)
-        canvas.textFont = font
-        canvas.paintColor = paintColor
-        canvas.textAlignment = textAlignment
-    }
-
-    /// Commits a text session: a NEW text layer above the active one, or the
-    /// re-render of the layer the session was editing. Both chain their
-    /// per-layer ops into a single document handle, so each is one undo step.
-    private func commitTextLayer(
-        _ payload: TextLayerPayload, origin: CGPoint, wrapWidth: CGFloat, editing: Int?
-    ) {
-        guard let document = document, let doc = document.doc,
-              let raster = TextLayer.render(payload, origin: origin, wrapWidth: wrapWidth),
-              let meta = payload.json()
-        else {
-            NSSound.beep()
-            return
-        }
-        let name = TextLayer.layerName(for: payload.string)
-
-        if let idx = editing, let info = doc.layerInfo(idx), let old = doc.textPayload(idx) {
-            // Opening a text layer and closing it unchanged (⌘Return, or a
-            // tool switch) must not register an undo step or dirty the file.
-            guard old != payload || info.offsetX != raster.offsetX
-                || info.offsetY != raster.offsetY || info.width != raster.width
-                || info.height != raster.height
-            else { return }
-            // The name follows the text only while it still IS the text: a
-            // name the user typed themselves survives the re-edit.
-            let nameFollowsText = info.name == TextLayer.layerName(for: old.string)
-            document.applyEdit("Edit Text Layer") { doc in
-                guard let filled = doc.withLayerPixels(
-                        idx, rgba: raster.pixels, width: raster.width, height: raster.height),
-                      let moved = filled.withLayerOffset(idx, raster.offsetX, raster.offsetY),
-                      let described = moved.withLayerMeta(idx, meta)
-                else { return nil }
-                guard nameFollowsText else { return described }
-                return described.withLayerName(idx, name) ?? described
-            }
-            // The active layer is unchanged, so the change notification alone
-            // refreshes the panel, the status bar and the layer boundary.
-            return
-        }
-
-        let below = document.activeLayerIndex
-        let before = document.doc
-        document.applyEdit("Add Text Layer") { doc in
-            // The core has no "layer from a buffer" constructor: add an empty
-            // layer, then give it the rendered pixels, its offset and its
-            // description — all pure, all in one handle.
-            let idx = below + 1
-            guard let added = doc.addingLayer(above: below, name: name),
-                  let filled = added.withLayerPixels(
-                    idx, rgba: raster.pixels, width: raster.width, height: raster.height),
-                  let moved = filled.withLayerOffset(idx, raster.offsetX, raster.offsetY)
-            else { return nil }
-            return moved.withLayerMeta(idx, meta)
-        }
-        guard document.doc !== before else { return }
-        // The active layer moves to the new text layer; any mask paint target
-        // goes with it.
-        setActiveLayer(min(below + 1, document.doc.layerCount - 1))
-    }
-
     // MARK: - Free Transform
-
-    /// A modal free-transform session on ONE layer. The document is NOT
-    /// touched while it runs: the canvas draws the layer's cached pixels
-    /// through the composed matrix, and the core resamples exactly once, at
-    /// commit. The parameters (see LayerTransform) are the source of truth —
-    /// handle drags and the options-bar numerics are two ways of writing
-    /// them, and the matrix is always composed, never decomposed.
-    private struct TransformSession {
-        /// The layer being transformed; the session outlives changes to the
-        /// document's active layer, so it carries its own index.
-        let layer: Int
-        /// The layer's canvas rect when the session opened.
-        let sourceRect: CGRect
-        let layerImage: CGImage?
-        let maskImage: CGImage?
-        let below: CGImage?
-        let above: CGImage?
-        let opacity: CGFloat
-        var transform: LayerTransform
-        var sampler: RzResizeFilter
-        var drag: TransformDrag?
-    }
 
     /// What the current mouse drag does, captured at mouse-down together
     /// with the parameters it started from: every tick recomputes from that
     /// snapshot, so a drag never accumulates rounding error.
-    private enum TransformDrag {
+    enum TransformDrag {
         case move(start: LayerTransform, grab: CGPoint)
         case scale(handle: TransformHandle, start: LayerTransform)
         case rotate(start: LayerTransform, grab: CGPoint)
+        case distort(corner: Int, start: LayerTransform)
     }
 
     /// Samplers offered for the commit-time resample, in popup order.
-    private static let transformSamplers: [(title: String, value: RzResizeFilter)] = [
+    /// Internal: the +ToolOptions descriptors list the titles.
+    static let transformSamplers: [(title: String, value: RzResizeFilter)] = [
         ("Nearest", RZ_FILTER_NEAREST),
         ("Bilinear", RZ_FILTER_BILINEAR),
         ("Bicubic (Catmull-Rom)", RZ_FILTER_CATMULL_ROM),
@@ -1223,7 +1166,7 @@ final class EditorViewController: NSViewController {
 
     /// Widest scale the numeric fields accept, mirroring
     /// LayerTransform.maxScaleMagnitude.
-    private static let maxScalePercent = Double(LayerTransform.maxScaleMagnitude) * 100
+    static let maxScalePercent = Double(LayerTransform.maxScaleMagnitude) * 100
 
     /// How far from a corner (SCREEN points) the rotation ring reaches. The
     /// handles are tested first, so the ring is what is left of this radius
@@ -1245,33 +1188,25 @@ final class EditorViewController: NSViewController {
         }
         // Never leave a text session hanging underneath the box.
         canvas.commitTextSession()
-        let idx = document.activeLayerIndex
-        guard let doc = document.doc, let info = doc.layerInfo(idx),
-              info.width > 0, info.height > 0
-        else {
+        // A transform is a POSITION edit, never a Pixels one: it resamples
+        // the whole buffer including its alpha, so a frozen alpha channel
+        // has no meaning there (doc_lock.rs). A transparency-locked layer
+        // therefore still transforms; a position-locked one does not.
+        guard let doc = document.doc else {
             NSSound.beep()
             return
         }
-        let rect = CGRect(
-            x: CGFloat(info.offsetX), y: CGFloat(info.offsetY),
-            width: CGFloat(info.width), height: CGFloat(info.height))
-        let stack = transformStackComposites(doc, around: idx)
-        transformSession = TransformSession(
-            layer: idx,
-            sourceRect: rect,
-            // A hidden layer still transforms; there are simply no pixels to
-            // preview, only the box.
-            layerImage: info.visible ? doc.layerImage(idx)?.makeCGImage() : nil,
-            // Layer pixels come back UNMASKED, so an enabled mask has to
-            // clip the preview the way the projection would.
-            maskImage: doc.layerMaskEnabled(idx)
-                ? doc.layerMaskImage(idx).flatMap(Self.grayMaskImage) : nil,
-            below: stack.below,
-            above: stack.above,
-            opacity: CGFloat(info.opacity),
-            transform: LayerTransform(pivot: CGPoint(x: rect.midX, y: rect.midY)),
-            sampler: transformSampler,
-            drag: nil)
+        // Over the EXPANDED set (MultiLayerEdit.swift), so a position-locked
+        // LINKED partner or group descendant is named here rather than at the
+        // commit.
+        guard !refuseLockedEdit(
+            layers: doc.movingSet(document.selectedLayerIndices), kind: RZ_EDIT_POSITION)
+        else { return }
+        guard let session = makeTransformSession(doc, sampler: transformSampler) else {
+            NSSound.beep()
+            return
+        }
+        transformSession = session
         updateOptionsBar()
         refreshTransformPreview()
         updateTransformFields()
@@ -1279,103 +1214,34 @@ final class EditorViewController: NSViewController {
         view.window?.makeFirstResponder(canvas)
     }
 
-    /// A mask image (opaque RGBA grayscale, the layer's size) redrawn into a
-    /// DeviceGray bitmap, which is the only form CGContext.clip(to:mask:)
-    /// accepts. White shows and black hides, matching the core's coverage.
-    private static func grayMaskImage(_ mask: RasterImage) -> CGImage? {
-        guard let source = mask.makeCGImage(), source.width > 0, source.height > 0,
-              let context = CGContext(
-                data: nil, width: source.width, height: source.height,
-                bitsPerComponent: 8, bytesPerRow: source.width,
-                space: CGColorSpaceCreateDeviceGray(),
-                bitmapInfo: CGImageAlphaInfo.none.rawValue)
-        else { return nil }
-        context.draw(
-            source, in: CGRect(x: 0, y: 0, width: source.width, height: source.height))
-        return context.makeImage()
-    }
-
-    /// The two composites the preview draws the transformed layer between:
-    /// the stack below it and the stack above it. Built once per session, so
-    /// the drag itself never calls the core.
-    private func transformStackComposites(_ doc: RasterDocument, around idx: Int)
-        -> (below: CGImage?, above: CGImage?)
-    {
-        var belowDoc: RasterDocument? = doc
-        for layer in idx..<doc.layerCount {
-            belowDoc = belowDoc?.withLayerVisible(layer, false)
-        }
-        var aboveDoc: RasterDocument? = doc
-        for layer in 0...idx {
-            aboveDoc = aboveDoc?.withLayerVisible(layer, false)
-        }
-        return (
-            belowDoc?.flattened()?.makeCGImage(),
-            idx >= doc.layerCount - 1 ? nil : aboveDoc?.flattened()?.makeCGImage())
-    }
-
-    /// Pushes the session's current matrix (and the box derived from it) to
-    /// the canvas. Cheap enough to run on every drag tick.
-    private func refreshTransformPreview() {
-        guard let session = transformSession else {
-            canvas.transformPreview = nil
-            return
-        }
-        let matrix = session.transform.matrix
-        canvas.transformPreview = ImageCanvasView.TransformPreview(
-            below: session.below,
-            above: session.above,
-            layer: session.layerImage,
-            mask: session.maskImage,
-            sourceRect: session.sourceRect,
-            matrix: matrix,
-            opacity: session.opacity,
-            quad: matrix.quad(of: session.sourceRect),
-            pivot: session.transform.pivotInCanvas,
-            interpolate: session.sampler != RZ_FILTER_NEAREST)
-    }
-
-    /// The parameters → fields half of the binding (the fields' actions are
-    /// the other half). W/H are the layer's own scaled dimensions (|scale| ×
-    /// base pixel size, whole pixels) — not the rotated bounding box — so
-    /// they read straight off the scales without decomposing anything.
+    /// The parameters → controls half of the binding (the descriptors'
+    /// setters are the other half): the bar re-reads every binding.
     private func updateTransformFields() {
-        guard let session = transformSession else { return }
-        transformAngleField.stringValue = Self.transformNumber(session.transform.degrees)
-        transformScaleXField.stringValue = Self.transformNumber(
-            Double(session.transform.scaleX) * 100)
-        transformScaleYField.stringValue = Self.transformNumber(
-            Double(session.transform.scaleY) * 100)
-        transformSizeWField.stringValue = String(
-            Int((abs(session.transform.scaleX) * session.sourceRect.width).rounded()))
-        transformSizeHField.stringValue = String(
-            Int((abs(session.transform.scaleY) * session.sourceRect.height).rounded()))
-        transformSamplerPopup.selectItem(at: Self.transformSamplerIndex(session.sampler))
-    }
-
-    /// Two decimals with trailing zeros dropped: "45", "-12.5", "133.33".
-    private static func transformNumber(_ value: Double) -> String {
-        let rounded = (value * 100).rounded() / 100
-        guard rounded != rounded.rounded() else { return String(Int(rounded)) }
-        return String(format: "%.2f", rounded)
+        optionsBar.refreshValues()
     }
 
     // MARK: Free Transform gestures
 
-    /// What a press at `point` grabs: a handle (scale), the ring just
+    /// What a press at `point` grabs: a handle (⌘ on a corner pulls that
+    /// corner alone — distort/perspective — otherwise scale), the ring just
     /// outside a corner (rotate), or the body (move). A press beyond all of
     /// them does nothing — clicking away must not silently commit.
-    private func transformDrag(at point: CGPoint, session: TransformSession) -> TransformDrag? {
+    private func transformDrag(
+        at point: CGPoint, session: TransformSession, modifiers: NSEvent.ModifierFlags
+    ) -> TransformDrag? {
         let scale = canvas.magnification
-        let matrix = session.transform.matrix
         let slop = ImageCanvasView.transformHandleSize / scale
         for handle in TransformHandle.allCases {
-            let world = handle.point(in: session.sourceRect).applying(matrix)
+            let world = session.transform.warpedHandlePoint(handle, of: session.sourceRect)
             if abs(point.x - world.x) <= slop, abs(point.y - world.y) <= slop {
+                if modifiers.contains(.command), handle.isCorner,
+                   let corner = handle.quadCorners.first {
+                    return .distort(corner: corner, start: session.transform)
+                }
                 return .scale(handle: handle, start: session.transform)
             }
         }
-        let corners = matrix.quad(of: session.sourceRect)
+        let corners = session.transform.warpedQuad(of: session.sourceRect)
         guard corners.count == 4 else { return nil }
         let box = NSBezierPath()
         box.move(to: corners[0])
@@ -1395,7 +1261,7 @@ final class EditorViewController: NSViewController {
 
     private func transformMouseDown(_ point: CGPoint, _ modifiers: NSEvent.ModifierFlags) {
         guard let session = transformSession else { return }
-        transformSession?.drag = transformDrag(at: point, session: session)
+        transformSession?.drag = transformDrag(at: point, session: session, modifiers: modifiers)
     }
 
     private func transformMouseDragged(_ point: CGPoint, _ modifiers: NSEvent.ModifierFlags) {
@@ -1415,9 +1281,17 @@ final class EditorViewController: NSViewController {
         case let .rotate(start, grab):
             updated = LayerTransform.rotating(
                 start, from: grab, to: point, snap: proportional)
+        case let .distort(corner, start):
+            updated = LayerTransform.distorting(
+                start, corner: corner, to: point, in: session.sourceRect)
         }
-        guard updated.isFinite else { return }
-        transformSession?.transform = updated
+        // ONE snap for all four drag kinds, restricted per kind in
+        // DragSnapping.swift — a rotated, warped or ⇧-constrained handle
+        // cannot reach an arbitrary point, so it does not snap at all.
+        let snapped = snapTransform(
+            updated, drag: drag, session: session, modifiers: modifiers)
+        guard snapped.isFinite else { return }
+        transformSession?.transform = snapped
         refreshTransformPreview()
         updateTransformFields()
     }
@@ -1431,77 +1305,93 @@ final class EditorViewController: NSViewController {
         updateTransformFields()
     }
 
-    // MARK: Free Transform options bar
+    // MARK: Free Transform options bar (descriptor bindings)
 
-    @objc private func transformAngleChanged(_ sender: Any?) {
-        guard transformSession != nil else { return }
-        transformSession?.transform.degrees = min(
-            max(transformAngleField.doubleValue, -360), 360)
-        refreshTransformPreview()
-        updateTransformFields()
+    // The session and its struct stay private; the +ToolOptions descriptors
+    // read and write the parameters through these. Every setter re-renders
+    // the preview and lets the bar re-read the whole set, so W tracks a
+    // scale edit and vice versa. W = |scaleX| × base width, so typing W
+    // sets scaleX = W / base width — preserving the current sign, so a
+    // mirrored layer stays mirrored — through the same clamp the scale
+    // setters use; bad input just snaps back to the current value.
+
+    var transformDegrees: Double {
+        get { transformSession?.transform.degrees ?? 0 }
+        set {
+            guard transformSession != nil else { return }
+            transformSession?.transform.degrees = min(max(newValue, -360), 360)
+            refreshTransformPreview()
+        }
     }
 
-    @objc private func transformScaleXChanged(_ sender: Any?) {
-        guard transformSession != nil else { return }
-        transformSession?.transform.scaleX = LayerTransform.clampScale(
-            CGFloat(transformScaleXField.doubleValue / 100))
-        refreshTransformPreview()
-        updateTransformFields()
+    var transformScaleXPercent: Double {
+        get { Double(transformSession?.transform.scaleX ?? 1) * 100 }
+        set {
+            guard transformSession != nil else { return }
+            transformSession?.transform.scaleX = LayerTransform.clampScale(CGFloat(newValue / 100))
+            refreshTransformPreview()
+        }
     }
 
-    @objc private func transformScaleYChanged(_ sender: Any?) {
-        guard transformSession != nil else { return }
-        transformSession?.transform.scaleY = LayerTransform.clampScale(
-            CGFloat(transformScaleYField.doubleValue / 100))
-        refreshTransformPreview()
-        updateTransformFields()
+    var transformScaleYPercent: Double {
+        get { Double(transformSession?.transform.scaleY ?? 1) * 100 }
+        set {
+            guard transformSession != nil else { return }
+            transformSession?.transform.scaleY = LayerTransform.clampScale(CGFloat(newValue / 100))
+            refreshTransformPreview()
+        }
     }
 
-    /// W = |scaleX| × base width, so typing W sets scaleX = W / base width —
-    /// preserving the current sign, so a mirrored layer stays mirrored — and
-    /// runs through the same clamp the scale fields use. Bad input (the
-    /// formatter rejects non-numbers; a zero base cannot happen, the session
-    /// refuses empty layers) just snaps the field back to the current value.
-    @objc private func transformSizeWChanged(_ sender: Any?) {
-        guard let session = transformSession else { return }
-        let typed = CGFloat(transformSizeWField.doubleValue)
-        let base = session.sourceRect.width
-        if typed > 0, base > 0 {
+    var transformWidthPixels: Double {
+        get {
+            guard let session = transformSession else { return 0 }
+            return Double((abs(session.transform.scaleX) * session.sourceRect.width).rounded())
+        }
+        set {
+            guard let session = transformSession, newValue > 0,
+                  session.sourceRect.width > 0 else { return }
             let sign: CGFloat = session.transform.scaleX < 0 ? -1 : 1
-            transformSession?.transform.scaleX = LayerTransform.clampScale(sign * typed / base)
+            transformSession?.transform.scaleX = LayerTransform.clampScale(
+                sign * CGFloat(newValue) / session.sourceRect.width)
             refreshTransformPreview()
         }
-        updateTransformFields()
     }
 
-    @objc private func transformSizeHChanged(_ sender: Any?) {
-        guard let session = transformSession else { return }
-        let typed = CGFloat(transformSizeHField.doubleValue)
-        let base = session.sourceRect.height
-        if typed > 0, base > 0 {
+    var transformHeightPixels: Double {
+        get {
+            guard let session = transformSession else { return 0 }
+            return Double((abs(session.transform.scaleY) * session.sourceRect.height).rounded())
+        }
+        set {
+            guard let session = transformSession, newValue > 0,
+                  session.sourceRect.height > 0 else { return }
             let sign: CGFloat = session.transform.scaleY < 0 ? -1 : 1
-            transformSession?.transform.scaleY = LayerTransform.clampScale(sign * typed / base)
+            transformSession?.transform.scaleY = LayerTransform.clampScale(
+                sign * CGFloat(newValue) / session.sourceRect.height)
             refreshTransformPreview()
         }
-        updateTransformFields()
     }
 
-    @objc private func transformSamplerChanged(_ sender: Any?) {
-        let index = min(
-            max(transformSamplerPopup.indexOfSelectedItem, 0), Self.transformSamplers.count - 1)
-        transformSampler = Self.transformSamplers[index].value
-        transformSession?.sampler = transformSampler
-        // Nearest previews without smoothing, so the box shows the hard
-        // pixel edges the commit will produce.
-        refreshTransformPreview()
+    var transformSamplerListIndex: Int {
+        get { Self.transformSamplerIndex(transformSession?.sampler ?? transformSampler) }
+        set {
+            let index = min(max(newValue, 0), Self.transformSamplers.count - 1)
+            transformSampler = Self.transformSamplers[index].value
+            transformSession?.sampler = transformSampler
+            // Nearest previews without smoothing, so the box shows the hard
+            // pixel edges the commit will produce.
+            refreshTransformPreview()
+        }
     }
 
     // MARK: Free Transform commit / cancel
 
     /// Runs the session's matrix through the core as ONE undo step named
-    /// "Transform Layer". Returns false when the commit did NOT happen and
-    /// the session must stay open: the core refused the matrix, or the user
-    /// cancelled the rasterize prompt.
+    /// "Transform Layer" — composed into a described layer's description
+    /// (no prompt) when the session is a plain affine, resampled otherwise.
+    /// Returns false when the commit did NOT happen and the session must
+    /// stay open: the core refused the matrix, or the user cancelled the
+    /// rasterize prompt.
     @discardableResult
     private func commitTransformSession() -> Bool {
         guard let session = transformSession, let document = document, let doc = document.doc
@@ -1511,26 +1401,64 @@ final class EditorViewController: NSViewController {
         }
         // Nothing actually moved (or the layer is gone): no edit, no undo
         // step, no dirty flag — just close the session.
-        guard !session.transform.isIdentity, session.layer < doc.layerCount else {
+        guard !session.transform.isIdentity, session.layers.allSatisfy({ $0 < doc.layerCount })
+        else {
             endTransformSession()
             return true
         }
-        let idx = session.layer
-        // A free transform rewrites the pixels a described layer — text, a
-        // Live Photo frame — was rendered from. Same prompt as every other
-        // rasterizing edit, but taken here rather than through
-        // applyRasterizingEdit: Cancel has to keep the session open instead
-        // of abandoning the whole gesture.
+        let idx = session.primaryLayer
         let describesSource = document.layerDescribesSource(idx)
-        if describesSource, !document.confirmRasterize(layer: idx) { return false }
+        // A distorted box commits through the perspective op with its warped
+        // corners; a plain affine keeps the matrix path and its lossless
+        // exact forms.
+        let quad = session.transform.hasCornerOffsets
+            ? session.transform.warpedQuad(of: session.sourceRect) : nil
         let matrix = session.transform.matrix
+        // An affine on a described layer — plain, or a warped box that is
+        // still a parallelogram — composes into the description and
+        // re-renders (EditorViewController+DescribedTransform.swift): no
+        // prompt. A true perspective quad, or a description that cannot
+        // render right now (a missing font, a Live Photo whose source will
+        // not decode), takes the rasterize prompt below as before —
+        // resampling the real pixels is what the prompt gates. Taken here
+        // rather than through applyRasterizingEdit: Cancel has to keep the
+        // session open instead of abandoning the whole gesture.
+        // Composing a matrix into ONE description cannot stand for a SET, so
+        // only a single-entry session takes the lossless compose path; a set
+        // resamples every member (MultiLayerEdit.swift).
+        if describesSource, session.isSingleLayer {
+            isCommittingTransform = true
+            let outcome = commitDescribedTransform(
+                layer: idx, matrix: matrix, quad: quad, sampler: session.sampler)
+            isCommittingTransform = false
+            switch outcome {
+            case .committed:
+                endTransformSession()
+                return true
+            case .refused:
+                return false
+            case .unrenderable:
+                break
+            }
+        }
+        if describesSource,
+           !document.confirmRasterize(
+               layer: idx,
+               reason: session.isSingleLayer
+                   ? document.unrenderableReason(layer: idx) : Self.setRasterizeReason)
+        { return false }
+        // Every other member's pre-check — the degenerate matrix, each
+        // entry's own extent, the position locks and the remaining rasterize
+        // prompts (MultiLayerEdit.swift). After the primary's prompt, so each
+        // layer is asked exactly once.
+        guard !refuseUntransformableSet(session, quad: quad) else { return false }
         let sampler = session.sampler
         let before = document.doc
         isCommittingTransform = true
         document.applyEdit("Transform Layer") { doc in
-            guard let transformed = doc.transformingLayer(idx, matrix, sampler: sampler) else {
-                return nil
-            }
+            let transformed = Self.transformedSet(
+                doc, layers: session.layers, quad: quad, matrix: matrix, sampler: sampler)
+            guard let transformed else { return nil }
             guard describesSource else { return transformed }
             return transformed.withLayerMeta(idx, nil) ?? transformed
         }
@@ -1550,6 +1478,10 @@ final class EditorViewController: NSViewController {
         guard transformSession != nil else { return }
         transformSession = nil
         canvas.transformPreview = nil
+        // The box's smart guides go with the box (DragSnapping.swift): a
+        // session torn down by Escape or a tool switch must not leave its
+        // alignment lines drawn over the picture.
+        pushSmartGuides([])
         updateOptionsBar()
         updateStatus()
         updateActiveLayerRect()
@@ -1564,71 +1496,80 @@ final class EditorViewController: NSViewController {
         commitTransformSession()
     }
 
-    // MARK: - Options bar actions
+    // MARK: - Options bar and rail plumbing
 
-    @objc private func sizeSliderChanged(_ sender: Any?) {
-        brushSize = CGFloat(sizeSlider.doubleValue)
-        sizeField.integerValue = Int(sizeSlider.doubleValue.rounded())
-        canvas.brushSize = brushSize
-    }
-
-    @objc private func sizeFieldChanged(_ sender: Any?) {
-        let clamped = min(max(sizeField.integerValue, 1), 200)
-        sizeField.integerValue = clamped
-        brushSize = CGFloat(clamped)
-        sizeSlider.doubleValue = Double(clamped)
-        canvas.brushSize = brushSize
-    }
-
-    @objc private func opacitySliderChanged(_ sender: Any?) {
-        brushOpacity = CGFloat(opacitySlider.doubleValue)
-        opacityValueLabel.stringValue = "\(Int((opacitySlider.doubleValue * 100).rounded()))%"
-        canvas.brushOpacity = brushOpacity
-    }
-
-    @objc private func colorChanged(_ sender: Any?) {
-        setPaintColor(colorWell.color)
-    }
-
-    /// The single write path for the shared paint color (color well changes,
-    /// eyedropper samples): brush, fill, gradient start, and text all read
-    /// `paintColor`, and the well and canvas mirror it.
-    private func setPaintColor(_ color: NSColor) {
+    /// The single write path for the shared paint color (options-bar
+    /// swatches, eyedropper samples, the rail's foreground swatch): brush,
+    /// fill, gradient start, and text all read `paintColor`, and the rail,
+    /// store and canvas mirror it.
+    func setPaintColor(_ color: NSColor) {
         paintColor = color
-        colorWell.color = color
+        toolRail?.foregroundSwatchColor = color
         canvas.paintColor = color
         canvas.updateActiveTextSessionStyle()
+        var shared = ToolOptionsStore.shared.sharedState
+        shared.foreground = TextLayer.hex(color)
+        ToolOptionsStore.shared.sharedState = shared
     }
 
-    @objc private func fontFamilyChanged(_ sender: Any?) {
-        if let family = fontPopup.titleOfSelectedItem {
-            fontFamily = family
-        }
-        canvas.textFont = currentFont()
-        canvas.updateActiveTextSessionStyle()
+    /// The background color's write path (the rail's second swatch): the
+    /// gradient tool's end color.
+    func setBackgroundColor(_ color: NSColor) {
+        backgroundColor = color
+        toolRail?.backgroundSwatchColor = color
+        var shared = ToolOptionsStore.shared.sharedState
+        shared.background = TextLayer.hex(color)
+        ToolOptionsStore.shared.sharedState = shared
     }
 
-    @objc private func fontSizeChanged(_ sender: Any?) {
-        let clamped = min(max(fontSizeField.integerValue, 6), 500)
-        fontSizeField.integerValue = clamped
-        fontSize = CGFloat(clamped)
-        canvas.textFont = currentFont()
+    /// Rail swatch clicks: the shared color panel, retargeted at whichever
+    /// swatch was clicked last.
+    func pickForegroundColor() {
+        openColorPanel(action: #selector(colorPanelPickedForeground(_:)))
+    }
+
+    func pickBackgroundColor() {
+        openColorPanel(action: #selector(colorPanelPickedBackground(_:)))
+    }
+
+    private func openColorPanel(action: Selector) {
+        let panel = NSColorPanel.shared
+        panel.showsAlpha = true
+        panel.setTarget(self)
+        panel.setAction(action)
+        colorPanelTargetsSelf = true
+        panel.color = action == #selector(colorPanelPickedForeground(_:))
+            ? paintColor : backgroundColor
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func colorPanelPickedForeground(_ sender: Any?) {
+        setPaintColor(NSColorPanel.shared.color)
+        optionsBar.refreshValues()
+    }
+
+    @objc private func colorPanelPickedBackground(_ sender: Any?) {
+        setBackgroundColor(NSColorPanel.shared.color)
+        optionsBar.refreshValues()
+    }
+
+    /// Fired by the options bar after any control commits a value: mirror
+    /// whatever may have changed into the canvas and the status line.
+    func toolOptionsEdited() {
+        syncCanvasPaintState()
+        canvas.textStyle = currentTextStyle()
         canvas.updateActiveTextSessionStyle()
+        toolRail?.foregroundSwatchColor = paintColor
+        toolRail?.backgroundSwatchColor = backgroundColor
+        updateStatus()
     }
 
     /// Segment order of the alignment control, which is also the payload's
     /// `alignments` order.
-    private static let alignmentSegmentValues: [NSTextAlignment] = [.left, .center, .right]
+    static let alignmentSegmentValues: [NSTextAlignment] = [.left, .center, .right]
 
-    private static func alignmentIndex(_ alignment: NSTextAlignment) -> Int {
+    static func alignmentIndex(_ alignment: NSTextAlignment) -> Int {
         alignmentSegmentValues.firstIndex(of: alignment) ?? 0
-    }
-
-    @objc private func alignmentChanged(_ sender: Any?) {
-        let segment = min(max(alignmentControl.selectedSegment, 0), 2)
-        textAlignment = Self.alignmentSegmentValues[segment]
-        canvas.textAlignment = textAlignment
-        canvas.updateActiveTextSessionStyle()
     }
 
     // MARK: - Zoom
@@ -1664,6 +1605,30 @@ final class EditorViewController: NSViewController {
         applyZoom(1.0)
     }
 
+    /// The zoom tool's click: one ladder step in (or out, with ⌥), keeping
+    /// the clicked point where it is.
+    func zoomStep(at point: CGPoint, out: Bool) {
+        let current = scrollView.magnification
+        let next: CGFloat
+        if out {
+            guard let below = Self.zoomLadder.last(where: { $0 < current - 0.0001 }) else { return }
+            next = below
+        } else {
+            next = Self.zoomLadder.first { $0 > current + 0.0001 } ?? Self.zoomLadder.last ?? 1
+        }
+        scrollView.setMagnification(
+            min(max(next, scrollView.minMagnification), scrollView.maxMagnification),
+            centeredAt: point)
+        updateZoomLabel()
+    }
+
+    /// The zoom tool's marquee: fill the viewport with the dragged rect.
+    func zoomToRect(_ rect: CGRect) {
+        guard rect.width > 0, rect.height > 0 else { return }
+        scrollView.magnify(toFit: rect)
+        updateZoomLabel()
+    }
+
     func zoomToFit() {
         guard let doc = document?.doc else { return }
         let size = doc.canvasSize
@@ -1692,19 +1657,52 @@ final class EditorViewController: NSViewController {
         if transformSession != nil, !isCommittingTransform {
             endTransformSession()
         }
+        // Same for an open shape-edit session: an external edit (agent,
+        // undo) may have renumbered or rewritten the layer it describes,
+        // so it closes without committing. The session's own commit ends
+        // it before applying, so a commit never lands here.
+        if shapeEditSession != nil {
+            endShapeEditSession()
+        }
         let newSize = doc.canvasSize
         let dimensionsChanged = canvas.frame.size != newSize
-        canvas.image = document.projection?.makeCGImage()
+        canvas.documentColorSpace = doc.drawingSpace
+        canvas.image = document.projection?.makeCGImage(in: doc.colorSpace)
         canvas.previewImage = nil
+        channelDisplayDidChange(note)
         canvas.setFrameSize(newSize)
         if dimensionsChanged {
             // The canvas.image setter also drops selections when the size
             // changes; same-size doc swaps keep the selection as-is.
             canvas.setSelection(nil)
             zoomToFit()
+            // A crop box measured against the old canvas is meaningless:
+            // reopen it over the new one.
+            if currentTool == .crop {
+                beginCropSession()
+            }
         }
         canvas.needsDisplay = true
         syncPaintTarget()
+        // The guides are the document's; the rulers' unit conversion reads
+        // its resolution and its ruler origin, and the grid's spacing — in
+        // canvas pixels — is converted through that same resolution and the
+        // canvas extent, so all three are refreshed on exactly the events
+        // that can move them. Each is guarded on its own value, so an edit
+        // that touched none of them costs three comparisons.
+        refreshCanvasGuides()
+        refreshRulers()
+        refreshCanvasChrome()
+        // The snap engine's folded content boxes are a per-pixel sweep per
+        // leaf, and a Move drag posts this notification on EVERY mouse-moved
+        // event — so only a SETTLED change invalidates them. A live tick
+        // differs from the base only in the layers being moved, which the
+        // engine excludes anyway, and the engine is frozen for the gesture
+        // regardless.
+        // "not explicitly live", rather than "explicitly settled": a stale
+        // cache is a correctness bug while an extra invalidation only costs
+        // one fold, so a post that carried no flag at all must clear it.
+        if (note.userInfo?["isLive"] as? Bool) != true { snapBoxes = nil }
         updateStatus()
         updateActiveLayerRect()
         view.window?.subtitle = "\(doc.width) × \(doc.height) px"
@@ -1712,43 +1710,56 @@ final class EditorViewController: NSViewController {
 
     // MARK: - Status bar
 
-    private func updateStatus() {
+    // The redesign's reduced segment set: dimensions, mode, selection on
+    // the left; the active tool and its key on the right. Layer name, blend
+    // mode, opacity and the zoom percentage were deliberately dropped —
+    // all visible in the Layers panel or the zoom pill.
+    func updateStatus() {
+        // The Channels panel's Load and Save Selection buttons are nil-target
+        // actions, which AppKit never validates: they take their menu twins'
+        // own rules from here, where every selection change and every Quick
+        // Mask toggle already lands.
+        channelsPanel?.setSelectionState(
+            hasSelection: canvas.selection != nil, quickMask: canvas.quickMaskActive)
+        // The Info panel's Selection rows land here for the same reason;
+        // the pixel COUNT is a canvas scan, so whether it is worth taking
+        // now is EditorViewController+Info's decision, not this line's.
+        infoPanel?.setSelectionState(bounds: canvas.selectionRect, area: selectedPixelArea())
         guard let document = document, let doc = document.doc else {
             statusDims.text = "No document open"
-            statusLayer.text = ""
-            statusBlend.text = ""
+            statusMode.text = ""
+            statusSelection.text = ""
             statusTool.text = "Drop a file, or ⌘O"
-            statusZoom.text = ""
             return
         }
-        var dims = "\(doc.width) × \(doc.height) px"
+        // Folded into the two existing segments rather than adding a sixth:
+        // the redesign deliberately reduced the set.
+        statusDims.text =
+            "\(doc.width) × \(doc.height) px · \(PrintSize.resolutionText(doc.resolution))"
+        statusMode.text = "RGB · 8-bit · \(doc.profileName)"
         if canvas.quickMaskActive {
             // The selection segment's slot: the mode holds the selection as
             // its editable buffer, so this is what "selected" currently is.
-            dims += " · Quick Mask"
+            statusSelection.text = "Quick Mask"
         } else if let selection = canvas.selectionRect {
-            dims += " · sel \(Int(selection.width)) × \(Int(selection.height))"
-        }
-        statusDims.text = dims
-        if let info = doc.layerInfo(document.activeLayerIndex) {
-            // Brush and eraser hit the mask when it is the paint target; say
-            // so, alongside the panel's focus ring.
-            statusLayer.text = paintTarget == .mask ? "\(info.name) · Mask" : info.name
-            let percent = Int((Double(info.opacity) * 100).rounded())
-            statusBlend.text =
-                "\(RzBlendMode.displayName(for: info.blendMode)) · \(percent)%"
+            statusSelection.text =
+                "Selection: \(Int(selection.width)) × \(Int(selection.height)) px"
         } else {
-            statusLayer.text = ""
-            statusBlend.text = ""
+            statusSelection.text = "Selection: none"
         }
-        statusTool.text = isTransforming ? "Free Transform" : currentTool.displayName
+        // Brush and eraser hit the mask, a colour plane or an alpha channel
+        // when one is the edit target; say so, alongside the panels' rings.
+        let maskSuffix = paintTarget.statusSuffix(in: document.doc)
+        statusTool.text = isTransforming
+            ? transformStatusText
+            : "\(currentTool.displayName) · \(currentTool.keyCharacter.uppercased())\(maskSuffix)"
         updateZoomLabel()
     }
 
     /// Pushes the active layer's extent (image-pixel coordinates) to the
     /// canvas, which shows the boundary while a paint tool is active and
     /// the layer doesn't cover the whole canvas.
-    private func updateActiveLayerRect() {
+    func updateActiveLayerRect() {
         guard let document = document, let doc = document.doc,
               let info = doc.layerInfo(document.activeLayerIndex)
         else {
@@ -1763,11 +1774,36 @@ final class EditorViewController: NSViewController {
     private func updateZoomLabel() {
         let percent = Int((scrollView.magnification * 100).rounded())
         zoomPill.setZoomText("\(percent)%")
-        statusZoom.text = "\(percent)%"
+        // The zoom tool's options show the same number.
+        if currentTool == .zoom || currentTool == .hand {
+            optionsBar.refreshValues()
+        }
+    }
+
+    /// The magnification as the options bar's percentage field, applied
+    /// through the same clamp the menu actions use.
+    var zoomPercent: Double {
+        get { Double(scrollView.magnification) * 100 }
+        set { applyZoom(CGFloat(newValue / 100)) }
+    }
+
+    /// Fill the viewport: the larger of the two fit scales, so the canvas
+    /// covers the well with no letterboxing.
+    func zoomToFill() {
+        guard let doc = document?.doc else { return }
+        let size = doc.canvasSize
+        guard size.width > 0, size.height > 0 else { return }
+        let available = scrollView.contentSize
+        let scale = max(available.width / size.width, available.height / size.height)
+        applyZoom(min(scale, 32))
     }
 
     @objc private func magnificationDidChange(_ note: Notification) {
         updateZoomLabel()
+        // Scrolling and live pinch both arrive here through the clip view's
+        // bounds change, so this one call keeps the ticks under the picture
+        // at every zoom and every scroll offset.
+        refreshRulers()
     }
 
     // MARK: - Edit actions (responder chain)
@@ -1780,35 +1816,55 @@ final class EditorViewController: NSViewController {
         document.applyEdit(actionName, transform)
     }
 
-    private func performLayerEdit(_ actionName: String, _ op: (RasterImage) -> RasterImage?) {
+    /// Internal, like the panels above: EditorViewController+AutoAdjust
+    /// builds on it (Auto Tone and its two siblings are layer edits).
+    func performLayerEdit(_ actionName: String, _ op: (RasterImage) -> RasterImage?) {
         guard let document = document else {
             NSSound.beep()
             return
         }
         // Menu validation already disables the one-shot filters on an
-        // adjustment layer; this backstop covers any path around it.
-        guard !refuseAdjustmentPixelEdit() else { return }
+        // adjustment layer; this backstop covers any path around it. A
+        // CHANNEL target is exempt: the edit lands on document state, not on
+        // the (ignored) pixels of the adjustment layer that happens to be
+        // active — §0.4's rule, the same one `onStrokeBegin` applies above.
+        guard paintTarget.isChannel || !refuseAdjustmentPixelEdit() else { return }
+        // A filter rewrites the layer's pixels; the Pixels lock refuses it,
+        // and a CHANNEL target is exempt for the same reason as above (the
+        // edit lands on document state, not on the layer).
+        guard paintTarget.isChannel
+            || !refuseLockedEdit(layer: document.activeLayerIndex, kind: RZ_EDIT_PIXELS)
+        else { return }
+        // …and a GROUP has no pixels for a filter to rewrite at all.
+        guard paintTarget.isChannel || !refuseGroupPixelEdit() else { return }
         document.applyToActiveLayer(actionName, op)
     }
 
+    // Whole-document geometry goes through applyingDocumentGeometry
+    // (DescribedLayerGeometry.swift), which composes the op into every text,
+    // shape and Live Photo description so a later re-edit lands in place.
     @objc func rotateCW(_ sender: Any?) {
-        performEdit("Rotate 90° CW") { $0.rotated90() }
+        performGeometry(.rotate90)
     }
 
     @objc func rotateCCW(_ sender: Any?) {
-        performEdit("Rotate 90° CCW") { $0.rotated270() }
+        performGeometry(.rotate270)
     }
 
     @objc func rotate180(_ sender: Any?) {
-        performEdit("Rotate 180°") { $0.rotated180() }
+        performGeometry(.rotate180)
     }
 
     @objc func flipH(_ sender: Any?) {
-        performEdit("Flip Horizontal") { $0.flippedH() }
+        performGeometry(.flipHorizontal)
     }
 
     @objc func flipV(_ sender: Any?) {
-        performEdit("Flip Vertical") { $0.flippedV() }
+        performGeometry(.flipVertical)
+    }
+
+    private func performGeometry(_ op: DocumentGeometry) {
+        performEdit(op.actionName) { $0.applyingDocumentGeometry(op) }
     }
 
     @objc func cropToSelection(_ sender: Any?) {
@@ -1829,7 +1885,7 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        presentAsSheet(ResizeSheetController(document: document))
+        presentAsSheet(ImageSizeSheetController(document: document))
     }
 
     @objc func showCanvasSize(_ sender: Any?) {
@@ -1850,42 +1906,58 @@ final class EditorViewController: NSViewController {
         let idx = document.activeLayerIndex
         let name = "Layer \(doc.layerCount + 1)"
         let before = document.doc
+        // Where the new entry lands is the CORE's answer (`idx + 1` is the
+        // wrong index the moment `idx` names a group), taken BEFORE the edit
+        // because the handle is replaced by it.
+        let landing = doc.insertionIndex(above: idx)
         document.applyEdit("New Layer") { $0.addingLayer(above: idx, name: name) }
         guard document.doc !== before else { return }
-        document.activeLayerIndex = min(idx + 1, document.doc.layerCount - 1)
-        // The active layer moved: any mask paint target goes with it.
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        // The active layer moved: setActiveLayer carries the whole invariant
+        // (paint target, both panels, the canvas's mask base and rubylith).
+        setActiveLayer(min(landing, document.doc.layerCount - 1))
     }
 
+    /// Duplicate Layer, over the whole selection: ONE core call, never a
+    /// host loop — every structural op renumbers, so a loop would duplicate
+    /// the wrong entries from its second iteration on. A group duplicates
+    /// with its whole subtree.
     @objc func duplicateLayer(_ sender: Any?) {
-        guard let document = document else {
+        guard let document = document, let doc = document.doc else {
             NSSound.beep()
             return
         }
+        let indices = document.selectedLayerIndices
         let idx = document.activeLayerIndex
         let before = document.doc
-        document.applyEdit("Duplicate Layer") { $0.duplicatingLayer(idx) }
+        // Where the PRIMARY's copy lands, derived from the stack before the
+        // edit: each copy sits above its source, and the copies made below
+        // push this one up.
+        // …and the copies are made over the selection's INDEPENDENT ROOTS, so
+        // the primary's landing is looked up by entry rather than by position.
+        let landing = doc.layerTree.duplicateLanding(of: idx, in: indices) ?? idx
+        document.applyEdit("Duplicate Layer") { $0.duplicateLayers(indices) }
         guard document.doc !== before else { return }
-        document.activeLayerIndex = min(idx + 1, document.doc.layerCount - 1)
-        // The active layer moved: any mask paint target goes with it.
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        // The active layer moved: setActiveLayer carries the whole invariant.
+        setActiveLayer(min(max(landing, 0), document.doc.layerCount - 1))
     }
 
+    /// Delete Layer, over the whole selection: again ONE core call, which is
+    /// what makes "delete these three" safe — a host loop deleting
+    /// ascending would delete the wrong layers after the first.
     @objc func deleteLayer(_ sender: Any?) {
         guard let document = document else {
             NSSound.beep()
             return
         }
-        let idx = document.activeLayerIndex
-        document.applyEdit("Delete Layer") { $0.removingLayer(idx) }
-        // applyEdit re-clamps activeLayerIndex; the layer below (same index,
-        // or the new top) ends up selected.
+        let indices = document.selectedLayerIndices
+        document.applyEdit("Delete Layer") { $0.removeLayers(indices) }
+        // Collapse onto ONE survivor, the lowest slot the deletion left.
+        // `applyEdit`'s re-clamp only pulls stale numbers back into range,
+        // and after a delete those numbers name layers that were never
+        // selected — the panel would highlight them and the next set command
+        // (Group, Merge, Align, a Move drag) would act on them. Every other
+        // set op in this phase retargets after its edit; so does this one.
+        setActiveLayer(min(max(indices.first ?? 0, 0), (document.doc?.layerCount ?? 1) - 1))
         // The active layer moved: any mask paint target goes with it.
         syncPaintTarget()
         layersPanel.reload()
@@ -1893,21 +1965,50 @@ final class EditorViewController: NSViewController {
         updateActiveLayerRect()
     }
 
+    /// Merge Down on one layer, Merge Layers on a selection (Photoshop's
+    /// own retitling, which the menu item's validation does).
+    ///
+    /// "The layer below" is now the previous SIBLING, so merging inside a
+    /// group never reaches out of it; the core answers where the merged
+    /// entry landed by leaving it at the lowest member's slot.
     @objc func mergeDown(_ sender: Any?) {
-        guard let document = document, document.activeLayerIndex >= 1 else {
+        guard let document = document, let doc = document.doc else {
             NSSound.beep()
             return
         }
-        let idx = document.activeLayerIndex
+        let indices = document.selectedLayerIndices
         let before = document.doc
+        if indices.count > 1 {
+            // The merged entry lands at the LOWEST member's subtree start,
+            // not at its index: those differ the moment that member is a
+            // group, and `indices[0]` then names an unrelated layer.
+            let landing = doc.layerTree.subtree(of: indices[0]).lowerBound
+            // The merged entry replaces the lowest member's picture, so that
+            // member's Pixels / Transparency locks refuse the whole merge.
+            guard !refuseLockedEdit(layer: indices[0], kind: RZ_EDIT_MERGE) else { return }
+            document.applyEdit("Merge Layers") { $0.mergeLayers(indices) }
+            guard document.doc !== before else { return }
+            setActiveLayer(min(landing, document.doc.layerCount - 1))
+            return
+        }
+        let idx = document.activeLayerIndex
+        let siblings = doc.layerTree.siblings(of: idx)
+        guard let below = siblings.last(where: { $0 < idx }) else {
+            NSSound.beep()
+            return
+        }
+        // The merge replaces the layer BELOW: its Pixels and Transparency
+        // locks refuse it, and the alert names which.
+        guard !refuseLockedEdit(layer: below, kind: RZ_EDIT_MERGE) else { return }
+        // The merged entry lands at the previous sibling's SUBTREE START, not
+        // at its index — the same hazard the Merge Layers branch above names,
+        // and `below` is an unrelated layer the moment that sibling is a
+        // non-empty group.
+        let landing = doc.layerTree.subtree(of: below).lowerBound
         document.applyEdit("Merge Down") { $0.mergingDown(idx) }
         guard document.doc !== before else { return }
-        document.activeLayerIndex = idx - 1
-        // The active layer moved: any mask paint target goes with it.
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        // The active layer moved: setActiveLayer carries the whole invariant.
+        setActiveLayer(min(landing, document.doc.layerCount - 1))
     }
 
     @objc func flattenImage(_ sender: Any?) {
@@ -1928,12 +2029,11 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
+        // ImageDocument.pasteAsNewLayer moves the active layer to the pasted
+        // one AFTER its edit has posted, so this owes the same bookkeeping
+        // setActiveLayer does for the paths that move it here.
         document.pasteAsNewLayer()
-        // The active layer moved: any mask paint target goes with it.
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        activeLayerDidChange()
     }
 
     // Bound to ⌘V through the responder chain, so a focused field editor
@@ -2002,6 +2102,10 @@ final class EditorViewController: NSViewController {
             return
         }
         let idx = document.activeLayerIndex
+        // Applying a mask multiplies its coverage into the layer's ALPHA,
+        // which is exactly what Lock Transparency forbids — its own edit
+        // kind in the core, so the refusal names the lock instead of beeping.
+        guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_MASK_APPLY) else { return }
         document.applyEdit("Apply Layer Mask") { $0.removingLayerMask(idx, apply: true) }
         updateStatus()
     }
@@ -2017,35 +2121,6 @@ final class EditorViewController: NSViewController {
         let enabled = !doc.layerMaskEnabled(idx)
         document.applyEdit(enabled ? "Enable Layer Mask" : "Disable Layer Mask") {
             $0.withLayerMaskEnabled(idx, enabled)
-        }
-        updateStatus()
-    }
-
-    // MARK: - Clipping masks (Layer > Create/Release Clipping Mask)
-
-    /// Whether the ACTIVE layer is clipped to the layer below (drives the
-    /// menu item's Create/Release retitle).
-    private var activeLayerClipped: Bool {
-        guard let document = document, let doc = document.doc else { return false }
-        return doc.layerClipped(document.activeLayerIndex)
-    }
-
-    /// One toggling action, Photoshop-style: clips the active layer to the
-    /// layer below, or releases it. The bottom layer has nothing below to
-    /// clip to (validation disables the item; the core would composite it as
-    /// unclipped anyway). Grouping is positional in the core, so this flag
-    /// flip is the whole edit — one undo step.
-    @objc func toggleClippingMask(_ sender: Any?) {
-        guard let document = document, let doc = document.doc,
-              document.activeLayerIndex >= 1
-        else {
-            NSSound.beep()
-            return
-        }
-        let idx = document.activeLayerIndex
-        let clipped = !doc.layerClipped(idx)
-        document.applyEdit(clipped ? "Create Clipping Mask" : "Release Clipping Mask") {
-            $0.withLayerClipped(idx, clipped: clipped)
         }
         updateStatus()
     }
@@ -2066,7 +2141,9 @@ final class EditorViewController: NSViewController {
     /// outside menu validation's reach); true when refused. Move and Free
     /// Transform deliberately do NOT come through here: they move the mask
     /// footprint, which is meaningful.
-    private func refuseAdjustmentPixelEdit() -> Bool {
+    /// Internal, like `colorBytes` above: EditorViewController+PlanePaint's
+    /// fill and gradient guard with the same alert.
+    func refuseAdjustmentPixelEdit() -> Bool {
         guard activeLayerIsAdjustment else { return false }
         let alert = NSAlert()
         alert.messageText = "Adjustment layers have no pixels to edit."
@@ -2090,7 +2167,9 @@ final class EditorViewController: NSViewController {
     /// sheet, and only its Apply commits. Either way the new layer's mask
     /// captures the CURRENT selection (marquee left up, exactly like
     /// Layer > Mask > From Selection) or is reveal-all.
-    private func newAdjustmentLayer(_ op: AdjustmentLayerOp) {
+    /// Internal, like the panels above: EditorViewController+Adjustments
+    /// builds on it (the twelve phase-5 ops share one tagged selector).
+    func newAdjustmentLayer(_ op: AdjustmentLayerOp) {
         guard let document = document, document.doc != nil else {
             NSSound.beep()
             return
@@ -2114,24 +2193,27 @@ final class EditorViewController: NSViewController {
         }
         let below = document.activeLayerIndex
         let before = document.doc
+        let landing = before?.insertionIndex(above: below) ?? below + 1
         document.applyEdit("New \(op.displayName) Layer") {
             $0.addingAdjustmentLayer(
                 above: below, name: op.displayName, meta: meta, selection: selection)
         }
         guard document.doc !== before else { return }
-        didCommitAdjustmentLayer(min(below + 1, document.doc.layerCount - 1))
+        didCommitAdjustmentLayer(min(landing, document.doc.layerCount - 1))
     }
 
     /// Post-commit bookkeeping shared by every adjustment-layer commit (the
     /// steps newLayer takes): select the layer, then refresh. syncPaintTarget
     /// lands brush/eraser on the layer's mask.
-    private func didCommitAdjustmentLayer(_ idx: Int) {
+    /// Internal, like the panels above: EditorViewController+Adjustments
+    /// hands it the index its sheets commit.
+    func didCommitAdjustmentLayer(_ idx: Int) {
         guard let document = document, document.doc != nil else { return }
         document.activeLayerIndex = min(max(idx, 0), document.doc.layerCount - 1)
-        syncPaintTarget()
-        layersPanel.reload()
-        updateStatus()
-        updateActiveLayerRect()
+        // Unconditional (not setActiveLayer): re-committing the SAME
+        // adjustment layer from its options sheet moves no index but still
+        // needs every panel and the canvas refreshed.
+        activeLayerDidChange()
     }
 
     /// Layer > Adjustment Options… — enabled only when the active layer is
@@ -2144,18 +2226,54 @@ final class EditorViewController: NSViewController {
         editAdjustmentLayer(document.activeLayerIndex)
     }
 
-    /// Makes `idx` the layer edits target and refreshes everything that
+    /// Makes `idx` the ONLY selected layer and refreshes everything that
     /// follows it — the paint target, the panel, the status line, the
     /// on-canvas layer boundary. Like the panel's own selection this only
-    /// retargets future edits: no undo step, no dirty flag. A no-op when
-    /// `idx` is already active or out of range.
+    /// retargets future edits: no undo step, no dirty flag.
     func setActiveLayer(_ idx: Int) {
-        guard let document = document, let doc = document.doc,
-              idx >= 0, idx < doc.layerCount, idx != document.activeLayerIndex
-        else { return }
-        document.activeLayerIndex = idx
+        setSelectedLayers(.single(idx))
+    }
+
+    /// The set-aware twin: replaces the whole selection and takes the same
+    /// bookkeeping.
+    ///
+    /// The early-out compares the WHOLE selection, not just its primary, and
+    /// it is load-bearing for COST as well as correctness:
+    /// `activeLayerDidChange()` reloads the layers panel, and the Move
+    /// tool's Auto-Select calls this on every canvas click. Comparing only
+    /// the primary would let a set-only change through unnoticed; dropping
+    /// the guard entirely would rebuild the panel on every click.
+    func setSelectedLayers(_ selection: LayerSelection) {
+        guard let document = document, let doc = document.doc, doc.layerCount > 0 else { return }
+        let clamped = selection.clamped(to: doc.layerCount)
+        guard clamped != document.layerSelection else { return }
+        document.setLayerSelection(clamped)
+        activeLayerDidChange()
+    }
+
+    /// The bookkeeping every path that MOVES the active layer owes, in ONE
+    /// place so the invariant is not five copies of four lines.
+    ///
+    /// The Channels panel's "<layer> Mask" row and the canvas's mask base and
+    /// rubylith are computed from the active layer, so they follow it — not
+    /// just when the move starts in the layers panel. The paths that assign
+    /// `activeLayerIndex` AFTER their edit (New Layer, Duplicate Layer, Merge
+    /// Down, an adjustment-layer commit, opening a text layer) reach this
+    /// through `setActiveLayer`; the document-change notification has already
+    /// been posted by then, so nothing else would refresh the panel and it
+    /// would keep listing — and washing the canvas with — the PREVIOUS
+    /// layer's mask. (Delete Layer and Flatten rely on `applyEdit`'s own
+    /// re-clamp, which happens before that post.)
+    func activeLayerDidChange() {
         syncPaintTarget()
         layersPanel.reload()
+        channelsPanel?.activeLayerChanged()
+        infoPanel?.activeLayerChanged()
+        refreshChannelDisplay()
+        // The Move bar's Align and Distribute segments dim by how many
+        // entries are selected, so the bar has to re-read the selection here
+        // too — not only when the tool changes.
+        updateOptionsBar()
         updateStatus()
         updateActiveLayerRect()
     }
@@ -2173,6 +2291,10 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
+        // The panel's double-click bypasses menu validation, so an open
+        // shape session commits here — its hidden-layer preview and the
+        // sheet's live preview would otherwise fight over previewImage.
+        commitShapeEditSession()
         // Editing a layer makes it the active one, like re-opening a text
         // layer does.
         setActiveLayer(idx)
@@ -2194,13 +2316,17 @@ final class EditorViewController: NSViewController {
     /// View > Assistant (also the panel's Assistant tab).
     @objc func showAssistant(_ sender: Any?) {
         layersPanelVisible = true
-        panelTab = 1
+        panelTab = 2
         updatePanelVisibility()
     }
 
-    private func updatePanelVisibility() {
+    func updatePanelVisibility() {
         layersPanel.view.isHidden = !layersPanelVisible || panelTab != 0
-        assistantPanel.view.isHidden = !layersPanelVisible || panelTab != 1
+        channelsPanel.view.isHidden = !layersPanelVisible || panelTab != 1
+        channelsPanel.setPanelVisible(!channelsPanel.view.isHidden)
+        assistantPanel.view.isHidden = !layersPanelVisible || panelTab != 2
+        infoPanel.view.isHidden = !layersPanelVisible || panelTab != 3
+        infoPanel.setPanelVisible(!infoPanel.view.isHidden)
         panelSeparator.isHidden = !layersPanelVisible
         scrollTrailingToRoot.isActive = false
         scrollTrailingToPanel.isActive = false
@@ -2238,7 +2364,7 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        presentAsSheet(SliderSheetController.levels(document: document, canvas: canvas))
+        presentAsSheet(LevelsSheetController(document: document, canvas: canvas))
     }
 
     @objc func showThreshold(_ sender: Any?) {
@@ -2393,6 +2519,11 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
+        // A reopened shape commits before the mode takes the canvas — the
+        // same click-away rule the canvas applies.
+        if shapeEditSession != nil {
+            commitShapeEditSession()
+        }
         canvas.toggleQuickMask()
         updateStatus()
     }
@@ -2407,16 +2538,26 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        // Validation disables the menu item on an adjustment layer; this
-        // backstop covers any path around it.
-        guard !refuseAdjustmentPixelEdit() else { return }
+        // Validation disables the menu item on an adjustment layer, and with
+        // a colour plane or an alpha channel targeted (Clear has no plane
+        // route in this build, and must not hit the layer while every
+        // indicator names the channel); these backstops cover any path
+        // around it.
+        guard !refuseAdjustmentPixelEdit(), !refusePlaneTargetEdit(),
+              !refuseGroupPixelEdit()
+        else { return }
         let idx = document.activeLayerIndex
+        guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_PIXELS) else { return }
         let mask = selection.maskBytes()
         // Rewriting pixels invalidates a text layer's description, so this
         // goes through the rasterize prompt (Cancel abandons the edit).
+        let before = document.doc
         document.applyRasterizingEdit("Clear", layer: idx) { doc in
             doc.clearingSelection(idx, mask: mask)
         }
+        // A frozen alpha makes a clear a byte-exact no-op, which the core
+        // reports as nil and applyRasterizingEdit as a bare beep.
+        if document.doc === before { refuseFrozenAlpha(layer: idx) }
     }
 
     /// Edit > Cut (⌘X): Copy then Clear as one step — the ACTIVE LAYER's
@@ -2433,15 +2574,25 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        // Validation disables the menu item on an adjustment layer; this
-        // backstop covers any path around it.
-        guard !refuseAdjustmentPixelEdit() else { return }
+        // Validation disables the menu item on an adjustment layer, and with
+        // a plane or channel targeted (Cut copies the LAYER's pixels, which
+        // such a target does not name); these backstops cover any path
+        // around it.
+        // The group guard comes BEFORE the copy: a group's projection would
+        // otherwise land on the clipboard and only then would the clear
+        // fail, so ⌘X would silently degrade to Copy.
+        guard !refuseAdjustmentPixelEdit(), !refusePlaneTargetEdit(),
+              !refuseGroupPixelEdit()
+        else { return }
         let idx = document.activeLayerIndex
+        guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_PIXELS) else { return }
         guard copyToPasteboard(doc.layerCanvasImage(idx)) else { return }
         let mask = selection.maskBytes()
+        let before = document.doc
         document.applyRasterizingEdit("Cut", layer: idx) { doc in
             doc.clearingSelection(idx, mask: mask)
         }
+        if document.doc === before { refuseFrozenAlpha(layer: idx) }
     }
 
     /// Edit > Copy: the ACTIVE LAYER's pixels within the selection, the way
@@ -2482,7 +2633,11 @@ final class EditorViewController: NSViewController {
                 x: Int(bounds.minX), y: Int(bounds.minY),
                 w: Int(bounds.width), h: Int(bounds.height))
         }
-        guard let cgImage = image?.makeCGImage() else {
+        // TAGGED with the document's profile and NOT converted: every
+        // pasteboard consumer on this platform is colour-managed, and
+        // converting would gamut-clip a P3 copy on its way to a P3 app.
+        guard let cgImage = image?.makeCGImage(in: document?.colorSpace ?? ColorProfile.sRGB)
+        else {
             NSSound.beep()
             return false
         }
@@ -2525,10 +2680,11 @@ extension EditorViewController {
     }
 
     /// Called by ImageDocument on save/close/export so an in-progress canvas
-    /// session — text entry, or a Free Transform — is never silently dropped
-    /// from the written file.
+    /// session — text entry, a reopened shape, or a Free Transform — is
+    /// never silently dropped from the written file.
     func commitPendingSessions() {
         canvas.commitTextSession()
+        commitShapeEditSession()
         commitPendingTransform()
     }
 }
@@ -2549,6 +2705,18 @@ extension EditorViewController: NSUserInterfaceValidations {
         #selector(selectGradientTool(_:)): .gradient,
         #selector(selectTextTool(_:)): .text,
         #selector(selectEyedropperTool(_:)): .eyedropper,
+        #selector(selectCropTool(_:)): .crop,
+        #selector(selectCloneTool(_:)): .clone,
+        #selector(selectDodgeTool(_:)): .dodge,
+        #selector(selectHealTool(_:)): .heal,
+        #selector(selectSpotHealTool(_:)): .spotHeal,
+        #selector(selectPatchTool(_:)): .patch,
+        #selector(selectRedEyeTool(_:)): .redEye,
+        #selector(selectShapeRectTool(_:)): .shapeRect,
+        #selector(selectShapeEllipseTool(_:)): .shapeEllipse,
+        #selector(selectShapeLineTool(_:)): .shapeLine,
+        #selector(selectZoomTool(_:)): .zoom,
+        #selector(selectHandTool(_:)): .hand,
     ]
 
     /// True while a text-editing responder owns the keyboard: a field
@@ -2575,19 +2743,40 @@ extension EditorViewController: NSUserInterfaceValidations {
             if let menuItem = item as? NSMenuItem {
                 menuItem.state = currentTool == tool ? .on : .off
             }
-            return true
+            // A planned tool stays visible with its "Soon" affordance but
+            // never enabled — in menus, the rail's dropdowns, anywhere.
+            return !tool.planned
         }
 
-        // While a text session or a Free Transform is active, only tool
-        // switching (handled above — it commits the session) and zooming are
-        // safe; edit/filter/clipboard actions must not mutate the image
-        // underneath the session, and Free Transform must not re-enter.
-        if canvas.hasActiveTextSession || isTransforming {
+        // Rulers, guides, the grid and the snap toggles answer through ONE
+        // early-out, and it sits ABOVE the session guard below rather than
+        // beside validateStructureItem: a view-only toggle changes no pixels
+        // and is perfectly safe inside a text, shape-edit or transform
+        // session — Photoshop keeps them live too — while the two items that
+        // EDIT the document (New Guide…, Clear Guides) return false there
+        // themselves (EditorViewController+Rulers.swift). nil means "not one
+        // of mine".
+        if let handled = validateViewChromeItem(item) { return handled }
+
+        // While a text session, a shape-edit session or a Free Transform is
+        // active, only tool switching (handled above — it commits the
+        // session) and zooming are safe; edit/filter/clipboard actions must
+        // not mutate the image underneath the session, and Free Transform
+        // must not re-enter.
+        if canvas.hasActiveTextSession || isTransforming || shapeEditSession != nil {
             if let action = item.action, Self.zoomActions.contains(action) {
                 return true
             }
             return false
         }
+
+        // Every item this phase added — group, ungroup, the locks, align,
+        // distribute, link, arrange, via copy/cut, merge/stamp visible —
+        // answers through ONE early-out rather than two dozen cases in a
+        // switch that already carries thirty-two (EditorViewController
+        // +Locks.swift). nil means "not one of mine", and the switch below
+        // decides as before.
+        if let handled = validateStructureItem(item) { return handled }
 
         switch item.action {
         case #selector(freeTransform(_:)):
@@ -2637,16 +2826,34 @@ extension EditorViewController: NSUserInterfaceValidations {
             // above, and this also covers the window's field editors (the
             // options bar, the layer name field, the assistant's input),
             // where ⌫ must keep deleting characters. An adjustment layer has
-            // no pixels worth clearing.
-            guard !isEditingText, canvas.selection != nil, !activeLayerIsAdjustment
+            // no pixels worth clearing. Nor does a colour plane or an alpha
+            // channel: Clear rewrites the LAYER's pixels and has no plane
+            // route in this build, so rather than erase the photograph while
+            // the status bar, the channel row's ring and both unringed layer
+            // wells name a channel, the item stands down (the Fill tool is
+            // how a plane or channel is cleared). It also stands down while a
+            // GUIDE is grabbed, for the identical reason it stands down while
+            // text is being edited: ⌫ deletes the grabbed guide, and a
+            // modifier-less key equivalent is resolved ahead of the first
+            // responder — so without this the guide branch in
+            // ImageCanvasView.keyDown would be unreachable whenever a
+            // selection existed, and the keystroke would erase pixels
+            // instead. (cut(_:) needs nothing: ⌘X is not a bare key.)
+            guard !isEditingText, canvas.guideDrag == nil, canvas.selection != nil,
+                  !activeLayerIsAdjustment,
+                  !activeLayerIsGroup, !paintTarget.targetsPlaneOrChannel
             else { return false }
             return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
         case #selector(cut(_:)):
             // Cut is Copy + Clear in one step, so it needs what Clear needs:
-            // a selection and an active layer with pixels. No text-editing
-            // guard — ⌘X reaches a field editor first, which claims cut:
-            // itself, exactly as ⌘C does for copy.
-            guard canvas.selection != nil, !activeLayerIsAdjustment else { return false }
+            // a selection and an active layer with pixels, and no plane or
+            // channel target — its copy half takes the LAYER's pixels, so on
+            // such a target it would cut one thing and copy another. No
+            // text-editing guard — ⌘X reaches a field editor first, which
+            // claims cut: itself, exactly as ⌘C does for copy.
+            guard canvas.selection != nil, !activeLayerIsAdjustment, !activeLayerIsGroup,
+                  !paintTarget.targetsPlaneOrChannel
+            else { return false }
             return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil
         case #selector(showAdjustments(_:)), #selector(showBlur(_:)),
             #selector(showHueRotate(_:)), #selector(showLevels(_:)),
@@ -2654,11 +2861,24 @@ extension EditorViewController: NSUserInterfaceValidations {
             #selector(showPixelate(_:)), #selector(showAddNoise(_:)),
             #selector(applyGrayscale(_:)), #selector(applyInvert(_:)),
             #selector(applySepia(_:)), #selector(applySharpen(_:)),
-            #selector(applyEdgeDetect(_:)), #selector(applyEmboss(_:)):
+            #selector(applyEdgeDetect(_:)), #selector(applyEmboss(_:)),
+            #selector(showAdjustmentSheet(_:)), #selector(autoTone(_:)),
+            #selector(autoContrast(_:)), #selector(autoColor(_:)):
             // Destructive filters rewrite the active layer's PIXELS, which
             // an adjustment layer doesn't meaningfully have; its parameters
-            // re-open through Adjustment Options… instead.
-            return !activeLayerIsAdjustment
+            // re-open through Adjustment Options… instead. With a CHANNEL
+            // targeted they rewrite that channel instead of any layer, so
+            // the active layer's kind is irrelevant (§0.4).
+            return paintTarget.isChannel || !activeLayerIsAdjustment
+        case #selector(contentAwareFill(_:)):
+            // Fills the SELECTION on the active layer's own pixels, so it
+            // needs one — and, like Clear, must not stand on an adjustment
+            // layer, a colour plane or a channel.
+            return !canvas.quickMaskActive && canvas.selection != nil
+                && !activeLayerIsAdjustment && !paintTarget.targetsPlaneOrChannel
+        case #selector(removeRedEye(_:)):
+            // Vision's automatic pass rewrites the active layer's pixels.
+            return !activeLayerIsAdjustment && !paintTarget.targetsPlaneOrChannel
         case #selector(selectLivePhotoFrame(_:)):
             // Only a layer that still says which Live Photo it came from can
             // show a different frame of it; a missing clip is reported when
@@ -2666,6 +2886,12 @@ extension EditorViewController: NSUserInterfaceValidations {
             // visible rather than mysterious.
             guard let document = document, let doc = document.doc else { return false }
             return doc.livePhotoPayload(document.activeLayerIndex) != nil
+        case #selector(layerStyle(_:)), #selector(layerStyleEffect(_:)):
+            return canEditLayerStyle
+        case #selector(pasteLayerStyle(_:)):
+            return canPasteLayerStyle
+        case #selector(copyLayerStyle(_:)), #selector(clearLayerStyle(_:)):
+            return activeLayerHasStyle
         case #selector(adjustmentOptions(_:)):
             guard let document = document, let doc = document.doc else { return false }
             let idx = document.activeLayerIndex
@@ -2674,12 +2900,22 @@ extension EditorViewController: NSUserInterfaceValidations {
             else { return false }
             return AdjustmentLayerSheetController.opHasDialog(op)
         case #selector(deleteLayer(_:)):
-            return (document?.doc?.layerCount ?? 1) > 1
+            // What a removal TAKES is not the number of selected rows — a
+            // group takes its whole subtree (+Groups.swift).
+            return canDeleteLayer
         case #selector(mergeDown(_:)):
-            // The core refuses to merge into a hidden layer; mirror that
-            // here (and match the panel's merge button).
-            let active = document?.activeLayerIndex ?? 0
-            return active >= 1 && document?.doc?.layerInfo(active - 1)?.visible == true
+            // Retitled for a multi-selection (Photoshop's Merge Layers), and
+            // "the layer below" is the previous SIBLING — merging inside a
+            // group never reaches out of it. The core refuses to merge into
+            // a hidden layer; mirror that here (and match the panel's merge
+            // button).
+            let multiple = (document?.layerSelection.isMultiple ?? false)
+            if let menuItem = item as? NSMenuItem {
+                menuItem.title = multiple ? "Merge Layers" : "Merge Down"
+            }
+            if multiple { return canMergeSelectedLayers }
+            guard let below = clippingBaseBelowActiveLayer else { return false }
+            return document?.doc?.layerInfo(below)?.visible == true
         case #selector(flattenImage(_:)):
             return (document?.doc?.layerCount ?? 1) > 1
         case #selector(addLayerMaskRevealAll(_:)), #selector(addLayerMaskHideAll(_:)):
@@ -2702,7 +2938,7 @@ extension EditorViewController: NSUserInterfaceValidations {
                 menuItem.title =
                     activeLayerClipped ? "Release Clipping Mask" : "Create Clipping Mask"
             }
-            return (document?.activeLayerIndex ?? 0) >= 1
+            return clippingBaseBelowActiveLayer != nil
         case #selector(copy(_:)):
             // Copy takes the ACTIVE LAYER's pixels, and an adjustment layer
             // has none worth copying — its effect lives in the composite, so
@@ -2710,11 +2946,24 @@ extension EditorViewController: NSUserInterfaceValidations {
             return !activeLayerIsAdjustment
         case #selector(pasteAsNewLayer(_:)), #selector(paste(_:)):
             return NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
+        case #selector(showInfo(_:)):
+            // Like the other panel tabs: a document is all it needs, and
+            // the guard at the top has already established one.
+            return true
         case #selector(toggleLayersPanel(_:)):
             if let menuItem = item as? NSMenuItem {
                 menuItem.title = layersPanelVisible ? "Hide Layers" : "Show Layers"
             }
             return true
+        case #selector(assignProfile(_:)), #selector(convertToProfile(_:)):
+            return validateColorItem(item)
+        case #selector(showChannels(_:)), #selector(newChannel(_:)),
+             #selector(duplicateChannel(_:)), #selector(deleteChannel(_:)),
+             #selector(channelOptions(_:)), #selector(invertChannel(_:)),
+             #selector(loadChannelAsSelection(_:)), #selector(saveSelectionSheet(_:)),
+             #selector(loadSelectionSheet(_:)), #selector(addLuminosityMasks(_:)),
+             #selector(applyImageSheet(_:)), #selector(calculationsSheet(_:)):
+            return validateChannelItem(item)
         case #selector(undo(_:)):
             if let menuItem = item as? NSMenuItem, let manager = activeUndoManager {
                 menuItem.title = manager.undoMenuItemTitle

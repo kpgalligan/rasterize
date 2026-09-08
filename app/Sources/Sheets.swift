@@ -61,12 +61,14 @@ final class PreviewRenderer {
 let sheetWidth: CGFloat = 420
 let sheetInset: CGFloat = 22
 
-/// Assembles a design-system sheet: 420px card, 15px/700 title, optional
+/// Assembles a design-system sheet: 420px card by default (`width:` for a
+/// wider one — the Layer Style sheet's two panes), 15px/700 title, optional
 /// 12px muted hint, content, then the button row.
 func makeSheetView(
-    title: String? = nil, hint: String? = nil, content: NSView, buttonRow: NSStackView
+    title: String? = nil, hint: String? = nil, content: NSView, buttonRow: NSStackView,
+    width: CGFloat = sheetWidth
 ) -> NSView {
-    let container = NSView(frame: NSRect(x: 0, y: 0, width: sheetWidth, height: 240))
+    let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 240))
     container.wantsLayer = true
     container.layer?.backgroundColor = DS.chromeBackground.cgColor
 
@@ -82,7 +84,7 @@ func makeSheetView(
         hintLabel.font = DS.sans(12)
         hintLabel.textColor = DS.textMuted
         hintLabel.isEditable = false
-        hintLabel.preferredMaxLayoutWidth = sheetWidth - sheetInset * 2
+        hintLabel.preferredMaxLayoutWidth = width - sheetInset * 2
         stackedViews.append(hintLabel)
     }
     stackedViews.append(content)
@@ -97,7 +99,7 @@ func makeSheetView(
     container.addSubview(stack)
     container.addSubview(buttonRow)
     NSLayoutConstraint.activate([
-        container.widthAnchor.constraint(equalToConstant: sheetWidth),
+        container.widthAnchor.constraint(equalToConstant: width),
         stack.topAnchor.constraint(equalTo: container.topAnchor, constant: sheetInset),
         stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: sheetInset),
         stack.trailingAnchor.constraint(
@@ -133,10 +135,19 @@ func fieldLabel(_ text: String) -> NSTextField {
 }
 
 /// Bottom-left 10px mono footnote carried in the button row's leading slot.
+///
+/// `makeButtonRow` pins the row to both edges of the card and gives Cancel
+/// and Apply their intrinsic widths, so the footnote gets whatever is left —
+/// about 210 pt on the standard 420 pt card. A label built by
+/// `NSTextField(labelWithString:)` breaks by CLIPPING, so a longer footnote
+/// used to lose its tail mid-glyph with nothing to show it had: it ends
+/// with a tail ellipsis and carries the whole string as a tooltip instead.
 func sheetFootnote(_ text: String) -> NSTextField {
     let label = NSTextField(labelWithString: text)
     label.font = DS.mono(10)
     label.textColor = DS.textFaint
+    label.lineBreakMode = .byTruncatingTail
+    label.toolTip = text
     return label
 }
 
@@ -146,132 +157,6 @@ func sheetCancelButton(target: AnyObject, action: Selector) -> NSButton {
 
 func sheetApplyButton(target: AnyObject, action: Selector) -> NSButton {
     StickerButton(title: "Apply", style: .primary, target: target, action: action)
-}
-
-// MARK: - ResizeSheetController
-
-final class ResizeSheetController: NSViewController, NSTextFieldDelegate {
-    private let document: ImageDocument
-    private let originalWidth: Int
-    private let originalHeight: Int
-
-    private let widthField = NSTextField(string: "")
-    private let heightField = NSTextField(string: "")
-    private let lockCheckbox = NSButton(
-        checkboxWithTitle: "Lock aspect ratio", target: nil, action: nil)
-    private let filterPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-
-    private static let filters: [(title: String, value: RzResizeFilter)] = [
-        ("Nearest", RZ_FILTER_NEAREST),
-        ("Bilinear", RZ_FILTER_BILINEAR),
-        ("Catmull-Rom", RZ_FILTER_CATMULL_ROM),
-        ("Lanczos3", RZ_FILTER_LANCZOS3),
-    ]
-
-    init(document: ImageDocument) {
-        self.document = document
-        self.originalWidth = document.doc?.width ?? 1
-        self.originalHeight = document.doc?.height ?? 1
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("ResizeSheetController does not support NSCoder")
-    }
-
-    override func loadView() {
-        for field in [widthField, heightField] {
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .none
-            formatter.allowsFloats = false
-            formatter.minimum = 1
-            formatter.maximum = 20000
-            field.formatter = formatter
-            field.delegate = self
-            field.widthAnchor.constraint(equalToConstant: 90).isActive = true
-            DSField.style(field)
-        }
-        widthField.integerValue = originalWidth
-        heightField.integerValue = originalHeight
-        lockCheckbox.state = .on
-
-        filterPopup.addItems(withTitles: Self.filters.map { $0.title })
-        filterPopup.selectItem(at: Self.filters.count - 1) // Lanczos3
-        filterPopup.font = DS.sans(13)
-
-        let currentLabel = fieldLabel("\(originalWidth) × \(originalHeight) px")
-        currentLabel.font = DS.mono(13)
-        currentLabel.textColor = DS.textMuted
-
-        let grid = NSGridView(views: [
-            [fieldLabel("Current size:"), currentLabel],
-            [fieldLabel("Width:"), widthField],
-            [fieldLabel("Height:"), heightField],
-            [NSGridCell.emptyContentView, lockCheckbox],
-            [fieldLabel("Filter:"), filterPopup],
-        ])
-        grid.rowSpacing = 10
-        grid.columnSpacing = 12
-        grid.column(at: 0).xPlacement = .trailing
-        grid.column(at: 0).width = 106
-
-        let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
-        let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
-        view = makeSheetView(
-            title: "Image size", content: grid,
-            buttonRow: makeButtonRow(
-                cancel: cancelButton, apply: applyButton,
-                leading: [sheetFootnote("max 100 MP")]))
-    }
-
-    func controlTextDidChange(_ obj: Notification) {
-        guard lockCheckbox.state == .on,
-              let field = obj.object as? NSTextField,
-              originalWidth > 0, originalHeight > 0
-        else { return }
-        let aspect = Double(originalHeight) / Double(originalWidth)
-        if field === widthField {
-            let w = widthField.integerValue
-            if w > 0 {
-                heightField.integerValue = max(1, Int((Double(w) * aspect).rounded()))
-            }
-        } else if field === heightField {
-            let h = heightField.integerValue
-            if h > 0 {
-                widthField.integerValue = max(1, Int((Double(h) / aspect).rounded()))
-            }
-        }
-    }
-
-    @objc private func applyClicked(_ sender: Any?) {
-        let w = widthField.integerValue
-        let h = heightField.integerValue
-        let index = max(0, min(filterPopup.indexOfSelectedItem, Self.filters.count - 1))
-        let filter = Self.filters[index].value
-        guard w >= 1, h >= 1 else {
-            NSSound.beep()
-            return
-        }
-        guard w * h <= RasterImage.maxResizePixels else {
-            let alert = NSAlert()
-            alert.messageText = "Size Too Large"
-            alert.informativeText =
-                "The resized image cannot exceed 100 megapixels (width × height ≤ 100,000,000)."
-            if let window = view.window {
-                alert.beginSheetModal(for: window)
-            } else {
-                alert.runModal()
-            }
-            return
-        }
-        dismiss(self)
-        document.applyEdit("Image Size") { $0.resized(w: w, h: h, filter: filter) }
-    }
-
-    @objc private func cancelClicked(_ sender: Any?) {
-        dismiss(self)
-    }
 }
 
 // MARK: - CanvasSizeSheetController
@@ -444,6 +329,12 @@ final class CanvasSizeSheetController: NSViewController {
             }
             return
         }
+        // Same refusal, same reason (ChannelBudget): growing the canvas grows
+        // every channel with it.
+        if let reason = document.doc?.channelBudgetRefusal(width: w, height: h) {
+            presentChannelBudgetAlert(reason)
+            return
+        }
         // The anchor pins the existing content: its column/row chooses how
         // much of the size delta lands left/above the old canvas origin.
         let fx = Double(anchorGrid.anchor.col) / 2.0
@@ -473,6 +364,12 @@ final class AdjustSheetController: NSViewController {
     private let baseDoc: RasterDocument?
     private let layerIndex: Int
     private let baseLayer: RasterImage?
+    /// The plane a plane/channel target previews on, captured ONCE here.
+    /// Extracting it is a canvas-sized read, so doing it per slider tick —
+    /// ahead of PreviewRenderer's debounce, on the main thread — would hang
+    /// the dialog on a large image. The edit target cannot change while the
+    /// sheet is modal, so one capture is all there is (ImageDocument+Channels).
+    private let planePreview: PlanePreview?
     private let renderer = PreviewRenderer()
 
     private let brightnessSlider = NSSlider(
@@ -491,6 +388,7 @@ final class AdjustSheetController: NSViewController {
         self.baseDoc = document.doc
         self.layerIndex = document.activeLayerIndex
         self.baseLayer = document.doc?.layerImage(document.activeLayerIndex)
+        self.planePreview = document.targetPlanePreview()
         super.init(nibName: nil, bundle: nil)
         renderer.onRender = { [weak self] cgImage in
             self?.canvas?.previewImage = cgImage
@@ -531,7 +429,9 @@ final class AdjustSheetController: NSViewController {
         let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
         let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
         view = makeSheetView(
-            title: "Adjust colors", content: grid,
+            // The menu item, the sheet title and the undo action name are
+            // one command, so all three read `AdjustmentLayerOp.bcs.displayName`.
+            title: AdjustmentLayerOp.bcs.displayName, content: grid,
             buttonRow: makeButtonRow(
                 cancel: cancelButton, apply: applyButton, leading: [resetButton]))
     }
@@ -548,13 +448,25 @@ final class AdjustSheetController: NSViewController {
         let contrast = contrastSlider.doubleValue
         let saturation = saturationSlider.doubleValue
         let idx = layerIndex
+        // A colour plane or an alpha channel is targeted: preview the op on
+        // THAT plane, in grayscale, not on the whole layer in colour. The
+        // capture was taken in init (see `planePreview`); the closure below
+        // runs on PreviewRenderer's background queue, so it captures the
+        // immutable handle, never `self`.
+        let planePreview = self.planePreview
         renderer.request {
+            if let planePreview = planePreview {
+                return planePreview.preview {
+                    $0.adjusted(
+                        brightness: brightness, contrast: contrast, saturation: saturation)
+                }
+            }
             guard
                 let filtered = baseLayer.adjusted(
                     brightness: brightness, contrast: contrast, saturation: saturation),
                 let previewDoc = baseDoc.withLayerPixels(idx, filtered)
             else { return nil }
-            return previewDoc.flattened()?.makeCGImage()
+            return previewDoc.flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 
@@ -581,7 +493,7 @@ final class AdjustSheetController: NSViewController {
         // Compose on the document's CURRENT active layer, not the captured
         // preview base, so any edit that slipped in while the sheet was open
         // survives.
-        document.applyToActiveLayer("Adjust Colors") {
+        document.applyToActiveLayer(AdjustmentLayerOp.bcs.displayName) {
             $0.adjusted(brightness: brightness, contrast: contrast, saturation: saturation)
         }
     }
@@ -601,6 +513,12 @@ final class BlurSheetController: NSViewController {
     private let baseDoc: RasterDocument?
     private let layerIndex: Int
     private let baseLayer: RasterImage?
+    /// The plane a plane/channel target previews on, captured ONCE here.
+    /// Extracting it is a canvas-sized read, so doing it per slider tick —
+    /// ahead of PreviewRenderer's debounce, on the main thread — would hang
+    /// the dialog on a large image. The edit target cannot change while the
+    /// sheet is modal, so one capture is all there is (ImageDocument+Channels).
+    private let planePreview: PlanePreview?
     private let renderer = PreviewRenderer()
 
     private let sigmaSlider = NSSlider(
@@ -613,6 +531,7 @@ final class BlurSheetController: NSViewController {
         self.baseDoc = document.doc
         self.layerIndex = document.activeLayerIndex
         self.baseLayer = document.doc?.layerImage(document.activeLayerIndex)
+        self.planePreview = document.targetPlanePreview()
         super.init(nibName: nil, bundle: nil)
         renderer.onRender = { [weak self] cgImage in
             self?.canvas?.previewImage = cgImage
@@ -656,11 +575,17 @@ final class BlurSheetController: NSViewController {
         guard let baseDoc = baseDoc, let baseLayer = baseLayer else { return }
         let sigma = sigmaSlider.doubleValue
         let idx = layerIndex
+        // See AdjustSheetController.requestPreview: a plane target previews
+        // the SAME op on that plane, on the handle captured in init.
+        let planePreview = self.planePreview
         renderer.request {
+            if let planePreview = planePreview {
+                return planePreview.preview { $0.blurred(sigma: sigma) }
+            }
             guard let filtered = baseLayer.blurred(sigma: sigma),
                   let previewDoc = baseDoc.withLayerPixels(idx, filtered)
             else { return nil }
-            return previewDoc.flattened()?.makeCGImage()
+            return previewDoc.flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 
@@ -905,6 +830,12 @@ final class SliderSheetController: NSViewController {
     private let baseDoc: RasterDocument?
     private let layerIndex: Int
     private let baseLayer: RasterImage?
+    /// The plane a plane/channel target previews on, captured ONCE here.
+    /// Extracting it is a canvas-sized read, so doing it per slider tick —
+    /// ahead of PreviewRenderer's debounce, on the main thread — would hang
+    /// the dialog on a large image. The edit target cannot change while the
+    /// sheet is modal, so one capture is all there is (ImageDocument+Channels).
+    private let planePreview: PlanePreview?
     private let renderer = PreviewRenderer()
     private var sliders: [NSSlider] = []
     private var valueLabels: [NSTextField] = []
@@ -929,6 +860,7 @@ final class SliderSheetController: NSViewController {
         self.baseDoc = document.doc
         self.layerIndex = document.activeLayerIndex
         self.baseLayer = document.doc?.layerImage(document.activeLayerIndex)
+        self.planePreview = document.targetPlanePreview()
         super.init(nibName: nil, bundle: nil)
         renderer.onRender = { [weak self] cgImage in
             self?.canvas?.previewImage = cgImage
@@ -1001,11 +933,17 @@ final class SliderSheetController: NSViewController {
         let values = mappedValues()
         let idx = layerIndex
         let compute = compute
+        // See AdjustSheetController.requestPreview: a plane target previews
+        // the SAME op on that plane, on the handle captured in init.
+        let planePreview = self.planePreview
         renderer.request {
+            if let planePreview = planePreview {
+                return planePreview.preview { compute($0, values) }
+            }
             guard let filtered = compute(baseLayer, values),
                   let previewDoc = baseDoc.withLayerPixels(idx, filtered)
             else { return nil }
-            return previewDoc.flattened()?.makeCGImage()
+            return previewDoc.flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 
@@ -1178,6 +1116,14 @@ final class AdjustmentLayerSheetController: NSViewController {
             // Curves has a dialog, but a bespoke one (the curve editor in
             // CurvesAdjustmentSheetController), not slider rows.
             return nil
+        case .exposure, .vibrance, .hueSaturation, .colorBalance, .blackAndWhite,
+            .photoFilter, .channelMixer, .selectiveColor, .shadowsHighlights,
+            .whiteBalance, .gradientMap, .colorLookup:
+            // The phase-5 ops have one sheet class each, built from
+            // AdjustmentSchema's table (AdjustmentSheets.make below): their
+            // controls are popups, swatches and gradient editors, not rows
+            // of sliders.
+            return nil
         case .invert, .grayscale, .sepia:
             // Parameterless: created directly, nothing to dialog.
             return nil
@@ -1187,7 +1133,7 @@ final class AdjustmentLayerSheetController: NSViewController {
     /// Whether `op` has a dialog to open — what enables Adjustment Options…
     /// (parameterless ops have none).
     static func opHasDialog(_ op: AdjustmentLayerOp) -> Bool {
-        op == .curves || config(for: op) != nil
+        op == .curves || AdjustmentSheets.hasDialog(op) || config(for: op) != nil
     }
 
     /// The one entry point the editor calls for both creation and re-edit;
@@ -1198,6 +1144,12 @@ final class AdjustmentLayerSheetController: NSViewController {
         op: AdjustmentLayerOp, document: ImageDocument, canvas: ImageCanvasView,
         mode: Mode, onCommitted: ((Int) -> Void)? = nil
     ) -> NSViewController? {
+        if let sheet = AdjustmentSheets.make(
+            op: op, document: document, canvas: canvas,
+            mode: AdjustmentSheetMode.from(mode), onCommitted: onCommitted)
+        {
+            return sheet
+        }
         if op == .curves {
             let controller = CurvesAdjustmentSheetController(
                 document: document, canvas: canvas, mode: mode)
@@ -1283,6 +1235,26 @@ final class AdjustmentLayerSheetController: NSViewController {
         grid.column(at: 0).xPlacement = .trailing
         grid.column(at: 0).width = 106
 
+        // Levels' handles mean nothing without the tones they move — and
+        // the plot is the BACKDROP BELOW the layer, not the composite,
+        // which would already have this layer's correction baked in.
+        var content: NSView = grid
+        if op == .levels {
+            let plot = HistogramView(frame: .zero)
+            Histogram.loadForSheet(
+                document, mode: AdjustmentSheetMode.from(mode), destructiveLayer: nil
+            ) { [weak plot] in plot?.bins = $0 }
+            NSLayoutConstraint.activate([
+                plot.widthAnchor.constraint(equalToConstant: 256),
+                plot.heightAnchor.constraint(equalToConstant: 72),
+            ])
+            let stack = NSStackView(views: [plot, grid])
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 10
+            content = stack
+        }
+
         let title: String
         if case .edit = mode {
             title = "\(op.displayName) options"
@@ -1292,7 +1264,7 @@ final class AdjustmentLayerSheetController: NSViewController {
         let cancelButton = sheetCancelButton(target: self, action: #selector(cancelClicked(_:)))
         let applyButton = sheetApplyButton(target: self, action: #selector(applyClicked(_:)))
         view = makeSheetView(
-            title: title, content: grid,
+            title: title, content: content,
             buttonRow: makeButtonRow(
                 cancel: cancelButton, apply: applyButton,
                 leading: [sheetFootnote("one undo step")]))
@@ -1342,7 +1314,7 @@ final class AdjustmentLayerSheetController: NSViewController {
             case .edit(let idx, _):
                 previewDoc = baseDoc.withLayerMeta(idx, meta)
             }
-            return previewDoc?.flattened()?.makeCGImage()
+            return previewDoc?.flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 
@@ -1381,12 +1353,15 @@ final class AdjustmentLayerSheetController: NSViewController {
             let below = document.activeLayerIndex
             let name = op.displayName
             let before = document.doc
+            // Above a GROUP the new entry lands above the whole subtree,
+            // so the core answers where it went (§4.5).
+            let landing = before?.insertionIndex(above: below) ?? below + 1
             document.applyEdit("New \(name) Layer") {
                 $0.addingAdjustmentLayer(
                     above: below, name: name, meta: meta, selection: selection)
             }
             guard document.doc !== before, let doc = document.doc else { return }
-            onCommitted?(min(below + 1, doc.layerCount - 1))
+            onCommitted?(min(landing, doc.layerCount - 1))
         case .edit(let idx, let original):
             // Closing the dialog with unchanged values must not register an
             // undo step or dirty the file (sorted-key encoding makes the
@@ -1462,6 +1437,13 @@ final class CurvesAdjustmentSheetController: NSViewController {
             }
         }
         super.init(nibName: nil, bundle: nil)
+        // The tones the curve moves, captured once and OFF the main thread:
+        // the BACKDROP BELOW the layer for an adjustment layer, so the plot
+        // shows what the curve acts on rather than the already-corrected
+        // composite.
+        Histogram.loadForSheet(
+            document, mode: AdjustmentSheetMode.from(mode), destructiveLayer: nil
+        ) { [weak self] in self?.curveView.histogram = $0 }
         renderer.onRender = { [weak self] cgImage in
             self?.canvas?.previewImage = cgImage
         }
@@ -1570,7 +1552,7 @@ final class CurvesAdjustmentSheetController: NSViewController {
             case .edit(let idx, _):
                 previewDoc = baseDoc.withLayerMeta(idx, meta)
             }
-            return previewDoc?.flattened()?.makeCGImage()
+            return previewDoc?.flattened()?.makeCGImage(in: baseDoc.colorSpace)
         }
     }
 
@@ -1607,12 +1589,15 @@ final class CurvesAdjustmentSheetController: NSViewController {
             // the sheet was open (an agent's) survives.
             let below = document.activeLayerIndex
             let before = document.doc
+            // Above a GROUP the new entry lands above the whole subtree,
+            // so the core answers where it went (§4.5).
+            let landing = before?.insertionIndex(above: below) ?? below + 1
             document.applyEdit("New \(name) Layer") {
                 $0.addingAdjustmentLayer(
                     above: below, name: name, meta: meta, selection: selection)
             }
             guard document.doc !== before, let doc = document.doc else { return }
-            onCommitted?(min(below + 1, doc.layerCount - 1))
+            onCommitted?(min(landing, doc.layerCount - 1))
         case .edit(let idx, let original):
             // Closing the dialog with unchanged values must not register an
             // undo step or dirty the file (sorted-key encoding makes the
@@ -1649,37 +1634,6 @@ extension SliderSheetController {
             ],
             compute: { image, values in
                 image.hueRotated(degrees: values[0])
-            })
-    }
-
-    static func levels(document: ImageDocument, canvas: ImageCanvasView) -> SliderSheetController {
-        SliderSheetController(
-            document: document, canvas: canvas,
-            title: "Levels", actionName: "Levels",
-            sliders: [
-                FilterSliderDescriptor(
-                    label: "Black:", min: 0, max: 0.99, initial: 0,
-                    format: { String(format: "%.2f", $0) }),
-                FilterSliderDescriptor(
-                    label: "White:", min: 0.01, max: 1, initial: 1,
-                    format: { String(format: "%.2f", $0) }),
-                // Log-feel gamma: the slider runs -1…1 and maps to 10^x, so
-                // 0.1, 1, and 10 sit at the left edge, center, and right edge.
-                FilterSliderDescriptor(
-                    label: "Gamma:", min: -1, max: 1, initial: 0,
-                    map: { pow(10, $0) },
-                    format: { String(format: "%.2f", $0) }),
-            ],
-            willChange: { changed, values in
-                // Keep black < white by pushing the OTHER slider along.
-                if changed == 0, values[1] <= values[0] {
-                    values[1] = min(values[0] + 0.01, 1)
-                } else if changed == 1, values[0] >= values[1] {
-                    values[0] = max(values[1] - 0.01, 0)
-                }
-            },
-            compute: { image, values in
-                image.levels(black: values[0], white: values[1], gamma: values[2])
             })
     }
 

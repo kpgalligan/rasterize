@@ -261,39 +261,23 @@ enum DSField {
 
 // MARK: - PanelTabsView
 
-/// The right panel's tab row: the active tab wears the sticker pill, the
-/// inactive ones are flat text buttons. Selection is owned by the editor
-/// (each panel is built with its own tab marked active).
+/// The right panel's tab row: full-width square tabs, equal widths, a 1px
+/// divider between them and a 1px border under the whole row. The active tab
+/// sits one step lighter than the chrome and wears a 2px accent rule along
+/// its bottom edge; inactive tabs are flat and fill faintly on hover.
+/// Selection is owned by the editor (each panel is built with its own tab
+/// marked active).
 final class PanelTabsView: NSView {
+    private let titles: [String]
+    private let activeIndex: Int
     private let onSelect: (Int) -> Void
+    private var hoveredIndex: Int?
 
     init(titles: [String], activeIndex: Int, onSelect: @escaping (Int) -> Void) {
+        self.titles = titles
+        self.activeIndex = activeIndex
         self.onSelect = onSelect
         super.init(frame: .zero)
-        let stack = NSStackView()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .horizontal
-        stack.spacing = 10
-        for (index, title) in titles.enumerated() {
-            if index == activeIndex {
-                let active = StickerButton(title: title, style: .secondary, target: nil, action: nil)
-                stack.addArrangedSubview(active)
-            } else {
-                let button = NSButton(title: title, target: self, action: #selector(tabClicked(_:)))
-                button.tag = index
-                button.isBordered = false
-                button.font = DS.sans(13, weight: .semibold)
-                button.contentTintColor = DS.textMuted
-                stack.addArrangedSubview(button)
-            }
-        }
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
     }
 
     @available(*, unavailable)
@@ -301,7 +285,86 @@ final class PanelTabsView: NSView {
         fatalError("PanelTabsView does not support NSCoder")
     }
 
-    @objc private func tabClicked(_ sender: NSButton) {
-        onSelect(sender.tag)
+    override var isFlipped: Bool { true }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: DS.tabHeight)
+    }
+
+    /// Equal widths with the rounding remainder folded into the boundaries,
+    /// so N tabs always tile the row exactly.
+    private func tabRect(_ index: Int) -> NSRect {
+        let width = bounds.width / CGFloat(max(titles.count, 1))
+        let left = (CGFloat(index) * width).rounded()
+        let right = (CGFloat(index + 1) * width).rounded()
+        return NSRect(x: left, y: 0, width: right - left, height: bounds.height)
+    }
+
+    private func tabIndex(at point: NSPoint) -> Int? {
+        titles.indices.first { tabRect($0).contains(point) }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(
+            NSTrackingArea(
+                rect: bounds,
+                options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow],
+                owner: self, userInfo: nil))
+    }
+
+    private func updateHover(with event: NSEvent) {
+        let index = tabIndex(at: convert(event.locationInWindow, from: nil))
+        let hovered = index == activeIndex ? nil : index
+        if hovered != hoveredIndex {
+            hoveredIndex = hovered
+            needsDisplay = true
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) { updateHover(with: event) }
+    override func mouseMoved(with event: NSEvent) { updateHover(with: event) }
+
+    override func mouseExited(with event: NSEvent) {
+        guard hoveredIndex != nil else { return }
+        hoveredIndex = nil
+        needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let index = tabIndex(at: point), index != activeIndex else { return }
+        onSelect(index)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        for (index, title) in titles.enumerated() {
+            let rect = tabRect(index)
+            if index == activeIndex || index == hoveredIndex {
+                DS.hoverFill.setFill()
+                rect.fill()
+            }
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: index == activeIndex ? DS.sans(12, weight: .semibold) : DS.sans(12),
+                .foregroundColor: index == activeIndex ? DS.textStrong : DS.textMuted,
+            ]
+            let size = title.size(withAttributes: attributes)
+            title.draw(
+                at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2),
+                withAttributes: attributes)
+        }
+
+        DS.border.setFill()
+        for index in 1..<max(titles.count, 1) {
+            NSRect(x: tabRect(index).minX, y: 0, width: 1, height: bounds.height).fill()
+        }
+        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+
+        if titles.indices.contains(activeIndex) {
+            let active = tabRect(activeIndex)
+            DS.accent.setFill()
+            NSRect(x: active.minX, y: bounds.height - 2, width: active.width, height: 2).fill()
+        }
     }
 }

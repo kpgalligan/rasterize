@@ -1,8 +1,14 @@
 import AppKit
 import Security
 
-/// Keychain storage for the Anthropic API key (generic password). The
-/// ANTHROPIC_API_KEY environment variable, when set, wins over this.
+/// Storage for the Anthropic API key. Resolution order: the
+/// ANTHROPIC_API_KEY environment variable, then a user-only (0600) file
+/// under Application Support. Earlier builds kept the key in the login
+/// keychain, but a keychain item's ACL is bound to the app's code
+/// signature and every rebuild is ad-hoc signed afresh, so each launch
+/// re-prompted for keychain access. The keychain is now read at most
+/// once — to migrate an existing key into the file — and the legacy item
+/// is deleted once the file holds it.
 enum APIKeyStore {
     private static let service = "com.kgalligan.Rasterize"
     private static let account = "AnthropicAPIKey"
@@ -13,10 +19,58 @@ enum APIKeyStore {
         {
             return env
         }
-        return load()
+        if let stored = loadFile() { return stored }
+        // Migration: this keychain read is the last prompt an existing
+        // install ever sees. Denying it just falls back to the panel's
+        // key-entry field.
+        guard let legacy = loadKeychain() else { return nil }
+        if saveFile(legacy) { deleteKeychainItem() }
+        return legacy
     }
 
-    static func load() -> String? {
+    @discardableResult
+    static func save(_ key: String) -> Bool {
+        guard saveFile(key) else { return false }
+        deleteKeychainItem()  // never leave a second, stale copy behind
+        return true
+    }
+
+    // MARK: Key file
+
+    /// ~/Library/Application Support/Rasterize/anthropic_api_key, written
+    /// 0600. Hand-placing a key there works too — loads trim whitespace.
+    private static var keyFileURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("Rasterize", isDirectory: true)
+            .appendingPathComponent("anthropic_api_key", isDirectory: false)
+    }
+
+    private static func loadFile() -> String? {
+        guard let url = keyFileURL,
+            let raw = try? String(contentsOf: url, encoding: .utf8)
+        else { return nil }
+        let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return key.isEmpty ? nil : key
+    }
+
+    private static func saveFile(_ key: String) -> Bool {
+        guard let url = keyFileURL else { return false }
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data((key + "\n").utf8).write(to: url, options: [.atomic])
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    // MARK: Legacy keychain (migration only)
+
+    private static func loadKeychain() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -30,17 +84,13 @@ enum APIKeyStore {
         return String(data: data, encoding: .utf8)
     }
 
-    @discardableResult
-    static func save(_ key: String) -> Bool {
-        let base: [String: Any] = [
+    private static func deleteKeychainItem() {
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        SecItemDelete(base as CFDictionary)
-        var add = base
-        add[kSecValueData as String] = Data(key.utf8)
-        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+        SecItemDelete(query as CFDictionary)
     }
 }
 
@@ -166,7 +216,12 @@ private func assistantToolTrampoline(
     let name = String(cString: toolName)
     let arguments = String(cString: argumentsJSON)
     let run = { AgentServer.shared.execute(tool: name, argumentsJSON: arguments) }
-    let result = Thread.isMainThread ? run() : DispatchQueue.main.sync(execute: run)
+    // The same App Nap assertion the MCP trampoline holds, for the same
+    // reason: a panel conversation runs while the app may be in the
+    // background (`AppActivity`).
+    let result = AppActivity.userInitiated("running the \(name) tool") {
+        Thread.isMainThread ? run() : DispatchQueue.main.sync(execute: run)
+    }
     return result.withCString { rz_agent_string_create($0) }
 }
 

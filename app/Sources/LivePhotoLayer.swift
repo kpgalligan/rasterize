@@ -20,9 +20,15 @@ struct LivePhotoSource {
 /// slot — the core copies and persists those bytes without ever parsing
 /// them, so the schema lives entirely on this side of the FFI.
 ///
-/// JSON shape: `{"type":"live_photo","version":1,"video":<path>,
+/// JSON shape, version 1: `{"type":"live_photo","version":1,"video":<path>,
 /// "still":<path>?,"time":<s>,"key_time":<s>,"duration":<s>,
-/// "width":<px>,"height":<px>}`.
+/// "width":<px>,"height":<px>}`. Version 2 adds `transform` (`[a, b, c, d]`,
+/// row-major: x′ = a·x + b·y, y′ = c·x + d·y — see `LinearMap`) and
+/// `origin_frac` (`[fx, fy]`), and is written only when either is off its
+/// default; a version-1
+/// payload decodes as the identity, so untransformed layers keep opening as
+/// Live Photos in older builds. Position is the layer's offset (the anchor
+/// rule in DescribedLayer.swift: the still's top-left is the source origin).
 ///
 /// The two paths are ABSOLUTE and are not copied into the document: a saved
 /// `.rz` remembers where the Live Photo lived, and moving or deleting those
@@ -34,13 +40,13 @@ struct LivePhotoPayload: Codable, Equatable {
     /// means the layer's metadata was written by something that is not a
     /// live photo layer, and the layer is plain pixels.
     static let typeName = "live_photo"
-    /// The only `version` this app understands. A future schema change bumps
-    /// it, and older builds then read those layers as plain rasters — the
-    /// graceful degradation the format is designed for.
-    static let currentVersion = 1
+    /// The newest schema this app writes; older builds read layers at it as
+    /// plain rasters — the graceful degradation the format is designed for.
+    static let currentVersion = 2
+    /// The schema written when the transform is the identity and the anchor
+    /// is whole-pixel.
+    static let legacyVersion = 1
 
-    var type: String
-    var version: Int
     /// Absolute path of the motion clip every frame is decoded from.
     var video: String
     /// Absolute path of the still photo, when the pair has one.
@@ -54,23 +60,28 @@ struct LivePhotoPayload: Codable, Equatable {
     /// frame.
     var keyTime: Double
     var duration: Double
-    /// The layer's pixel size: the still's when there is a still, else the
-    /// clip's own frame size. Every frame is rendered to it, so scrubbing
-    /// never changes the layer's geometry (and never drops its mask).
+    /// The layer's SOURCE size: the still's when there is a still, else the
+    /// clip's own frame size. Every frame is rendered fit-and-centred into
+    /// it (then through the transform), so scrubbing never changes the
+    /// layer's geometry (and never drops its mask).
     var width: Int
     var height: Int
+    /// The 2×2 linear part of the layer's placement (DescribedLayer.swift).
+    var transform: LinearMap = .identity
+    /// The fraction of the anchor, each component in [0, 1); written only
+    /// by the described-layer commit ops, never by a caller.
+    var originFraction: CGPoint = .zero
 
     enum CodingKeys: String, CodingKey {
-        case type, version, video, still, time, duration, width, height
+        case type, version, video, still, time, duration, width, height, transform
         case keyTime = "key_time"
+        case originFraction = "origin_frac"
     }
 
     init(
         video: URL, still: URL?, time: Double, keyTime: Double, duration: Double,
-        width: Int, height: Int
+        width: Int, height: Int, transform: LinearMap = .identity
     ) {
-        self.type = Self.typeName
-        self.version = Self.currentVersion
         self.video = video.path
         self.still = still?.path
         self.time = time
@@ -78,6 +89,73 @@ struct LivePhotoPayload: Codable, Equatable {
         self.duration = duration
         self.width = width
         self.height = height
+        self.transform = transform
+    }
+
+    /// Decoding validates `type` and `version` (neither is stored: encoding
+    /// writes them back); a missing `transform` or `origin_frac` reads as its
+    /// default, a malformed one throws — `decode` turns every throw into
+    /// "not a Live Photo layer".
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(String.self, forKey: .type)
+        let version = try container.decode(Int.self, forKey: .version)
+        guard type == Self.typeName, version == Self.legacyVersion || version == Self.currentVersion
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .version, in: container, debugDescription: "not a live photo payload")
+        }
+        video = try container.decode(String.self, forKey: .video)
+        still = try container.decodeIfPresent(String.self, forKey: .still)
+        time = try container.decode(Double.self, forKey: .time)
+        keyTime = try container.decode(Double.self, forKey: .keyTime)
+        duration = try container.decode(Double.self, forKey: .duration)
+        width = try container.decode(Int.self, forKey: .width)
+        height = try container.decode(Int.self, forKey: .height)
+        if let elements = try container.decodeIfPresent([Double].self, forKey: .transform) {
+            guard let map = LinearMap(array: elements) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .transform, in: container, debugDescription: "malformed transform")
+            }
+            transform = map
+        }
+        if let pair = try container.decodeIfPresent([Double].self, forKey: .originFraction) {
+            guard let frac = TextLayer.originFraction(from: pair) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .originFraction, in: container,
+                    debugDescription: "malformed origin_frac")
+            }
+            originFraction = frac
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(Self.typeName, forKey: .type)
+        let legacy = isLegacyEncodable
+        try container.encode(legacy ? Self.legacyVersion : Self.currentVersion, forKey: .version)
+        try container.encode(video, forKey: .video)
+        try container.encodeIfPresent(still, forKey: .still)
+        try container.encode(time, forKey: .time)
+        try container.encode(keyTime, forKey: .keyTime)
+        try container.encode(duration, forKey: .duration)
+        try container.encode(width, forKey: .width)
+        try container.encode(height, forKey: .height)
+        guard !legacy else { return }
+        try container.encode(transform.array, forKey: .transform)
+        try container.encode(TextLayer.originFractionArray(originFraction), forKey: .originFraction)
+    }
+
+    /// True when the transform is the identity and the anchor whole-pixel,
+    /// so the payload can be written as version 1.
+    var isLegacyEncodable: Bool {
+        transform.isIdentity && originFraction == .zero
+    }
+
+    func withOriginFraction(_ frac: CGPoint) -> LivePhotoPayload {
+        var updated = self
+        updated.originFraction = frac
+        return updated
     }
 
     var videoURL: URL { URL(fileURLWithPath: video) }
@@ -104,10 +182,36 @@ struct LivePhotoPayload: Codable, Equatable {
         return updated
     }
 
-    /// Whether the frames can still be decoded — false once the clip has
-    /// been moved away or deleted, which is what disables "Select Frame…".
+    /// Whether the clip is still on disk — false once it has been moved
+    /// away or deleted, which is what disables "Select Frame…". A file-exists
+    /// check only; whether the frame the layer SHOWS can be re-rendered is
+    /// `isRenderable`.
     var sourceExists: Bool {
         FileManager.default.fileExists(atPath: video)
+    }
+
+    /// The file `LivePhoto.render` draws the displayed frame from: the still
+    /// at the key moment, the clip anywhere else — the one a prompt names
+    /// when it cannot be read.
+    var renderSource: String {
+        showsStill ? (still ?? video) : video
+    }
+
+    /// Whether a re-render right now would reproduce the frame the layer
+    /// shows — the check a silent re-render (Free Transform, transform_layer,
+    /// a parallelogram distort_layer, the geometry sync) must pass
+    /// (`LayerDescription.isRenderable`). A thumbnail-sized PROBE decode of
+    /// `renderSource` (`LivePhoto.probeFrame`), not a file-exists check, for
+    /// two reasons: at the key moment the frame is the still and only the
+    /// still, so a missing or unreadable still must not be silently replaced
+    /// by the upscaled video frame `LivePhoto.frameImage` falls back to for
+    /// an explicit frame pick; and a clip that exists but no longer decodes
+    /// (truncated, replaced by another file of the same name) would
+    /// otherwise pass the check, fail the render, and leave the Free
+    /// Transform session refusing forever instead of taking the prompt the
+    /// gone-file case takes. Costs one small decode.
+    var isRenderable: Bool {
+        LivePhoto.probeFrame(self) != nil
     }
 
     /// The JSON to store as the layer's metadata; nil only if the payload
@@ -122,30 +226,28 @@ struct LivePhotoPayload: Codable, Equatable {
 
     /// Strict, non-throwing decode: malformed JSON, a missing or unknown
     /// `type`, an unsupported `version`, an empty path, a non-positive
-    /// duration or size, or a non-finite time all mean "this is a plain
-    /// raster layer", never an error and never a crash.
+    /// duration or size, a non-finite time, a singular transform or an
+    /// out-of-range fraction all mean "this is a plain raster layer", never
+    /// an error and never a crash. Each dimension is bounded by the pixel
+    /// cap on its own BEFORE the two are multiplied: a hostile meta with a
+    /// width near Int.max would otherwise overflow the product and trap
+    /// instead of degrading to a plain raster.
     static func decode(_ json: String) -> LivePhotoPayload? {
         guard let data = json.data(using: .utf8),
               let payload = try? JSONDecoder().decode(LivePhotoPayload.self, from: data),
-              payload.type == typeName,
-              payload.version == currentVersion,
               !payload.video.isEmpty,
               payload.duration.isFinite, payload.duration > 0,
               payload.time.isFinite, payload.time >= 0,
               payload.keyTime.isFinite, payload.keyTime >= 0,
               payload.width > 0, payload.height > 0,
-              payload.width * payload.height <= RasterImage.maxResizePixels
+              payload.width <= RasterImage.maxResizePixels,
+              payload.height <= RasterImage.maxResizePixels,
+              payload.width * payload.height <= RasterImage.maxResizePixels,
+              payload.transform.isInvertible,
+              TextLayer.isValidFraction(payload.originFraction)
         else { return nil }
         return payload
     }
-}
-
-/// A decoded Live Photo frame: a STRAIGHT-alpha RGBA8 raster (row 0 = top,
-/// exactly `width * height * 4` bytes) at the payload's reference size.
-struct LivePhotoRaster {
-    let pixels: [UInt8]
-    let width: Int
-    let height: Int
 }
 
 /// Reading Live Photos: pairing the files, decoding frames, and naming the
@@ -287,8 +389,28 @@ enum LivePhoto {
             return image
         }
         // A still that will not decode (or was never there) still has the
-        // clip behind it, so fall through rather than fail.
+        // clip behind it, so fall through rather than fail — for an EXPLICIT
+        // pick, whose preview shows what will land. A silent re-render must
+        // not take this fall-through: `LivePhotoPayload.isRenderable` probes
+        // the still itself at the key moment and gates those paths.
         return videoFrame(payload.videoURL, at: payload.time, maxSide: maxSide)
+    }
+
+    /// The longest side of a probe decode: enough to prove the source
+    /// decodes, small enough to be cheap (ImageIO and AVFoundation both
+    /// decode to a bounding size rather than at full resolution).
+    static let probeSide = 64
+
+    /// A thumbnail of exactly the source `render` would draw — the still at
+    /// the key moment (no fall-through to the clip), the clip's frame at
+    /// this moment otherwise; nil when that source is gone or will not
+    /// decode. Behind `LivePhotoPayload.isRenderable`.
+    static func probeFrame(_ payload: LivePhotoPayload) -> CGImage? {
+        if payload.showsStill {
+            guard let still = payload.stillURL else { return nil }
+            return Bitmap.decodeImage(still, maxSide: probeSide)
+        }
+        return videoFrame(payload.videoURL, at: payload.time, maxSide: probeSide)
     }
 
     /// One exact frame of a clip. The generator's DEFAULT time tolerance is
@@ -308,15 +430,75 @@ enum LivePhoto {
         return try? generator.copyCGImage(at: requested, actualTime: nil)
     }
 
-    /// The layer pixels for `payload`, at its reference size — video frames
-    /// are scaled up to the still's size, so every frame of a layer has the
-    /// same geometry. nil once the source files are gone.
-    static func render(_ payload: LivePhotoPayload) -> LivePhotoRaster? {
-        guard let image = frameImage(payload),
-              let pixels = Bitmap.straightRGBA(
-                from: image, fitting: payload.width, height: payload.height)
+    /// The source rect (DescribedLayer.swift): `(0, 0, width, height)`, NO
+    /// padding — CoreGraphics never paints outside the image quad, and pad
+    /// 0 keeps every untransformed Live Photo raster exactly `width ×
+    /// height` as it always was, so the masks and offsets of existing files
+    /// are untouched.
+    static func sourceRect(_ payload: LivePhotoPayload) -> CGRect {
+        CGRect(x: 0, y: 0, width: CGFloat(payload.width), height: CGFloat(payload.height))
+    }
+
+    /// The layer pixels for `payload` with the still's top-left at `anchor`
+    /// (canvas space) through its transform: the frame scaled to FIT and
+    /// centred inside the source rect (`Bitmap.straightRGBA`'s rule —
+    /// transparent margins if the aspect ratios differ, never stretched, so
+    /// every frame of a layer has the same geometry and an untransformed
+    /// layer renders pixel-identically to its saved raster), drawn under
+    /// the CTM with high-quality interpolation. Pure CoreGraphics, so the
+    /// frame sheet can preview on PreviewRenderer's queue. nil once the
+    /// source files are gone, for a non-finite anchor, or a raster beyond
+    /// the core's pixel cap.
+    ///
+    /// `space` is the space the frame's pixels land in. A frame comes out of
+    /// an AVFoundation video track: the still's ICC is not what the frame
+    /// carries and there is no per-frame profile to preserve, so the honest
+    /// label for a CG-converted frame is whatever space we converted into.
+    /// A re-render inside a document passes that document's space; the OPEN
+    /// path passes the working space and assigns it (see
+    /// `RasterDocument.from(livePhoto:name:space:profile:)`).
+    static func render(
+        _ payload: LivePhotoPayload, anchor: CGPoint, space: CGColorSpace
+    ) -> DescribedRaster? {
+        guard anchor.x.isFinite, anchor.y.isFinite, abs(anchor.x) < 1e7, abs(anchor.y) < 1e7,
+              payload.width > 0, payload.height > 0,
+              let image = frameImage(payload), image.width > 0, image.height > 0
         else { return nil }
-        return LivePhotoRaster(pixels: pixels, width: payload.width, height: payload.height)
+        let frac = DescribedLayer.anchorFraction(anchor)
+        guard let rect = payload.transform.rasterRect(of: sourceRect(payload), fraction: frac)
+        else { return nil }
+        let width = CGFloat(payload.width)
+        let height = CGFloat(payload.height)
+        let scale = min(width / CGFloat(image.width), height / CGFloat(image.height))
+        let drawWidth = max(CGFloat(image.width) * scale, 1)
+        let drawHeight = max(CGFloat(image.height) * scale, 1)
+        let fitRect = CGRect(
+            x: (width - drawWidth) / 2, y: (height - drawHeight) / 2,
+            width: drawWidth, height: drawHeight)
+
+        let pixels = Bitmap.renderStraightRGBA(
+            width: rect.width, height: rect.height, space: space
+        ) { context in
+            // Source space → raster: the anchor's fraction, less the rect's
+            // origin (relative to the anchor's whole part), after the map.
+            context.translateBy(
+                x: frac.x - CGFloat(rect.originX), y: frac.y - CGFloat(rect.originY))
+            context.concatenate(payload.transform.cgAffine)
+            context.interpolationQuality = .high
+            // CGContext.draw(_:in:) draws an image upright in a y-UP space
+            // and the shared context is y-down, so flip locally in SOURCE
+            // space; the centred rect is symmetric, so the flip maps it
+            // onto itself and only the row order changes.
+            context.translateBy(x: 0, y: height)
+            context.scaleBy(x: 1, y: -1)
+            context.draw(image, in: fitRect)
+            return true
+        }
+        guard let pixels = pixels else { return nil }
+        return DescribedRaster(
+            pixels: pixels, width: rect.width, height: rect.height,
+            offsetX: Int(anchor.x.rounded(.down)) + rect.originX,
+            offsetY: Int(anchor.y.rounded(.down)) + rect.originY)
     }
 
     // MARK: - Naming and prompts
@@ -341,13 +523,15 @@ enum LivePhoto {
     /// Photo. App-modal (not a sheet) for the same reason the text prompt is:
     /// the edits that ask — a filter, a fill click, a finished brush stroke —
     /// are synchronous and must have the answer before touching the document.
-    static func confirmRasterize(layerName: String) -> Bool {
+    static func confirmRasterize(layerName: String, reason: String? = nil) -> Bool {
         let alert = NSAlert()
         alert.messageText = "Rasterize Live Photo layer?"
-        alert.informativeText =
+        var text =
             "This edit paints over “\(layerName)”, so the layer will no longer be linked to "
-            + "its Live Photo: you will not be able to choose a different frame. The pixels "
-            + "themselves are kept."
+            + "its Live Photo: you will not be able to choose a different frame, and its "
+            + "transform is dropped with the link. The pixels themselves are kept."
+        if let reason = reason { text += "\n\n" + reason }
+        alert.informativeText = text
         alert.addButton(withTitle: "Rasterize")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
@@ -372,47 +556,60 @@ extension RasterDocument {
     }
 
     /// A single-layer document showing `payload`'s frame — the open path for
-    /// a Live Photo, where the canvas takes the photo's own size.
-    static func from(livePhoto payload: LivePhotoPayload, name: String) -> RasterDocument? {
-        guard let raster = LivePhoto.render(payload),
+    /// a Live Photo, where the canvas takes the photo's own size (the still
+    /// at the origin under the identity: a `width × height` raster at
+    /// offset 0).
+    ///
+    /// The frame is decoded into `space` and the document is labelled with
+    /// `profile`, the ICC bytes of that same space: a video frame carries no
+    /// profile of its own to preserve, so the space we converted into IS the
+    /// truth about these numbers. Callers pass the WORKING space, which
+    /// makes the host's uniform `adoptWorkingSpace()` a natural no-op rather
+    /// than an exemption in the ladder — the frames are converted once, by
+    /// CoreGraphics, and never again.
+    static func from(
+        livePhoto payload: LivePhotoPayload, name: String, space: CGColorSpace, profile: Data
+    ) -> RasterDocument? {
+        guard let raster = LivePhoto.render(payload, anchor: .zero, space: space),
               let image = RasterImage.from(
                 rgba: raster.pixels, width: raster.width, height: raster.height),
               let doc = RasterDocument.from(image: image),
-              let named = doc.withLayerName(0, name)
+              // A rename to the name the fresh document's layer already
+              // carries answers nil (the core's no-op rule), which here means
+              // "already correct" — the same shape as the profile below.
+              let described = (doc.withLayerName(0, name) ?? doc)
+                .withLivePhotoPayload(0, payload)
         else { return nil }
-        return named.withLivePhotoPayload(0, payload)
+        // assigningProfile refuses a profile the document already carries,
+        // which is exactly the sRGB working space against a fresh
+        // document's default — a refusal here means "already correct".
+        return described.assigningProfile(profile) ?? described
     }
 
-    /// Inserts `payload`'s frame as a new layer above `idx` (at offset 0,0,
-    /// like every other added layer) carrying its description, in one handle
-    /// so the whole insertion is one undo step.
+    /// Inserts `payload`'s frame as a new layer above `idx` (anchored at
+    /// 0,0, like every other added layer) carrying its description, in one
+    /// handle so the whole insertion is one undo step.
     func addingLivePhotoLayer(
         above idx: Int, _ payload: LivePhotoPayload, name: String
     ) -> RasterDocument? {
-        guard let raster = LivePhoto.render(payload),
-              let image = RasterImage.from(
-                rgba: raster.pixels, width: raster.width, height: raster.height),
-              let added = addingImageLayer(above: idx, image, name: name)
-        else { return nil }
-        return added.withLivePhotoPayload(idx + 1, payload)
+        addingDescribedLayer(above: idx, .livePhoto(payload), anchor: .zero, name: name)
     }
 
     /// Re-renders live photo layer `idx` at `seconds` and records the new
-    /// moment, as one handle. nil — never an identical copy — when the layer
-    /// carries no Live Photo description, when the requested moment is the
-    /// one already showing (after clamping and key-snapping, so a phantom
-    /// undo step is impossible), or when the source files are gone.
-    ///
-    /// The frame always arrives at the payload's reference size, so a layer
-    /// that still has that size keeps its mask; one that was transformed or
-    /// cropped since snaps back to the full frame, and the core drops the
-    /// mask a resize invalidates.
+    /// moment, as one handle: the chosen frame through the layer's own
+    /// transform at its own anchor, so a rotated or scaled Live Photo keeps
+    /// its placement, and — the raster rect being the same for the same map
+    /// — its mask, name, position, opacity, blend mode and style. nil —
+    /// never an identical copy — when the layer carries no Live Photo
+    /// description, when the requested moment is the one already showing
+    /// (after clamping and key-snapping, so a phantom undo step is
+    /// impossible), or when the source files are gone.
     func settingLivePhotoFrame(_ idx: Int, seconds: Double) -> RasterDocument? {
-        guard let payload = livePhotoPayload(idx) else { return nil }
+        guard let payload = livePhotoPayload(idx), let anchor = describedAnchor(idx) else {
+            return nil
+        }
         let updated = payload.settingTime(seconds)
-        guard updated != payload, let raster = LivePhoto.render(updated) else { return nil }
-        return withLayerPixels(
-            idx, rgba: raster.pixels, width: raster.width, height: raster.height)?
-            .withLivePhotoPayload(idx, updated)
+        guard updated != payload else { return nil }
+        return rerenderingDescribedLayer(idx, .livePhoto(updated), anchor: anchor)
     }
 }

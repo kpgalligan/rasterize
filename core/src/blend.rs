@@ -17,7 +17,11 @@ pub(crate) const LUMA_B: f32 = 0.0722;
 /// The blend-mode set, mirroring `RzBlendMode` in the C header: 0-13 and
 /// 15-22 are separable (per-channel W3C formulas), 23-26 non-separable
 /// (whole-RGB-triple SetLum/SetSat math), and Dissolve (14) replaces alpha
-/// compositing with a deterministic per-canvas-position dither.
+/// compositing with a deterministic per-canvas-position dither. Pass Through
+/// (27) is the odd one out: it is not a blend function at all but a GROUP's
+/// declaration that it has no footprint of its own (see `doc_group`), which
+/// is why [`BlendMode::is_group_only`] exists and every pixel-blending entry
+/// point refuses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum BlendMode {
@@ -48,6 +52,11 @@ pub enum BlendMode {
     Saturation = 24,
     Color = 25,
     Luminosity = 26,
+    /// A GROUP whose children composite straight onto the backdrop below the
+    /// group instead of into a private buffer — Photoshop's "Pass Through",
+    /// and the default for a new group. Meaningless on a raster layer, which
+    /// is why the setter refuses to put it on one.
+    PassThrough = 27,
 }
 
 impl BlendMode {
@@ -81,6 +90,7 @@ impl BlendMode {
             24 => Some(BlendMode::Saturation),
             25 => Some(BlendMode::Color),
             26 => Some(BlendMode::Luminosity),
+            27 => Some(BlendMode::PassThrough),
             _ => None,
         }
     }
@@ -88,6 +98,15 @@ impl BlendMode {
     /// The `RzBlendMode` value for the FFI.
     pub fn to_c(self) -> i32 {
         self as i32
+    }
+
+    /// True for a mode that means something only on a GROUP entry. A
+    /// pass-through group is never composited as a unit, so the compositor
+    /// never asks it for a blend function; everything that blends real
+    /// pixels — the layer blend-mode setter, the paint blends, Apply Image
+    /// and Calculations — refuses it rather than quietly behaving as Normal.
+    pub fn is_group_only(self) -> bool {
+        matches!(self, BlendMode::PassThrough)
     }
 }
 
@@ -347,6 +366,13 @@ pub(crate) fn blend_kind(mode: BlendMode) -> BlendKind {
         BlendMode::Saturation => BlendKind::NonSeparable(b_saturation),
         BlendMode::Color => BlendKind::NonSeparable(b_color),
         BlendMode::Luminosity => BlendKind::NonSeparable(b_luminosity),
+        // Pass Through has meaning only on a GROUP, where the compositor
+        // never asks for a kind because a pass-through group is never
+        // composited as a unit — its children go straight onto the enclosing
+        // accumulator (`doc_group::composite_level_into`). A leaf that
+        // somehow carries it (a v7 file written by a newer build, say)
+        // composites as Normal; the setter refuses to create one.
+        BlendMode::PassThrough => BlendKind::Separable(b_normal),
     }
 }
 
@@ -405,6 +431,36 @@ pub(crate) fn composite_source_into(
     }
     out[3] = ao;
     acc[ai] = out;
+}
+
+/// Composites an accumulator-ALIGNED straight f32 buffer (same size, same
+/// origin as `acc`) onto `acc` with one blend mode and opacity — the clip
+/// group's final step, and the styled clip base's. Per pixel
+/// `sa = buf alpha * opacity`; pixels at alpha 0 are skipped, so colour a
+/// clipped layer left outside the footprint at forced alpha 0 never shows.
+/// `origin` keeps Dissolve's dither canvas-absolute.
+pub(crate) fn composite_buffer_into(
+    acc: &mut [[f32; 4]],
+    buf: &[[f32; 4]],
+    acc_w: u32,
+    acc_h: u32,
+    origin: (i32, i32),
+    kind: BlendKind,
+    opacity: f32,
+) {
+    for ay in 0..i64::from(acc_h) {
+        for ax in 0..i64::from(acc_w) {
+            let ai = (ay as u64 * u64::from(acc_w) + ax as u64) as usize;
+            let src = buf[ai];
+            let sa = src[3] * opacity;
+            if sa <= 0.0 {
+                continue;
+            }
+            let cs = [src[0], src[1], src[2]];
+            let canvas_xy = (ax + i64::from(origin.0), ay + i64::from(origin.1));
+            composite_source_into(acc, ai, cs, sa, kind, canvas_xy);
+        }
+    }
 }
 
 /// The shared straight-alpha source-over write: composites a source with

@@ -1,6 +1,6 @@
 import AppKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = buildMainMenu()
         // Gradient end colors (and brush colors) may carry alpha.
@@ -62,12 +62,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - New from Clipboard
 
     /// Opens the frontmost pasteboard image as a new untitled document
-    /// (Preview's ⌘N behavior). RasterImage.fromPasteboard normalizes the
-    /// bitmap to PNG and routes it through the Rust core so the document
-    /// behaves exactly like an opened file.
+    /// (Preview's ⌘N behavior). `RasterImage.fromPasteboard` decodes the
+    /// bitmap into its own colour space and reports the profile those
+    /// numbers belong to, so the document is tagged and then adopted into
+    /// the working space exactly as an opened file is.
     @objc func newFromClipboard(_ sender: Any?) {
-        guard let raster = RasterImage.fromPasteboard(),
-              let document = ImageDocument.makeUntitled(with: raster)
+        guard let pasted = RasterImage.fromPasteboard(),
+              let document = ImageDocument.makeUntitled(
+                with: pasted.image, profile: pasted.profile)
         else {
             NSSound.beep()
             return
@@ -77,9 +79,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         document.showWindows()
     }
 
+    // MARK: - Working space
+
+    /// Image > Mode > Working Space ▸ — the profile FUTURE opens are
+    /// converted into. The sender's tag indexes `WorkingSpace.allCases`,
+    /// the layer-style menu's idiom, so the menu needs no parallel list to
+    /// stay in step with the enum.
+    ///
+    /// It lives HERE and not on `EditorViewController` — where the rest of
+    /// Image > Mode lives — because it is an app-wide preference that by
+    /// design touches no document: it has to be settable at the Welcome
+    /// window, before the first open, which is exactly the moment a
+    /// document-scoped responder does not exist. Being the only responder
+    /// that implements it also keeps it a single implementation, whether or
+    /// not a document window is key.
+    @objc func setWorkingSpace(_ sender: Any?) {
+        let spaces = WorkingSpace.allCases
+        let tag = (sender as? NSMenuItem)?.tag ?? -1
+        guard spaces.indices.contains(tag) else {
+            NSSound.beep()
+            return
+        }
+        ColorSettings.workingSpace = spaces[tag]
+    }
+
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(newFromClipboard(_:)) {
             return NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil)
+        }
+        if item.action == #selector(setWorkingSpace(_:)) {
+            // Radio marks against the stored preference, so the menu shows
+            // which space new opens use — with or without a document.
+            let spaces = WorkingSpace.allCases
+            item.state = spaces.indices.contains(item.tag)
+                && spaces[item.tag] == ColorSettings.workingSpace ? .on : .off
+            return true
         }
         if item.action == #selector(toggleAgentServer(_:)) {
             let server = AgentServer.shared
@@ -173,6 +207,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Revert to Saved", #selector(NSDocument.revertToSaved(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Export…", #selector(ImageDocument.exportDocument(_:)), "e"))
+        menu.addItem(.separator())
+        // Both selectors are NSDocument's own and reach the document through
+        // the responder chain; ImageDocument.validateUserInterfaceItem gates
+        // them on there being an image.
+        menu.addItem(
+            item(
+                "Page Setup…", #selector(NSDocument.runPageLayout(_:)), "p",
+                [.command, .shift]))
+        menu.addItem(item("Print…", #selector(NSDocument.printDocument(_:)), "p"))
         return menu
     }
 
@@ -199,6 +242,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // text is being edited — otherwise it would swallow every Delete.
         menu.addItem(
             item("Clear", #selector(EditorViewController.clearSelection(_:)), "\u{8}", []))
+        menu.addItem(.separator())
+        // Photoshop hangs this off Edit > Fill…; there is no Fill dialog in
+        // this build (the paint bucket is a TOOL), so it takes Fill's slot
+        // directly, after Clear.
+        menu.addItem(
+            item(
+                "Content-Aware Fill…",
+                #selector(EditorViewController.contentAwareFill(_:))))
         return menu
     }
 
@@ -231,6 +282,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(
             item("Smooth Selection…", #selector(EditorViewController.smoothSelection(_:))))
         menu.addItem(.separator())
+        // Selections ⇄ alpha channels, and the nine luminosity masks the
+        // composite's luma builds.
+        menu.addItem(
+            item("Save Selection…", #selector(EditorViewController.saveSelectionSheet(_:))))
+        menu.addItem(
+            item("Load Selection…", #selector(EditorViewController.loadSelectionSheet(_:))))
+        menu.addItem(.separator())
+        menu.addItem(
+            item("Add Luminosity Masks", #selector(EditorViewController.addLuminosityMasks(_:))))
+        menu.addItem(.separator())
         // Deliberately NO key equivalent: the bare Q toggles the mode from
         // the canvas's keyDown alongside the tool keys, so it can never
         // steal the letter from text editing (the Edit > Clear ⌫ hazard).
@@ -256,6 +317,130 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Image Size…", #selector(EditorViewController.resizeImage(_:)), "i", [.command, .option]))
         menu.addItem(
             item("Canvas Size…", #selector(EditorViewController.showCanvasSize(_:)), "c", [.command, .option]))
+        menu.addItem(.separator())
+        // Colour is document state too, so Mode sits with Image Size and
+        // Canvas Size rather than under a preferences window.
+        menu.addItem(submenuItem(modeMenu()))
+        menu.addItem(.separator())
+        // The destructive adjustments live here, next to Mode and Image
+        // Size, rather than under Filters: they change the picture's tone
+        // and colour, while Filters holds the true pixel filters (blur,
+        // sharpen, pixelate, noise, edge detect, emboss). Every item is the
+        // twin of an adjustment layer of the same name and runs the
+        // identical core op.
+        menu.addItem(submenuItem(adjustmentsMenu()))
+        menu.addItem(.separator())
+        menu.addItem(
+            item("Auto Tone", #selector(EditorViewController.autoTone(_:)), "l",
+                 [.command, .shift]))
+        menu.addItem(
+            item("Auto Contrast", #selector(EditorViewController.autoContrast(_:)), "l",
+                 [.command, .shift, .option]))
+        menu.addItem(
+            item("Auto Color", #selector(EditorViewController.autoColor(_:)), "b",
+                 [.command, .shift]))
+        menu.addItem(.separator())
+        // Channel arithmetic and the channel list itself live under Image,
+        // not Layer: channels are DOCUMENT state, next to Image Size and
+        // Canvas Size.
+        menu.addItem(item("Apply Image…", #selector(EditorViewController.applyImageSheet(_:))))
+        menu.addItem(
+            item("Calculations…", #selector(EditorViewController.calculationsSheet(_:))))
+        menu.addItem(submenuItem(channelsMenu()))
+        return menu
+    }
+
+    /// Image > Adjustments: every tone and colour adjustment that rewrites
+    /// the active layer's pixels, in Photoshop's grouping with ours folded
+    /// in — tonal, then colour, then mapping, then the odds and ends. The
+    /// twelve phase-5 ops share one selector, each item's tag indexing
+    /// `AdjustmentMenuOrder.newOps` (layerStyleMenu's idiom); the older
+    /// items keep the selectors and shortcuts they already had.
+    private func adjustmentsMenu() -> NSMenu {
+        let menu = NSMenu(title: "Adjustments")
+        func destructive(_ op: AdjustmentLayerOp) -> NSMenuItem {
+            let entry = item(
+                op.displayName + "…", #selector(EditorViewController.showAdjustmentSheet(_:)))
+            // Every op passed here is in the list, so the fallback is
+            // unreachable; it exists so a mis-edit beeps rather than
+            // opening the wrong op's dialog.
+            entry.tag = AdjustmentMenuOrder.newOps.firstIndex(of: op) ?? -1
+            return entry
+        }
+        menu.addItem(
+            item(
+                "Brightness/Contrast/Saturation…",
+                #selector(EditorViewController.showAdjustments(_:)), "a",
+                [.command, .option]))
+        menu.addItem(item("Levels…", #selector(EditorViewController.showLevels(_:))))
+        menu.addItem(destructive(.exposure))
+        menu.addItem(.separator())
+        menu.addItem(destructive(.vibrance))
+        menu.addItem(destructive(.hueSaturation))
+        menu.addItem(destructive(.colorBalance))
+        menu.addItem(destructive(.blackAndWhite))
+        menu.addItem(destructive(.photoFilter))
+        menu.addItem(destructive(.channelMixer))
+        menu.addItem(destructive(.colorLookup))
+        menu.addItem(.separator())
+        menu.addItem(item("Invert", #selector(EditorViewController.applyInvert(_:)), "i"))
+        menu.addItem(item("Posterize…", #selector(EditorViewController.showPosterize(_:))))
+        menu.addItem(item("Threshold…", #selector(EditorViewController.showThreshold(_:))))
+        menu.addItem(destructive(.gradientMap))
+        menu.addItem(destructive(.selectiveColor))
+        menu.addItem(.separator())
+        menu.addItem(destructive(.shadowsHighlights))
+        menu.addItem(destructive(.whiteBalance))
+        menu.addItem(item("Hue Rotate…", #selector(EditorViewController.showHueRotate(_:))))
+        menu.addItem(item("Grayscale", #selector(EditorViewController.applyGrayscale(_:))))
+        menu.addItem(item("Sepia", #selector(EditorViewController.applySepia(_:))))
+        return menu
+    }
+
+    /// Image > Mode: the document's colour profile (relabel vs. convert)
+    /// and, one level down, the app-wide working space new opens are
+    /// converted into. Neither profile command earns a key equivalent —
+    /// they are deliberate, occasional acts. Enablement and the working
+    /// space's check marks come from
+    /// EditorViewController.validateUserInterfaceItem.
+    private func modeMenu() -> NSMenu {
+        let menu = NSMenu(title: "Mode")
+        menu.addItem(
+            item("Assign Profile…", #selector(EditorViewController.assignProfile(_:))))
+        menu.addItem(
+            item("Convert to Profile…", #selector(EditorViewController.convertToProfile(_:))))
+        menu.addItem(.separator())
+        menu.addItem(submenuItem(workingSpaceMenu()))
+        return menu
+    }
+
+    /// Image > Mode > Working Space: one check-marked radio item per
+    /// WorkingSpace, its tag indexing `WorkingSpace.allCases` (the
+    /// layerStyleMenu tag idiom). It affects FUTURE opens only.
+    private func workingSpaceMenu() -> NSMenu {
+        let menu = NSMenu(title: "Working Space")
+        for (tag, space) in WorkingSpace.allCases.enumerated() {
+            let entry = item(space.displayName, #selector(setWorkingSpace(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    private func channelsMenu() -> NSMenu {
+        let menu = NSMenu(title: "Channels")
+        menu.addItem(item("New Channel", #selector(EditorViewController.newChannel(_:))))
+        menu.addItem(
+            item("Duplicate Channel", #selector(EditorViewController.duplicateChannel(_:))))
+        menu.addItem(item("Delete Channel", #selector(EditorViewController.deleteChannel(_:))))
+        menu.addItem(
+            item("Channel Options…", #selector(EditorViewController.channelOptions(_:))))
+        menu.addItem(item("Invert Channel", #selector(EditorViewController.invertChannel(_:))))
+        menu.addItem(.separator())
+        menu.addItem(
+            item(
+                "Load Channel as Selection",
+                #selector(EditorViewController.loadChannelAsSelection(_:))))
         return menu
     }
 
@@ -268,8 +453,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Photo Frame… below then scrubs that layer's timeline.
         menu.addItem(
             item("Place Live Photo…", #selector(EditorViewController.placeLivePhoto(_:))))
-        menu.addItem(item("Duplicate Layer", #selector(EditorViewController.duplicateLayer(_:)), "j"))
+        // ⌘J moves to Layer Via Copy below, which is where Photoshop has
+        // it; Duplicate Layer keeps its item and the panel's button. The
+        // ACTION behind ⌘J routes back here for a group, an adjustment
+        // layer, a described layer, several layers selected, or no selection
+        // (EditorViewController+MergeStamp.swift) — layer_via is a
+        // single-entry op, so acting on the primary alone would silently
+        // drop the rest of a multi-selection.
+        menu.addItem(item("Duplicate Layer", #selector(EditorViewController.duplicateLayer(_:))))
         menu.addItem(item("Delete Layer", #selector(EditorViewController.deleteLayer(_:))))
+        menu.addItem(.separator())
+        // Layer groups. ⌘G / ⇧⌘G are Photoshop's; ⌥⌘G (Create Clipping
+        // Mask, below) is untouched.
+        menu.addItem(item("New Group", #selector(EditorViewController.groupLayers(_:)), "g"))
+        menu.addItem(
+            item(
+                "Ungroup Layers", #selector(EditorViewController.ungroupLayers(_:)), "g",
+                [.command, .shift]))
+        menu.addItem(.separator())
+        menu.addItem(item("Layer Via Copy", #selector(EditorViewController.layerViaCopy(_:)), "j"))
+        menu.addItem(
+            item(
+                "Layer Via Cut", #selector(EditorViewController.layerViaCut(_:)), "j",
+                [.command, .shift]))
+        menu.addItem(.separator())
+        menu.addItem(submenuItem(arrangeMenu()))
+        menu.addItem(submenuItem(alignMenu()))
+        menu.addItem(submenuItem(distributeMenu()))
+        menu.addItem(submenuItem(lockMenu()))
+        menu.addItem(.separator())
+        menu.addItem(item("Link Layers", #selector(EditorViewController.linkLayers(_:))))
+        menu.addItem(item("Unlink Layers", #selector(EditorViewController.unlinkLayers(_:))))
         menu.addItem(.separator())
         // Modal on-canvas session, not a tool: Return commits, Escape cancels.
         menu.addItem(item("Free Transform", #selector(EditorViewController.freeTransform(_:)), "t"))
@@ -287,6 +501,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // adjustment layer whose op has one (validation in the editor).
         menu.addItem(
             item("Adjustment Options…", #selector(EditorViewController.adjustmentOptions(_:))))
+        menu.addItem(submenuItem(layerStyleMenu()))
         // Enabled only on a layer that still carries its Live Photo
         // description (validation in the editor).
         menu.addItem(
@@ -294,9 +509,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "Select Live Photo Frame…",
                 #selector(EditorViewController.selectLivePhotoFrame(_:))))
         menu.addItem(.separator())
+        // Retitled "Merge Layers" by the editor's validation when several
+        // entries are selected (Photoshop's own retitle).
         menu.addItem(
             item("Merge Down", #selector(EditorViewController.mergeDown(_:)), "e", [.command, .shift]))
+        // Deliberately no key equivalent: Photoshop's ⇧⌘E is this build's
+        // Merge Down and its ⌘E is File ▸ Export, and renegotiating either
+        // silently would break a habit that already exists here.
+        menu.addItem(item("Merge Visible", #selector(EditorViewController.mergeVisible(_:))))
+        menu.addItem(
+            item(
+                "Stamp Visible", #selector(EditorViewController.stampVisible(_:)), "e",
+                [.command, .shift, .option]))
         menu.addItem(item("Flatten Image", #selector(EditorViewController.flattenImage(_:))))
+        return menu
+    }
+
+    /// Layer ▸ Arrange. Each item moves the entry among its SIBLINGS only —
+    /// never into or out of a group; a drag in the panel, or reorder_layer
+    /// with a depth, is how an entry changes level.
+    private func arrangeMenu() -> NSMenu {
+        let menu = NSMenu(title: "Arrange")
+        menu.addItem(
+            item(
+                "Bring to Front", #selector(EditorViewController.bringToFront(_:)), "]",
+                [.command, .shift]))
+        menu.addItem(
+            item("Bring Forward", #selector(EditorViewController.bringForward(_:)), "]"))
+        menu.addItem(
+            item("Send Backward", #selector(EditorViewController.sendBackward(_:)), "["))
+        menu.addItem(
+            item(
+                "Send to Back", #selector(EditorViewController.sendToBack(_:)), "[",
+                [.command, .shift]))
+        return menu
+    }
+
+    /// Layer ▸ Align. Aligns the selection's CONTENT bounds — the box of
+    /// actually opaque pixels, which for a canvas-sized layer is nothing
+    /// like its pixel rect.
+    private func alignMenu() -> NSMenu {
+        let menu = NSMenu(title: "Align")
+        menu.addItem(item("Left Edges", #selector(EditorViewController.alignLeft(_:))))
+        menu.addItem(
+            item("Horizontal Centers", #selector(EditorViewController.alignCenterX(_:))))
+        menu.addItem(item("Right Edges", #selector(EditorViewController.alignRight(_:))))
+        menu.addItem(.separator())
+        menu.addItem(item("Top Edges", #selector(EditorViewController.alignTop(_:))))
+        menu.addItem(item("Vertical Centers", #selector(EditorViewController.alignCenterY(_:))))
+        menu.addItem(item("Bottom Edges", #selector(EditorViewController.alignBottom(_:))))
+        return menu
+    }
+
+    /// Layer ▸ Distribute. Equalizes the GAPS between adjacent entries, so
+    /// it needs three of them (validation in the editor).
+    private func distributeMenu() -> NSMenu {
+        let menu = NSMenu(title: "Distribute")
+        menu.addItem(
+            item(
+                "Horizontal Spacing",
+                #selector(EditorViewController.distributeHorizontally(_:))))
+        menu.addItem(
+            item("Vertical Spacing", #selector(EditorViewController.distributeVertically(_:))))
+        return menu
+    }
+
+    /// Layer ▸ Lock. Each item toggles its own bit over the selection, with
+    /// the checkmark showing the active layer's state; Lock All is the three
+    /// bits together (PSD's own spelling), on ⌘/.
+    private func lockMenu() -> NSMenu {
+        let menu = NSMenu(title: "Lock")
+        menu.addItem(
+            item("Transparency", #selector(EditorViewController.lockTransparency(_:))))
+        menu.addItem(item("Pixels", #selector(EditorViewController.lockPixels(_:))))
+        menu.addItem(item("Position", #selector(EditorViewController.lockPosition(_:))))
+        menu.addItem(.separator())
+        menu.addItem(item("Lock All", #selector(EditorViewController.lockAll(_:)), "/"))
         return menu
     }
 
@@ -320,6 +608,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Posterize…", #selector(EditorViewController.newAdjustmentLayerPosterize(_:))))
         menu.addItem(
             item("Threshold…", #selector(EditorViewController.newAdjustmentLayerThreshold(_:))))
+        // The phase-5 ops, in AdjustmentMenuOrder's one order (shared with
+        // Image > Adjustments and the panel footer), tag-indexed into it.
+        for (tag, op) in AdjustmentMenuOrder.newOps.enumerated() {
+            let entry = item(
+                op.displayName + "…",
+                #selector(EditorViewController.newAdjustmentLayerOp(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
         menu.addItem(.separator())
         menu.addItem(
             item("Invert", #selector(EditorViewController.newAdjustmentLayerInvert(_:))))
@@ -352,51 +649,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return menu
     }
 
+    /// Layer > Layer Style: Blending Options…, one item per effect (each
+    /// opens the sheet on that effect, turned on — the item's tag indexes
+    /// LayerStyleEffectKind.allCases, Photoshop's dialog order), then
+    /// Copy / Paste / Clear. Enablement comes from
+    /// EditorViewController.validateUserInterfaceItem.
+    private func layerStyleMenu() -> NSMenu {
+        let menu = NSMenu(title: "Layer Style")
+        menu.addItem(
+            item("Blending Options…", #selector(EditorViewController.layerStyle(_:))))
+        menu.addItem(.separator())
+        for (tag, kind) in LayerStyleEffectKind.allCases.enumerated() {
+            let entry = item(
+                kind.title + "…", #selector(EditorViewController.layerStyleEffect(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        menu.addItem(.separator())
+        menu.addItem(
+            item("Copy Layer Style", #selector(EditorViewController.copyLayerStyle(_:))))
+        menu.addItem(
+            item("Paste Layer Style", #selector(EditorViewController.pasteLayerStyle(_:))))
+        menu.addItem(
+            item("Clear Layer Style", #selector(EditorViewController.clearLayerStyle(_:))))
+        return menu
+    }
+
+    /// Filters: the true PIXEL filters. Every tone and colour adjustment
+    /// moved to Image > Adjustments when the batch grew past what one flat
+    /// menu can carry — same selectors, same shortcuts, same behaviour.
     private func filtersMenu() -> NSMenu {
         let menu = NSMenu(title: "Filters")
-        menu.addItem(
-            item(
-                "Adjust Colors…", #selector(EditorViewController.showAdjustments(_:)), "a",
-                [.command, .option]))
-        menu.addItem(item("Levels…", #selector(EditorViewController.showLevels(_:))))
-        menu.addItem(item("Hue Rotate…", #selector(EditorViewController.showHueRotate(_:))))
-        menu.addItem(item("Threshold…", #selector(EditorViewController.showThreshold(_:))))
-        menu.addItem(item("Posterize…", #selector(EditorViewController.showPosterize(_:))))
-        menu.addItem(.separator())
-        menu.addItem(item("Grayscale", #selector(EditorViewController.applyGrayscale(_:))))
-        menu.addItem(item("Invert", #selector(EditorViewController.applyInvert(_:)), "i"))
-        menu.addItem(item("Sepia", #selector(EditorViewController.applySepia(_:))))
-        menu.addItem(.separator())
         menu.addItem(item("Gaussian Blur…", #selector(EditorViewController.showBlur(_:))))
         menu.addItem(item("Sharpen", #selector(EditorViewController.applySharpen(_:))))
         menu.addItem(item("Pixelate…", #selector(EditorViewController.showPixelate(_:))))
         menu.addItem(item("Add Noise…", #selector(EditorViewController.showAddNoise(_:))))
         menu.addItem(item("Edge Detect", #selector(EditorViewController.applyEdgeDetect(_:))))
         menu.addItem(item("Emboss", #selector(EditorViewController.applyEmboss(_:))))
+        menu.addItem(.separator())
+        // The AUTOMATIC red-eye pass: Vision's face landmarks find the eyes
+        // and the same core op runs on each. The Red Eye tool's drag
+        // rectangle is the manual route.
+        menu.addItem(
+            item("Remove Red Eye", #selector(EditorViewController.removeRedEye(_:))))
         return menu
     }
 
     private func toolsMenu() -> NSMenu {
         // Deliberately no key equivalents: the bare tool keys (v/b/e/t) are
         // handled in ImageCanvasView.keyDown so they never steal keystrokes
-        // from text editing.
+        // from text editing. Built from the rail's own groups, in rail
+        // order, so this menu and the rail can never disagree about the
+        // tool set; a planned tool's item is validation-disabled.
         let menu = NSMenu(title: "Tools")
-        menu.addItem(item("Select Tool", #selector(EditorViewController.selectSelectTool(_:))))
-        menu.addItem(
-            item("Ellipse Select Tool", #selector(EditorViewController.selectEllipseTool(_:))))
-        menu.addItem(item("Lasso Tool", #selector(EditorViewController.selectLassoTool(_:))))
-        menu.addItem(item("Magic Wand Tool", #selector(EditorViewController.selectWandTool(_:))))
-        menu.addItem(
-            item("Subject Select Tool", #selector(EditorViewController.selectSubjectTool(_:))))
-        menu.addItem(item("Move Tool", #selector(EditorViewController.selectMoveTool(_:))))
-        menu.addItem(item("Brush Tool", #selector(EditorViewController.selectBrushTool(_:))))
-        menu.addItem(item("Eraser Tool", #selector(EditorViewController.selectEraserTool(_:))))
-        menu.addItem(item("Fill Tool", #selector(EditorViewController.selectFillTool(_:))))
-        menu.addItem(
-            item("Gradient Tool", #selector(EditorViewController.selectGradientTool(_:))))
-        menu.addItem(item("Text Tool", #selector(EditorViewController.selectTextTool(_:))))
-        menu.addItem(
-            item("Eyedropper Tool", #selector(EditorViewController.selectEyedropperTool(_:))))
+        for group in EditorTool.railGroups {
+            for tool in group {
+                menu.addItem(item("\(tool.displayName) Tool", tool.action))
+            }
+        }
         menu.addItem(.separator())
         menu.addItem(item("Allow Agent Connections", #selector(toggleAgentServer(_:))))
         return menu
@@ -421,8 +731,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 [.command, .option]))
         menu.addItem(
             item(
+                "Channels", #selector(EditorViewController.showChannels(_:)), "c",
+                [.command, .control]))
+        menu.addItem(
+            item(
                 "Assistant", #selector(EditorViewController.showAssistant(_:)), "a",
                 [.command, .control]))
+        menu.addItem(
+            item(
+                "Info", #selector(EditorViewController.showInfo(_:)), "i",
+                [.command, .control]))
+        menu.addItem(.separator())
+        // Photoshop puts Rulers on ⌘R, which is TAKEN here by Image > Rotate
+        // 90° Clockwise — and renegotiating a shortcut silently is exactly
+        // what the Merge Visible comment below forbids. ⌃⌘R is free and is
+        // the View menu's own convention (Channels ⌃⌘C, Assistant ⌃⌘A,
+        // Info ⌃⌘I). Every other shortcut in this block is Photoshop's own.
+        menu.addItem(
+            item(
+                "Rulers", #selector(EditorViewController.toggleRulers(_:)), "r",
+                [.command, .control]))
+        menu.addItem(submenuItem(rulerUnitsMenu()))
+        menu.addItem(.separator())
+        menu.addItem(
+            item("Show Guides", #selector(EditorViewController.toggleGuides(_:)), ";"))
+        menu.addItem(
+            item(
+                "Lock Guides", #selector(EditorViewController.toggleLockGuides(_:)), ";",
+                [.command, .option]))
+        menu.addItem(item("Clear Guides", #selector(EditorViewController.clearGuides(_:))))
+        menu.addItem(item("New Guide…", #selector(EditorViewController.newGuide(_:))))
+        menu.addItem(submenuItem(guideColorMenu()))
+        menu.addItem(.separator())
+        menu.addItem(item("Show Grid", #selector(EditorViewController.toggleGrid(_:)), "'"))
+        menu.addItem(submenuItem(gridSpacingMenu()))
+        menu.addItem(submenuItem(gridSubdivisionsMenu()))
+        menu.addItem(.separator())
+        menu.addItem(
+            item(
+                "Snap", #selector(EditorViewController.toggleSnap(_:)), ";",
+                [.command, .shift]))
+        menu.addItem(submenuItem(snapToMenu()))
+        return menu
+    }
+
+    /// View ▸ Ruler Units: one radio item per CanvasUnit, its tag indexing
+    /// `CanvasUnit.allCases` (the workingSpaceMenu idiom).
+    private func rulerUnitsMenu() -> NSMenu {
+        let menu = NSMenu(title: "Ruler Units")
+        for (tag, unit) in CanvasUnit.allCases.enumerated() {
+            let entry = item(unit.displayName, #selector(EditorViewController.setRulerUnit(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    /// View ▸ Guide Color, tag-indexing `GuideColor.allCases`.
+    private func guideColorMenu() -> NSMenu {
+        let menu = NSMenu(title: "Guide Color")
+        for (tag, color) in GuideColor.allCases.enumerated() {
+            let entry = item(
+                color.displayName, #selector(EditorViewController.setGuideColor(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    /// View ▸ Grid Spacing — presets in the CURRENT ruler unit, so the same
+    /// 100 is 100 px, 100 in or 100 % depending on View ▸ Ruler Units.
+    private func gridSpacingMenu() -> NSMenu {
+        let menu = NSMenu(title: "Grid Spacing")
+        for (tag, spacing) in CanvasGrid.spacingPresets.enumerated() {
+            let entry = item(
+                "\(Int(spacing))", #selector(EditorViewController.setGridSpacing(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    private func gridSubdivisionsMenu() -> NSMenu {
+        let menu = NSMenu(title: "Grid Subdivisions")
+        for (tag, count) in CanvasGrid.subdivisionPresets.enumerated() {
+            let entry = item(
+                "\(count)", #selector(EditorViewController.setGridSubdivisions(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    /// View ▸ Snap To: five independent bits plus All / None — the Layer ▸
+    /// Lock template with a different set, so five toggles cost ONE selector
+    /// (the tag indexes `SnapTarget.named`).
+    private func snapToMenu() -> NSMenu {
+        let menu = NSMenu(title: "Snap To")
+        for (tag, target) in SnapTarget.named.enumerated() {
+            let entry = item(
+                target.name, #selector(EditorViewController.toggleSnapTarget(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        menu.addItem(.separator())
+        menu.addItem(item("All", #selector(EditorViewController.snapToAll(_:))))
+        menu.addItem(item("None", #selector(EditorViewController.snapToNone(_:))))
         return menu
     }
 

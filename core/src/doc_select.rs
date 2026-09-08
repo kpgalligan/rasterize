@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 
 use crate::blend::source_over_rgba8;
 use crate::doc::RzDocument;
+use crate::doc_lock::EditKind;
 
 /// Per-channel similarity: every RGBA channel within `tolerance`.
 fn similar(a: [u8; 4], b: [u8; 4], tolerance: u8) -> bool {
@@ -111,6 +112,24 @@ impl RzDocument {
         contiguous: bool,
         mask: Option<&[u8]>,
     ) -> Option<Self> {
+        self.under_locks(idx, EditKind::Pixels, |doc| {
+            doc.bucket_fill_unlocked(idx, x, y, tolerance, color, contiguous, mask)
+        })
+    }
+
+    /// The body of [`Self::bucket_fill`], outside the lock gate. Split out
+    /// only so the gate is one line; that method is its only caller.
+    #[allow(clippy::too_many_arguments)]
+    fn bucket_fill_unlocked(
+        &self,
+        idx: usize,
+        x: i32,
+        y: i32,
+        tolerance: u8,
+        color: [u8; 4],
+        contiguous: bool,
+        mask: Option<&[u8]>,
+    ) -> Option<Self> {
         let canvas_px = self.width as usize * self.height as usize;
         if let Some(mask) = mask {
             if mask.len() != canvas_px {
@@ -125,7 +144,7 @@ impl RzDocument {
                 return None;
             }
         }
-        let layer = self.layers.get(idx)?;
+        let layer = self.raster_layer(idx)?;
         let (off_x, off_y) = layer.offset;
         let (lw, lh) = layer.pixels.dimensions();
         let lx = x.checked_sub(off_x)?;
@@ -173,6 +192,24 @@ impl RzDocument {
         radial: bool,
         mask: Option<&[u8]>,
     ) -> Option<Self> {
+        self.under_locks(idx, EditKind::Pixels, |doc| {
+            doc.gradient_unlocked(idx, p0, p1, start, end, radial, mask)
+        })
+    }
+
+    /// The body of [`Self::gradient`], outside the lock gate. Split out only
+    /// so the gate is one line; that method is its only caller.
+    #[allow(clippy::too_many_arguments)]
+    fn gradient_unlocked(
+        &self,
+        idx: usize,
+        p0: (f32, f32),
+        p1: (f32, f32),
+        start: [u8; 4],
+        end: [u8; 4],
+        radial: bool,
+        mask: Option<&[u8]>,
+    ) -> Option<Self> {
         if let Some(mask) = mask {
             if mask.len() != self.width as usize * self.height as usize {
                 return None;
@@ -186,7 +223,7 @@ impl RzDocument {
         if len2 <= 0.0 {
             return None;
         }
-        let layer = self.layers.get(idx)?;
+        let layer = self.raster_layer(idx)?;
         let (off_x, off_y) = layer.offset;
         let c0 = start.map(|v| f32::from(v) / 255.0);
         let c1 = end.map(|v| f32::from(v) / 255.0);
@@ -238,10 +275,22 @@ impl RzDocument {
     /// has no seed to validate either) it succeeds, returning a document
     /// whose pixels are unchanged.
     pub fn clear_selection(&self, idx: usize, mask: &[u8]) -> Option<Self> {
-        if mask.len() != self.width as usize * self.height as usize {
-            return None;
-        }
-        let layer = self.layers.get(idx)?;
+        self.under_locks(idx, EditKind::Pixels, |doc| {
+            if mask.len() != doc.width as usize * doc.height as usize {
+                return None;
+            }
+            doc.clear_selection_unlocked(idx, mask)
+        })
+    }
+
+    /// The body of [`Self::clear_selection`], outside the lock gate. Split
+    /// out only so the gate is one line; that method is its only caller.
+    /// A transparency-locked layer comes back byte-identical from this one —
+    /// clearing IS an alpha edit — which is exactly the case `under_locks`'
+    /// compare-after-restore latch turns into `None` rather than a phantom
+    /// undo step.
+    fn clear_selection_unlocked(&self, idx: usize, mask: &[u8]) -> Option<Self> {
+        let layer = self.raster_layer(idx)?;
         let (off_x, off_y) = layer.offset;
         let mut pixels = (*layer.pixels).clone();
         for (px_x, px_y, px) in pixels.enumerate_pixels_mut() {
@@ -433,7 +482,7 @@ fn coverage_byte(x: f32) -> u8 {
 /// contour (see the section comment above): positive inside (coverage
 /// `>= 128`), negative outside, `+inf`/`-inf` when the binarized mask has
 /// no outside (resp. inside) pixels at all.
-fn signed_distance_field(mask: &[u8], w: usize, h: usize) -> Vec<f32> {
+pub(crate) fn signed_distance_field(mask: &[u8], w: usize, h: usize) -> Vec<f32> {
     let len = w * h;
     let mut to_outside = vec![0f32; len];
     let mut to_inside = vec![0f32; len];

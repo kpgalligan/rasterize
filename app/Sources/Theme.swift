@@ -37,6 +37,14 @@ enum DS {
     static let checkerA = NSColor(white: 0.886, alpha: 1)
     static let checkerB = NSColor(white: 0.941, alpha: 1)
 
+    /// The document grid and the pixel lattice. Deliberately the SEMANTIC
+    /// label colour rather than an ink of its own: a grid is a measuring
+    /// aid, not a mark, so it should follow the appearance the way the rest
+    /// of the chrome does. The alpha is applied at the draw site, because
+    /// the major lines, the subdivisions and the pixel lattice each want a
+    /// different weight of the same colour.
+    static var gridInk: NSColor { .labelColor }
+
     // MARK: - Type
 
     /// Source Sans 3 for UI text; system face when the vendored font is
@@ -75,12 +83,25 @@ enum DS {
             ])
     }
 
-    // MARK: - Metrics
+    // MARK: - Metrics (the redesign's fixed chrome dimensions)
 
-    static let toolbarHeight: CGFloat = 58
-    static let statusBarHeight: CGFloat = 30
+    static let railWidth: CGFloat = 48
+    static let railSlot: CGFloat = 34
+    static let railSlotRadius: CGFloat = 5
+    static let optionsBarHeight: CGFloat = 36
+    static let controlHeight: CGFloat = 22
+    static let controlRadius: CGFloat = 3
+    static let statusBarHeight: CGFloat = 26
     static let panelWidth: CGFloat = 304
+    static let tabHeight: CGFloat = 32
+    static let layerRow: CGFloat = 44
+    static let popoverWidth: CGFloat = 268
+    static let menuMinWidth: CGFloat = 206
     static let canvasInset: CGFloat = 36
+    /// The ruler strips' thickness, and the side of the square corner box
+    /// they meet in. 18 pt fits a `DS.mono(9)` numeral plus the three tick
+    /// lengths in chrome whose other bars are 36 (options) and 26 (status).
+    static let rulerThickness: CGFloat = 18
 
     // MARK: - Motion
 

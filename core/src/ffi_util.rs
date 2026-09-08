@@ -1,6 +1,7 @@
 //! Shared plumbing for the FFI shims (`ffi`, `ffi_doc`, `ffi_filters`,
-//! `ffi_agent`, `ffi_assistant`): error reporting through `err_out`,
-//! panic-safe wrappers, and the argument mappings every shim needs. Nothing
+//! `ffi_style`, `ffi_agent`, `ffi_assistant`): error reporting through
+//! `err_out`, panic-safe wrappers, and the argument mappings every shim
+//! needs. Nothing
 //! here is exported through the C header — these are the helpers the
 //! exported functions are built from, so the conventions (catch_unwind
 //! everywhere, NULL tolerance, heap CString errors freed with
@@ -12,6 +13,8 @@ use std::ptr;
 
 use image::imageops::FilterType;
 
+use crate::doc::RzDocument;
+use crate::rzdc::MAX_RZDC_LAYERS;
 use crate::RzImage;
 
 /// Stores a heap-allocated copy of `msg` through `err_out` (if non-NULL).
@@ -103,6 +106,147 @@ where
     }
     let image = unsafe { &*img };
     produce_op(|| op(image))
+}
+
+/// Runs a pure operation against `doc`, boxing the produced document.
+/// NULL input, `None`, or a panic all yield NULL.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+pub(crate) unsafe fn doc_op<F>(doc: *const RzDocument, op: F) -> *mut RzDocument
+where
+    F: FnOnce(&RzDocument) -> Option<RzDocument>,
+{
+    if doc.is_null() {
+        return ptr::null_mut();
+    }
+    let document = unsafe { &*doc };
+    match catch_unwind(AssertUnwindSafe(|| op(document))) {
+        Ok(Some(result)) => Box::into_raw(Box::new(result)),
+        _ => ptr::null_mut(),
+    }
+}
+
+/// Runs a pure query against `doc`, returning `default` for NULL input,
+/// `None`, or a panic.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
+pub(crate) unsafe fn doc_get<T, F>(doc: *const RzDocument, default: T, get: F) -> T
+where
+    F: FnOnce(&RzDocument) -> Option<T>,
+{
+    if doc.is_null() {
+        return default;
+    }
+    let document = unsafe { &*doc };
+    match catch_unwind(AssertUnwindSafe(|| get(document))) {
+        Ok(Some(value)) => value,
+        _ => default,
+    }
+}
+
+/// The image twin of [`doc_get`]: a pure query against `img`, returning
+/// `default` for NULL input, `None`, or a panic.
+///
+/// # Safety
+/// `img` must be NULL or a valid pointer to a live `RzImage`.
+pub(crate) unsafe fn img_get<T, F>(img: *const RzImage, default: T, get: F) -> T
+where
+    F: FnOnce(&RzImage) -> Option<T>,
+{
+    if img.is_null() {
+        return default;
+    }
+    let image = unsafe { &*img };
+    match catch_unwind(AssertUnwindSafe(|| get(image))) {
+        Ok(Some(value)) => value,
+        _ => default,
+    }
+}
+
+/// Reads an optional caller buffer pointer (a canvas-sized selection mask, a
+/// canvas-sized paint overlay, a canvas-sized plane) into a slice of exactly
+/// `len` bytes. `len` is always derived from the core's own dimensions, never
+/// from the caller.
+///
+/// # Safety
+/// `buffer` must be NULL or valid for `len` bytes for the duration of the
+/// caller.
+pub(crate) unsafe fn mask_slice<'a>(buffer: *const u8, len: usize) -> Option<&'a [u8]> {
+    if buffer.is_null() {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(buffer, len) })
+    }
+}
+
+/// A caller's list of layer indices, refused WHOLE (`None`) when the pointer
+/// is NULL, `len` is 0 or past the format's layer cap, an index is not below
+/// `count`, or an index repeats. A repeat is an error rather than a silent
+/// dedupe because every set op renumbers: a caller that named an entry twice
+/// has miscounted something, and answering it with a quietly different set
+/// would hide that. Ascending on the way out, which is the order every
+/// structural op wants.
+///
+/// # Safety
+/// `ptr` must be NULL or valid for `len` `size_t` values for the duration of
+/// the call.
+pub(crate) unsafe fn index_slice(
+    ptr: *const usize,
+    len: usize,
+    count: usize,
+) -> Option<Vec<usize>> {
+    if ptr.is_null() || len == 0 || len > MAX_RZDC_LAYERS as usize {
+        return None;
+    }
+    let raw = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let mut out = raw.to_vec();
+    out.sort_unstable();
+    if out.windows(2).any(|w| w[0] == w[1]) || out.last().is_some_and(|&i| i >= count) {
+        return None;
+    }
+    Some(out)
+}
+
+/// Writes as much of `values` as fits into a caller buffer of `cap` entries
+/// and reports the TRUE length through `out_len`, so a caller can tell a
+/// truncated answer from a complete one. A NULL buffer means "do not report
+/// it" and is not an error.
+///
+/// # Safety
+/// `buffer` must be NULL or valid for `cap` `size_t` writes; `out_len` must be
+/// NULL or a valid pointer to a writable `size_t`.
+pub(crate) unsafe fn write_indices(
+    values: &[usize],
+    buffer: *mut usize,
+    cap: usize,
+    out_len: *mut usize,
+) {
+    if !out_len.is_null() {
+        unsafe { *out_len = values.len() };
+    }
+    if buffer.is_null() {
+        return;
+    }
+    for (i, &value) in values.iter().take(cap).enumerate() {
+        unsafe { *buffer.add(i) = value };
+    }
+}
+
+/// Aspect-fit thumbnail dimensions with the longest side `max(1, max_side)`,
+/// each at least 1 — the ONE sizing rule, shared by `rz_doc_layer_thumbnail`
+/// and the plane-image getters. `w` and `h` must be non-zero (every caller
+/// checks for an empty source first, since there is nothing to scale).
+pub(crate) fn thumb_dims(w: u32, h: u32, max_side: u32) -> (u32, u32) {
+    let side = max_side.max(1);
+    if w >= h {
+        let th = (f64::from(h) * f64::from(side) / f64::from(w)).round() as u32;
+        (side, th.max(1))
+    } else {
+        let tw = (f64::from(w) * f64::from(side) / f64::from(h)).round() as u32;
+        (tw.max(1), side)
+    }
 }
 
 /// Maps a raw `RzResizeFilter` value — the ONE mapping shared by

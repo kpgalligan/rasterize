@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: #ececea; }
+  a { color: #1a1a18; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:hover { color: #6b6b64; }
+</style>
+</helmet>
+
+<section style="padding:56px 56px 96px;display:flex;flex-direction:column;gap:28px;font-family:'Source Sans 3',system-ui,sans-serif;color:#1a1a18">
+  <div style="display:flex;flex-direction:column;gap:8px;max-width:760px">
+    <div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:0.09em;text-transform:uppercase;color:#8a8a82">Turn 1 · wireframes · where do tool options live</div>
+    <div style="font:600 30px/1.15 'Source Sans 3',sans-serif">Three layouts for Rasterize</div>
+    <div style="font:400 15px/1.5 'Source Sans 3',sans-serif;color:#4a4a44;text-wrap:pretty">All three share the same fixes: the pill toolbar becomes a left icon rail with grouped tools under chevrons, square chrome, and a status bar that no longer repeats what the Layers panel already says. They differ in <em>where a tool's options go</em> — the decision that determines whether the canvas ever resizes. Pick one (<a href="#1a">1a</a>, <a href="#1b">1b</a>, <a href="#1c">1c</a>) and I'll build it as a clickable hi-fi mockup.</div>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:40px;align-items:flex-start">
+
+    <div id="1a" style="display:flex;flex-direction:column;gap:12px;width:1000px">
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <span style="font:500 12px/1 'IBM Plex Mono',monospace;background:#1a1a18;color:#f7f7f5;padding:5px 8px">1a</span>
+        <span style="font:600 18px/1 'Source Sans 3',sans-serif">Fixed options bar in the chrome</span>
+        <span style="font:400 13px/1 'Source Sans 3',sans-serif;color:#8a8a82">Photoshop-parallel</span>
+      </div>
+
+      <div style="width:1000px;background:#f7f7f5;border:1px solid #b5b5ae;box-shadow:0 1px 0 #d8d8d3">
+        <div style="height:28px;border-bottom:1px solid #c9c9c4;display:flex;align-items:center;gap:8px;padding:0 10px;background:#efefec">
+          <div style="display:flex;gap:5px"><div style="width:9px;height:9px;border-radius:50%;background:#c9c9c4"></div><div style="width:9px;height:9px;border-radius:50%;background:#c9c9c4"></div><div style="width:9px;height:9px;border-radius:50%;background:#c9c9c4"></div></div>
+          <div style="font:400 11px/1 'IBM Plex Mono',monospace;color:#6b6b64">cheese.rz — 2016 × 1512 px</div>
+        </div>
+
+        <div style="height:34px;border-bottom:1px solid #c9c9c4;display:flex;align-items:center;gap:14px;padding:0 10px;background:#f2f2ef">
+          <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:0.09em;text-transform:uppercase;color:#1a1a18;border:1px solid #b5b5ae;padding:4px 7px;background:#fff">brush</div>
+          <div style="width:1px;height:16px;background:#d8d8d3"></div>
+          <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">preset</span><div style="width:64px;height:20px;border:1px solid #c9c9c4;background:#fff"></div></div>
+          <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">size</span><div style="width:44px;height:20px;border:1px solid #c9c9c4;background:#fff"></div></div>
+          <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">hardness</span><div style="width:44px;height:20px;border:1px solid #c9c9c4;background:#fff"></div></div>
+          <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">opacity</span><div style="width:44px;height:20px;border:1px solid #c9c9c4;background:#fff"></div></div>
+          <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">flow</span><div style="width:44px;height:20px;border:1px solid #c9c9c4;background:#fff"></div></div>
+          <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">blend</span><div style="width:78px;height:20px;border:1px solid #c9c9c4;background:#fff"></div></div>
+          <div style="flex:1"></div>
+          <div style="font:400 10px/1 'IBM Plex Mono',monospace;color:#1a1a18;border:1px solid #b5b5ae;padding:5px 8px;background:#fff">More…</div>
+        </div>
+
+        <div style="display:flex;height:520px">
+          <div style="width:46px;border-right:1px solid #c9c9c4;background:#f2f2ef;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 0">
+            <div style="width:32px;height:32px;border:1px solid #1a1a18;background:#dfdfd9;display:flex;align-items:center;justify-content:center;font:500 11px/1 'IBM Plex Mono',monospace;position:relative">M<div style="position:absolute;right:1px;bottom:1px;width:0;height:0;border-left:4px solid transparent;border-top:4px solid #1a1a18"></div></div>
+            <sc-for list="{{ railA }}" as="t" hint-placeholder-count="2">
+              <div style="width:32px;height:32px;border:1px solid #c9c9c4;background:#fff;display:flex;align-items:center;justify-content:center;font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44;position:relative">{{ t.k }}
+                <sc-if value="{{ t.g }}" hint-placeholder-val="{{ true }}"><div style="position:absolute;right:1px;bottom:1px;width:0;height:0;border-left:4px solid transparent;border-top:4px solid #8a8a82"></div></sc-if>
+              </div>
+            </sc-for>
+            <div style="width:24px;height:1px;background:#d8d8d3;margin:4px 0"></div>
+            <sc-for list="{{ railB }}" as="t" hint-placeholder-count="3">
+              <div style="width:32px;height:32px;border:1px solid #c9c9c4;background:#fff;display:flex;align-items:center;justify-content:center;font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44;position:relative">{{ t.k }}
+                <sc-if value="{{ t.g }}" hint-placeholder-val="{{ true }}"><div style="position:absolute;right:1px;bottom:1px;width:0;height:0;border-left:4px solid transparent;border-top:4px solid #8a8a82"></div></sc-if>
+              </div>
+            </sc-for>
+            <div style="width:24px;height:1px;background:#d8d8d3;margin:4px 0"></div>
+            <sc-for list="{{ railC }}" as="t" hint-placeholder-count="4">
+              <div style="width:32px;height:32px;border:1px solid #c9c9c4;background:#fff;display:flex;align-items:center;justify-content:center;font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44;position:relative">{{ t.k }}
+                <sc-if value="{{ t.g }}" hint-placeholder-val="{{ true }}"><div style="position:absolute;right:1px;bottom:1px;width:0;height:0;border-left:4px solid transparent;border-top:4px solid #8a8a82"></div></sc-if>
+              </div>
+            </sc-for>
+            <div style="flex:1"></div>
+            <div style="width:26px;height:26px;border:1px solid #c9c9c4;background:#fff"></div>
+          </div>
+
+          <div style="flex:1;background:repeating-linear-gradient(45deg,#e4e4e0 0 6px,#ececE8 6px 12px);display:flex;align-items:center;justify-content:center;position:relative">
+            <div style="width:520px;height:390px;border:1px solid #b5b5ae;background:#fff;display:flex;align-items:center;justify-content:center;font:400 11px/1 'IBM Plex Mono',monospace;color:#8a8a82">image canvas</div>
+            <div style="position:absolute;left:14px;bottom:14px;height:26px;border:1px solid #b5b5ae;background:#fff;display:flex;align-items:center;gap:10px;padding:0 10px;font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44">− 66% +</div>
+          </div>
+
+          <div style="width:268px;border-left:1px solid #c9c9c4;background:#f2f2ef;display:flex;flex-direction:column">
+            <div style="display:flex;border-bottom:1px solid #c9c9c4">
+              <div style="flex:1;height:30px;display:flex;align-items:center;justify-content:center;font:500 11px/1 'IBM Plex Mono',monospace;background:#f7f7f5;border-right:1px solid #c9c9c4">Layers</div>
+              <div style="flex:1;height:30px;display:flex;align-items:center;justify-content:center;font:400 11px/1 'IBM Plex Mono',monospace;color:#8a8a82">Assistant</div>
+            </div>
+            <div style="padding:10px;display:flex;flex-direction:column;gap:8px;border-bottom:1px solid #c9c9c4">
+              <div style="height:22px;border:1px solid #c9c9c4;background:#fff"></div>
+              <div style="display:flex;align-items:center;gap:8px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">opacity</span><div style="flex:1;height:3px;background:#d8d8d3"></div><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">100%</span></div>
+            </div>
+            <div style="padding:8px;display:flex;flex-direction:column;gap:4px">
+              <div style="height:38px;border:1px solid #1a1a18;background:#dfdfd9;display:flex;align-items:center;gap:8px;padding:0 8px"><div style="width:24px;height:24px;border:1px solid #b5b5ae;background:#fff"></div><span style="font:400 11px/1 'IBM Plex Mono',monospace">Curves</span></div>
+              <div style="height:38px;border:1px solid #c9c9c4;background:#fff;display:flex;align-items:center;gap:8px;padding:0 8px"><div style="width:24px;height:24px;border:1px solid #d8d8d3"></div><span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44">Hello</span></div>
+              <div style="height:38px;border:1px solid #c9c9c4;background:#fff;display:flex;align-items:center;gap:8px;padding:0 8px"><div style="width:24px;height:24px;border:1px solid #d8d8d3"></div><span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44">Background</span></div>
+            </div>
+            <div style="flex:1"></div>
+            <div style="height:32px;border-top:1px solid #c9c9c4;display:flex;align-items:center;gap:6px;padding:0 8px">
+              <div style="width:20px;height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+              <div style="width:20px;height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+              <div style="width:20px;height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="height:24px;border-top:1px solid #c9c9c4;background:#f2f2ef;display:flex;align-items:center;gap:14px;padding:0 10px;font:400 10px/1 'IBM Plex Mono',monospace;color:#8a8a82">
+          <span>2016 × 1512 px</span><span>RGB / 8-bit</span><span>3 layers</span><div style="flex:1"></div><span>brush 24 px</span>
+        </div>
+      </div>
+
+      <sc-if value="{{ notes }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;gap:28px;max-width:1000px">
+        <div style="flex:1;font:400 13px/1.5 'Source Sans 3',sans-serif;color:#4a4a44;text-wrap:pretty"><strong style="color:#1a1a18">Fixed 34px bar, always present.</strong> Even a tool with no options keeps the bar (tool name only), so the canvas viewport never changes size. Overflow collects in <em>More…</em> at the right end.</div>
+        <div style="flex:1;font:400 13px/1.5 'Source Sans 3',sans-serif;color:#4a4a44;text-wrap:pretty"><strong style="color:#1a1a18">Cost:</strong> 34px of permanent vertical space, and wide option sets get cramped on a small window — the <em>More…</em> popover will carry real weight.</div>
+      </div>
+      </sc-if>
+    </div>
+
+    <div id="1b" style="display:flex;flex-direction:column;gap:12px;width:1000px">
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <span style="font:500 12px/1 'IBM Plex Mono',monospace;background:#1a1a18;color:#f7f7f5;padding:5px 8px">1b</span>
+        <span style="font:600 18px/1 'Source Sans 3',sans-serif">Options as a panel section</span>
+        <span style="font:400 13px/1 'Source Sans 3',sans-serif;color:#8a8a82">no top bar at all</span>
+      </div>
+
+      <div style="width:1000px;background:#f7f7f5;border:1px solid #b5b5ae;box-shadow:0 1px 0 #d8d8d3">
+        <div style="height:28px;border-bottom:1px solid #c9c9c4;display:flex;align-items:center;gap:8px;padding:0 10px;background:#efefec">
+          <div style="display:flex;gap:5px"><div style="width:9px;height:9px;border-radius:50%;background:#c9c9c4"></div><div style="width:9px;height:9px;border-radius:50%;background:#c9c9c4"></div><div style="width:9px;height:9px;border-radius:50%;background:#c9c9c4"></div></div>
+          <div style="font:400 11px/1 'IBM Plex Mono',monospace;color:#6b6b64">cheese.rz — 2016 × 1512 px</div>
+        </div>
+
+        <div style="display:flex;height:554px">
+          <div style="width:46px;border-right:1px solid #c9c9c4;background:#f2f2ef;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 0">
+            <div style="width:32px;height:32px;border:1px solid #1a1a18;background:#dfdfd9;display:flex;align-items:center;justify-content:center;font:500 11px/1 'IBM Plex Mono',monospace;position:relative">B<div style="position:absolute;right:1px;bottom:1px;width:0;height:0;border-left:4px solid transparent;border-top:4px solid #1a1a18"></div></div>
+            <sc-for list="{{ railNoBrush }}" as="t" hint-placeholder-count="9">
+              <div style="width:32px;height:32px;border:1px solid #c9c9c4;background:#fff;display:flex;align-items:center;justify-content:center;font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44;position:relative">{{ t.k }}
+                <sc-if value="{{ t.g }}" hint-placeholder-val="{{ true }}"><div style="position:absolute;right:1px;bottom:1px;width:0;height:0;border-left:4px solid transparent;border-top:4px solid #8a8a82"></div></sc-if>
+              </div>
+            </sc-for>
+            <div style="flex:1"></div>
+            <div style="width:26px;height:26px;border:1px solid #c9c9c4;background:#fff"></div>
+          </div>
+
+          <div style="flex:1;background:repeating-linear-gradient(45deg,#e4e4e0 0 6px,#ececE8 6px 12px);display:flex;align-items:center;justify-content:center;position:relative">
+            <div style="width:560px;height:420px;border:1px solid #b5b5ae;background:#fff;display:flex;align-items:center;justify-content:center;font:400 11px/1 'IBM Plex Mono',monospace;color:#8a8a82">image canvas</div>
+            <div style="position:absolute;left:14px;bottom:14px;height:26px;border:1px solid #b5b5ae;background:#fff;display:flex;align-items:center;gap:10px;padding:0 10px;font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44">− 66% +</div>
+          </div>
+
+          <div style="width:288px;border-left:1px solid #c9c9c4;background:#f2f2ef;display:flex;flex-direction:column">
+            <div style="display:flex;border-bottom:1px solid #c9c9c4">
+              <div style="flex:1;height:30px;display:flex;align-items:center;justify-content:center;font:500 11px/1 'IBM Plex Mono',monospace;background:#f7f7f5;border-right:1px solid #c9c9c4">Layers</div>
+              <div style="flex:1;height:30px;display:flex;align-items:center;justify-content:center;font:400 11px/1 'IBM Plex Mono',monospace;color:#8a8a82">Assistant</div>
+            </div>
+            <div style="border-bottom:1px solid #c9c9c4;background:#f7f7f5">
+              <div style="height:26px;display:flex;align-items:center;padding:0 10px;font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:0.09em;text-transform:uppercase;color:#8a8a82;border-bottom:1px solid #e4e4e0">brush options</div>
+              <div style="padding:10px;display:grid;grid-template-columns:64px 1fr;gap:8px 10px;align-items:center;font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">
+                <span>preset</span><div style="height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+                <span>size</span><div style="height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+                <span>hardness</span><div style="height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+                <span>opacity</span><div style="height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+                <span>flow</span><div style="height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+                <span>blend</span><div style="height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+              </div>
+            </div>
+            <div style="padding:8px;display:flex;flex-direction:column;gap:4px">
+              <div style="height:34px;border:1px solid #1a1a18;background:#dfdfd9;display:flex;align-items:center;gap:8px;padding:0 8px"><div style="width:22px;height:22px;border:1px solid #b5b5ae;background:#fff"></div><span style="font:400 11px/1 'IBM Plex Mono',monospace">Curves</span></div>
+              <div style="height:34px;border:1px solid #c9c9c4;background:#fff;display:flex;align-items:center;gap:8px;padding:0 8px"><div style="width:22px;height:22px;border:1px solid #d8d8d3"></div><span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44">Hello</span></div>
+              <div style="height:34px;border:1px solid #c9c9c4;background:#fff;display:flex;align-items:center;gap:8px;padding:0 8px"><div style="width:22px;height:22px;border:1px solid #d8d8d3"></div><span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44">Background</span></div>
+            </div>
+            <div style="flex:1"></div>
+            <div style="height:32px;border-top:1px solid #c9c9c4;display:flex;align-items:center;gap:6px;padding:0 8px">
+              <div style="width:20px;height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+              <div style="width:20px;height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+              <div style="width:20px;height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="height:24px;border-top:1px solid #c9c9c4;background:#f2f2ef;display:flex;align-items:center;gap:14px;padding:0 10px;font:400 10px/1 'IBM Plex Mono',monospace;color:#8a8a82">
+          <span>2016 × 1512 px</span><span>RGB / 8-bit</span><span>3 layers</span><div style="flex:1"></div><span>brush 24 px</span>
+        </div>
+      </div>
+
+      <sc-if value="{{ notes }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;gap:28px;max-width:1000px">
+        <div style="flex:1;font:400 13px/1.5 'Source Sans 3',sans-serif;color:#4a4a44;text-wrap:pretty"><strong style="color:#1a1a18">Room to grow.</strong> A stacked panel section holds far more options than a row, and it scrolls — so adding options never needs an overflow popover. Canvas gets the full window height.</div>
+        <div style="flex:1;font:400 13px/1.5 'Source Sans 3',sans-serif;color:#4a4a44;text-wrap:pretty"><strong style="color:#1a1a18">Cost:</strong> options sit on the far side of the window from the tools, and they compete with Layers for the same column. Not what Photoshop muscle memory expects.</div>
+      </div>
+      </sc-if>
+    </div>
+
+    <div id="1c" style="display:flex;flex-direction:column;gap:12px;width:1000px">
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <span style="font:500 12px/1 'IBM Plex Mono',monospace;background:#1a1a18;color:#f7f7f5;padding:5px 8px">1c</span>
+        <span style="font:600 18px/1 'Source Sans 3',sans-serif">Floating options bar over the canvas</span>
+        <span style="font:400 13px/1 'Source Sans 3',sans-serif;color:#8a8a82">fixed height, zero layout cost</span>
+      </div>
+
+      <div style="width:1000px;background:#f7f7f5;border:1px solid #b5b5ae;box-shadow:0 1px 0 #d8d8d3">
+        <div style="height:28px;border-bottom:1px solid #c9c9c4;display:flex;align-items:center;gap:8px;padding:0 10px;background:#efefec">
+          <div style="display:flex;gap:5px"><div style="width:9px;height:9px;border-radius:50%;background:#c9c9c4"></div><div style="width:9px;height:9px;border-radius:50%;background:#c9c9c4"></div><div style="width:9px;height:9px;border-radius:50%;background:#c9c9c4"></div></div>
+          <div style="font:400 11px/1 'IBM Plex Mono',monospace;color:#6b6b64">cheese.rz — 2016 × 1512 px</div>
+        </div>
+
+        <div style="display:flex;height:554px">
+          <div style="width:46px;border-right:1px solid #c9c9c4;background:#f2f2ef;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 0">
+            <div style="width:32px;height:32px;border:1px solid #1a1a18;background:#dfdfd9;display:flex;align-items:center;justify-content:center;font:500 11px/1 'IBM Plex Mono',monospace;position:relative">M<div style="position:absolute;right:1px;bottom:1px;width:0;height:0;border-left:4px solid transparent;border-top:4px solid #1a1a18"></div></div>
+            <sc-for list="{{ railNoSelect }}" as="t" hint-placeholder-count="9">
+              <div style="width:32px;height:32px;border:1px solid #c9c9c4;background:#fff;display:flex;align-items:center;justify-content:center;font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44;position:relative">{{ t.k }}
+                <sc-if value="{{ t.g }}" hint-placeholder-val="{{ true }}"><div style="position:absolute;right:1px;bottom:1px;width:0;height:0;border-left:4px solid transparent;border-top:4px solid #8a8a82"></div></sc-if>
+              </div>
+            </sc-for>
+            <div style="flex:1"></div>
+            <div style="width:26px;height:26px;border:1px solid #c9c9c4;background:#fff"></div>
+          </div>
+
+          <div style="flex:1;background:repeating-linear-gradient(45deg,#e4e4e0 0 6px,#ececE8 6px 12px);display:flex;align-items:center;justify-content:center;position:relative">
+            <div style="width:560px;height:420px;border:1px solid #b5b5ae;background:#fff;display:flex;align-items:center;justify-content:center;font:400 11px/1 'IBM Plex Mono',monospace;color:#8a8a82">image canvas</div>
+            <div style="position:absolute;left:50%;transform:translateX(-50%);bottom:16px;height:38px;border:1px solid #6b6b64;background:#fff;box-shadow:0 2px 6px rgba(26,26,24,0.18);display:flex;align-items:center;gap:12px;padding:0 12px">
+              <span style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:0.09em;text-transform:uppercase">select</span>
+              <div style="width:1px;height:18px;background:#d8d8d3"></div>
+              <div style="display:flex"><div style="width:24px;height:22px;border:1px solid #1a1a18;background:#dfdfd9"></div><div style="width:24px;height:22px;border:1px solid #c9c9c4;border-left:0"></div><div style="width:24px;height:22px;border:1px solid #c9c9c4;border-left:0"></div><div style="width:24px;height:22px;border:1px solid #c9c9c4;border-left:0"></div></div>
+              <div style="display:flex;align-items:center;gap:6px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">feather</span><div style="width:42px;height:20px;border:1px solid #c9c9c4"></div></div>
+              <div style="display:flex;align-items:center;gap:6px"><div style="width:12px;height:12px;border:1px solid #6b6b64"></div><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64;white-space:nowrap">anti-alias</span></div>
+              <div style="width:1px;height:18px;background:#d8d8d3"></div>
+              <span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44">···</span>
+            </div>
+            <div style="position:absolute;left:14px;bottom:14px;height:26px;border:1px solid #b5b5ae;background:#fff;display:flex;align-items:center;gap:10px;padding:0 10px;font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44">− 66% +</div>
+          </div>
+
+          <div style="width:268px;border-left:1px solid #c9c9c4;background:#f2f2ef;display:flex;flex-direction:column">
+            <div style="display:flex;border-bottom:1px solid #c9c9c4">
+              <div style="flex:1;height:30px;display:flex;align-items:center;justify-content:center;font:500 11px/1 'IBM Plex Mono',monospace;background:#f7f7f5;border-right:1px solid #c9c9c4">Layers</div>
+              <div style="flex:1;height:30px;display:flex;align-items:center;justify-content:center;font:400 11px/1 'IBM Plex Mono',monospace;color:#8a8a82">Assistant</div>
+            </div>
+            <div style="padding:10px;display:flex;flex-direction:column;gap:8px;border-bottom:1px solid #c9c9c4">
+              <div style="height:22px;border:1px solid #c9c9c4;background:#fff"></div>
+              <div style="display:flex;align-items:center;gap:8px"><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">opacity</span><div style="flex:1;height:3px;background:#d8d8d3"></div><span style="font:400 10px/1 'IBM Plex Mono',monospace;color:#6b6b64">100%</span></div>
+            </div>
+            <div style="padding:8px;display:flex;flex-direction:column;gap:4px">
+              <div style="height:38px;border:1px solid #1a1a18;background:#dfdfd9;display:flex;align-items:center;gap:8px;padding:0 8px"><div style="width:24px;height:24px;border:1px solid #b5b5ae;background:#fff"></div><span style="font:400 11px/1 'IBM Plex Mono',monospace">Curves</span></div>
+              <div style="height:38px;border:1px solid #c9c9c4;background:#fff;display:flex;align-items:center;gap:8px;padding:0 8px"><div style="width:24px;height:24px;border:1px solid #d8d8d3"></div><span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44">Hello</span></div>
+              <div style="height:38px;border:1px solid #c9c9c4;background:#fff;display:flex;align-items:center;gap:8px;padding:0 8px"><div style="width:24px;height:24px;border:1px solid #d8d8d3"></div><span style="font:400 11px/1 'IBM Plex Mono',monospace;color:#4a4a44">Background</span></div>
+            </div>
+            <div style="flex:1"></div>
+            <div style="height:32px;border-top:1px solid #c9c9c4;display:flex;align-items:center;gap:6px;padding:0 8px">
+              <div style="width:20px;height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+              <div style="width:20px;height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+              <div style="width:20px;height:20px;border:1px solid #c9c9c4;background:#fff"></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="height:24px;border-top:1px solid #c9c9c4;background:#f2f2ef;display:flex;align-items:center;gap:14px;padding:0 10px;font:400 10px/1 'IBM Plex Mono',monospace;color:#8a8a82">
+          <span>2016 × 1512 px</span><span>RGB / 8-bit</span><span>3 layers</span><div style="flex:1"></div><span>select · feather 0</span>
+        </div>
+      </div>
+
+      <sc-if value="{{ notes }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;gap:28px;max-width:1000px">
+        <div style="flex:1;font:400 13px/1.5 'Source Sans 3',sans-serif;color:#4a4a44;text-wrap:pretty"><strong style="color:#1a1a18">Costs no layout.</strong> The bar floats, so the canvas viewport is fixed no matter what appears or disappears. Sits near the pointer, where the work is.</div>
+        <div style="flex:1;font:400 13px/1.5 'Source Sans 3',sans-serif;color:#4a4a44;text-wrap:pretty"><strong style="color:#1a1a18">Cost:</strong> it covers pixels, needs a hide affordance, and it is the least Photoshop-like of the three — more Figma than editor chrome.</div>
+      </div>
+      </sc-if>
+    </div>
+
+  </div>
+</section>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;showNotes&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Wireframes&quot;}}">
+class Component extends DCLogic {
+  renderVals() {
+    const t = (k, g) => ({ k, g: !!g });
+    return {
+      notes: this.props.showNotes ?? true,
+      railA: [t("C"), t("V")],
+      railB: [t("B", true), t("K"), t("G")],
+      railC: [t("R", true), t("T"), t("I"), t("Z", true)],
+      railNoBrush: [t("M", true), t("C"), t("V"), t("K"), t("G"), t("R", true), t("T"), t("I"), t("Z", true)],
+      railNoSelect: [t("C"), t("V"), t("B", true), t("K"), t("G"), t("R", true), t("T"), t("I"), t("Z", true)],
+    };
+  }
+}
+
+</script>
+</body>
+</html>

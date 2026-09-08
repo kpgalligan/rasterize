@@ -3,7 +3,12 @@ import UniformTypeIdentifiers
 
 /// Live Photo commands: placing one as a layer, and picking which of its
 /// frames that layer shows. The frame picker itself is
-/// LivePhotoFrameSheetController; the model is LivePhotoLayer.swift.
+/// LivePhotoFrameSheetController; the model is LivePhotoLayer.swift. A
+/// re-frame re-renders the chosen frame through the layer's own transform
+/// at its own anchor, keeping its name, position, opacity, blend mode,
+/// mask, style and transform — a rotated or scaled Live Photo stays put.
+/// Mirrored for the agent by `add_live_photo_layer` and
+/// `set_live_photo_frame`.
 extension EditorViewController {
     /// Layer > Select Live Photo Frame… — the active layer's timeline. The
     /// layers panel's row menu and row double-click go to
@@ -19,7 +24,9 @@ extension EditorViewController {
 
     /// Opens layer `idx`'s frame picker, having made it the active layer —
     /// re-opening a layer's source selects it, exactly as the text and
-    /// adjustment paths do.
+    /// adjustment paths do. The picker previews and commits through the
+    /// layer's transform at its anchor (LivePhotoFrameSheetController), so
+    /// a transformed layer's frames land exactly where the layer is.
     func editLivePhotoLayer(_ idx: Int) {
         guard let document = document, let doc = document.doc,
               let payload = doc.livePhotoPayload(idx)
@@ -27,6 +34,10 @@ extension EditorViewController {
             NSSound.beep()
             return
         }
+        // The panel's double-click bypasses menu validation, so an open
+        // shape session commits here — its hidden-layer preview and the
+        // picker's live preview would otherwise fight over previewImage.
+        commitShapeEditSession()
         setActiveLayer(idx)
         // The clip is referenced, not copied into the document, so it can be
         // gone by the time someone asks for another frame. Say so instead of
@@ -45,6 +56,10 @@ extension EditorViewController {
             }
             return
         }
+        // Choosing a frame REWRITES the layer's pixels, so it answers to the
+        // same locks every other pixel path does — said here, before the
+        // picker opens, rather than as a beep after a frame is chosen.
+        guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_PIXELS) else { return }
         presentAsSheet(
             LivePhotoFrameSheetController(
                 document: document, canvas: canvas, layer: idx, payload: payload))
@@ -103,10 +118,14 @@ extension EditorViewController {
         }
         let below = document.activeLayerIndex
         let before = doc
+        // Where the new entry lands is the CORE's answer: above a GROUP it
+        // goes above the whole subtree, so `below + 1` would select the
+        // wrong row (§4.5's one definition).
+        let landing = doc.insertionIndex(above: below)
         document.applyEdit("Place Live Photo") {
             $0.addingLivePhotoLayer(above: below, payload, name: LivePhoto.layerName(for: source))
         }
         guard document.doc !== before, let updated = document.doc else { return }
-        setActiveLayer(min(below + 1, updated.layerCount - 1))
+        setActiveLayer(min(landing, updated.layerCount - 1))
     }
 }

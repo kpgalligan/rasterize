@@ -2,58 +2,23 @@
 //! conventions as `ffi`: catch_unwind everywhere, NULL-tolerant, errors via
 //! heap CStrings released with rz_string_free.
 
+use std::borrow::Cow;
 use std::ffi::{c_char, c_double, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use image::imageops::FilterType;
-use image::RgbaImage;
+use image::{GrayImage, RgbaImage};
 
 use crate::adjust::Adjustment;
-use crate::doc::{BlendMode, MaskKind, RzDocument, MAX_PIXELS};
+use crate::doc::{BlendMode, LayerKind, MaskKind, RzDocument, MAX_PIXELS};
 use crate::doc_transform::Affine;
-use crate::ffi_util::{boxed, fallible_op, filter_from_c, read_cstr};
+use crate::ffi_util::{
+    boxed, doc_get, doc_op, fallible_op, filter_from_c, mask_slice, read_cstr, thumb_dims,
+};
 use crate::ops::CompositeMode;
 use crate::rzdc::MAX_RZDC_META_LEN;
 use crate::RzImage;
-
-/// Runs a pure operation against `doc`, boxing the produced document.
-/// NULL input, `None`, or a panic all yield NULL.
-///
-/// # Safety
-/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
-unsafe fn doc_op<F>(doc: *const RzDocument, op: F) -> *mut RzDocument
-where
-    F: FnOnce(&RzDocument) -> Option<RzDocument>,
-{
-    if doc.is_null() {
-        return ptr::null_mut();
-    }
-    let document = unsafe { &*doc };
-    match catch_unwind(AssertUnwindSafe(|| op(document))) {
-        Ok(Some(result)) => Box::into_raw(Box::new(result)),
-        _ => ptr::null_mut(),
-    }
-}
-
-/// Runs a pure query against `doc`, returning `default` for NULL input,
-/// `None`, or a panic.
-///
-/// # Safety
-/// `doc` must be NULL or a valid pointer to a live `RzDocument`.
-unsafe fn doc_get<T, F>(doc: *const RzDocument, default: T, get: F) -> T
-where
-    F: FnOnce(&RzDocument) -> Option<T>,
-{
-    if doc.is_null() {
-        return default;
-    }
-    let document = unsafe { &*doc };
-    match catch_unwind(AssertUnwindSafe(|| get(document))) {
-        Ok(Some(value)) => value,
-        _ => default,
-    }
-}
 
 /// Opens a document: "RZDC" files load the native layered format, "8BPS"
 /// files import Photoshop layers (falling back to the flattened composite on
@@ -226,13 +191,33 @@ pub unsafe extern "C" fn rz_doc_layer_visible(doc: *const RzDocument, idx: usize
     unsafe { doc_get(doc, false, |d| Some(d.layers.get(idx)?.visible)) }
 }
 
-/// The layer's canvas x offset; 0 on NULL doc or out-of-range idx.
+/// The rect the four geometry getters report: a RASTER entry's pixel buffer
+/// rect, unchanged, and for a GROUP — which has no buffer of its own — the
+/// UNION of its raster descendants' buffer rects (0, 0, 0, 0 when it holds
+/// none). One meaning for both kinds, "the rectangle this entry's pixels live
+/// in", and O(number of descendants) either way. `None` for an out-of-range
+/// index, which the getters map to 0.
+///
+/// Deliberately NOT the content box. These four are read once per row on
+/// every layers-panel reload and once per row in `get_document`, so answering
+/// a group with `layer_bounds` cost four per-pixel scans of the whole subtree
+/// per row — seconds of blocked main thread on a photo-sized document with a
+/// few groups in it. `rz_doc_layer_bounds` is still the content box on EVERY
+/// entry, and the callers that mean the opaque box (align, distribute, the
+/// agent's `content_*` keys) ask for it by name.
+fn entry_rect(doc: &RzDocument, idx: usize) -> Option<(i32, i32, u32, u32)> {
+    doc.layers.get(idx)?;
+    Some(doc.layer_pixel_rect(idx).unwrap_or((0, 0, 0, 0)))
+}
+
+/// The layer's canvas x offset; 0 on NULL doc or out-of-range idx. On a GROUP
+/// it is its descendants' buffer union's origin (see `entry_rect`).
 ///
 /// # Safety
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
 #[no_mangle]
 pub unsafe extern "C" fn rz_doc_layer_offset_x(doc: *const RzDocument, idx: usize) -> i32 {
-    unsafe { doc_get(doc, 0, |d| Some(d.layers.get(idx)?.offset.0)) }
+    unsafe { doc_get(doc, 0, |d| Some(entry_rect(d, idx)?.0)) }
 }
 
 /// The layer's canvas y offset; 0 on NULL doc or out-of-range idx.
@@ -241,7 +226,7 @@ pub unsafe extern "C" fn rz_doc_layer_offset_x(doc: *const RzDocument, idx: usiz
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
 #[no_mangle]
 pub unsafe extern "C" fn rz_doc_layer_offset_y(doc: *const RzDocument, idx: usize) -> i32 {
-    unsafe { doc_get(doc, 0, |d| Some(d.layers.get(idx)?.offset.1)) }
+    unsafe { doc_get(doc, 0, |d| Some(entry_rect(d, idx)?.1)) }
 }
 
 /// The layer's pixel width; 0 on NULL doc or out-of-range idx.
@@ -250,7 +235,7 @@ pub unsafe extern "C" fn rz_doc_layer_offset_y(doc: *const RzDocument, idx: usiz
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
 #[no_mangle]
 pub unsafe extern "C" fn rz_doc_layer_width(doc: *const RzDocument, idx: usize) -> u32 {
-    unsafe { doc_get(doc, 0, |d| Some(d.layers.get(idx)?.pixels.width())) }
+    unsafe { doc_get(doc, 0, |d| Some(entry_rect(d, idx)?.2)) }
 }
 
 /// The layer's pixel height; 0 on NULL doc or out-of-range idx.
@@ -259,11 +244,11 @@ pub unsafe extern "C" fn rz_doc_layer_width(doc: *const RzDocument, idx: usize) 
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
 #[no_mangle]
 pub unsafe extern "C" fn rz_doc_layer_height(doc: *const RzDocument, idx: usize) -> u32 {
-    unsafe { doc_get(doc, 0, |d| Some(d.layers.get(idx)?.pixels.height())) }
+    unsafe { doc_get(doc, 0, |d| Some(entry_rect(d, idx)?.3)) }
 }
 
-/// Copy of a layer's pixels at the layer's own size; NULL on NULL doc or
-/// out-of-range idx.
+/// Copy of a layer's pixels at the layer's own size; NULL on NULL doc, an
+/// out-of-range idx, or a GROUP, which has no pixels of its own.
 ///
 /// # Safety
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
@@ -271,7 +256,7 @@ pub unsafe extern "C" fn rz_doc_layer_height(doc: *const RzDocument, idx: usize)
 pub unsafe extern "C" fn rz_doc_layer_image(doc: *const RzDocument, idx: usize) -> *mut RzImage {
     unsafe {
         doc_get(doc, ptr::null_mut(), |d| {
-            let pixels = (*d.layers.get(idx)?.pixels).clone();
+            let pixels = (*d.raster_layer(idx)?.pixels).clone();
             Some(Box::into_raw(Box::new(RzImage { pixels })))
         })
     }
@@ -299,8 +284,10 @@ pub unsafe extern "C" fn rz_doc_layer_canvas_image(
 }
 
 /// Aspect-fit thumbnail of a layer with longest side `max(1, max_side)`
-/// (Triangle filter; tiny layers are upscaled). NULL on NULL doc,
-/// out-of-range idx, an empty-sized layer, or an absurd target size.
+/// (Triangle filter; tiny layers are upscaled). On a GROUP it is that group's
+/// PROJECTION, aspect-fit — a layers panel wanting a cheap group row should
+/// draw a folder glyph rather than ask for one projection per reload. NULL on
+/// NULL doc, out-of-range idx, an empty-sized layer, or an absurd target size.
 ///
 /// # Safety
 /// `doc` must be NULL or a valid pointer to a live `RzDocument`.
@@ -313,19 +300,17 @@ pub unsafe extern "C" fn rz_doc_layer_thumbnail(
     unsafe {
         doc_get(doc, ptr::null_mut(), |d| {
             let layer = d.layers.get(idx)?;
-            let (lw, lh) = layer.pixels.dimensions();
+            let source = if layer.kind == LayerKind::Group {
+                Cow::Owned(d.layer_canvas_image(idx)?)
+            } else {
+                Cow::Borrowed(&*layer.pixels)
+            };
+            let (lw, lh) = source.dimensions();
             if lw == 0 || lh == 0 {
                 return None;
             }
-            let side = max_side.max(1);
-            let (tw, th) = if lw >= lh {
-                let th = (f64::from(lh) * f64::from(side) / f64::from(lw)).round() as u32;
-                (side, th.max(1))
-            } else {
-                let tw = (f64::from(lw) * f64::from(side) / f64::from(lh)).round() as u32;
-                (tw.max(1), side)
-            };
-            let pixels = crate::ops::resize(&layer.pixels, tw, th, FilterType::Triangle)?;
+            let (tw, th) = thumb_dims(lw, lh, max_side);
+            let pixels = crate::ops::resize(&source, tw, th, FilterType::Triangle)?;
             Some(Box::into_raw(Box::new(RzImage { pixels })))
         })
     }
@@ -486,6 +471,57 @@ pub unsafe extern "C" fn rz_doc_with_layer_pixels_rgba(
     }
 }
 
+/// Replaces layer `idx`'s pixels, offset and mask in ONE pure step — the
+/// re-render primitive for a described layer whose raster, position and
+/// mask change together. `src` is straight RGBA8, `w * h * 4` bytes, row 0
+/// top; `mask` is NULL (the layer ends with no mask; `mask_enabled` resets
+/// to true) or exactly `w * h` coverage bytes at the pixels' size
+/// (`mask_enabled` is kept). Name, opacity, blend mode, visibility,
+/// metadata, style and clipped flag survive. NULL on out-of-range idx, NULL
+/// src, zero dimensions, or dimensions past the `MAX_PIXELS` ceiling —
+/// bounded before anything is read, as for `rz_doc_with_layer_pixels_rgba`.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `src` must
+/// be NULL or a valid pointer to at least `w * h * 4` readable bytes; `mask`
+/// must be NULL or a valid pointer to at least `w * h` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_set_layer_content(
+    doc: *const RzDocument,
+    idx: usize,
+    src: *const u8,
+    w: u32,
+    h: u32,
+    x: i32,
+    y: i32,
+    mask: *const u8,
+) -> *mut RzDocument {
+    // The dimensions are the buffers' only declared length, so they are
+    // bounded before any slice is built from them — the
+    // rz_doc_with_layer_pixels_rgba rule.
+    if src.is_null() || w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
+        return ptr::null_mut();
+    }
+    unsafe {
+        doc_op(doc, |d| {
+            // Both lengths are recomputed from the same dimensions that
+            // size the layer, with checked arithmetic — never trusted from
+            // a separate length argument.
+            let count = (w as usize).checked_mul(h as usize)?;
+            let len = count.checked_mul(4)?;
+            let src = std::slice::from_raw_parts(src, len);
+            let pixels = RgbaImage::from_raw(w, h, src.to_vec())?;
+            let mask = if mask.is_null() {
+                None
+            } else {
+                let plane = std::slice::from_raw_parts(mask, count);
+                Some(GrayImage::from_raw(w, h, plane.to_vec())?)
+            };
+            d.set_layer_content(idx, pixels, (x, y), mask)
+        })
+    }
+}
+
 /// Inserts a transparent canvas-sized layer (offset 0) above `idx`. NULL on
 /// NULL args or out-of-range idx.
 ///
@@ -641,6 +677,88 @@ pub unsafe extern "C" fn rz_doc_painting_layer(
     }
 }
 
+/// Paints a canvas-frame PREMULTIPLIED RGBA8 overlay (`src`, `w`/`h` must
+/// equal the canvas size) onto layer `idx` through blend mode `mode`
+/// (`RzBlendMode`), scaled by `alpha` (clamped to [0, 1]) — the paint
+/// tools' Blend option. `RZ_BLEND_NORMAL` delegates to
+/// `rz_doc_painting_layer` with `RZ_COMPOSITE_OVER` (byte-identical,
+/// refusal rules included). NULL on NULL args, dimension mismatch, unknown
+/// mode, NaN alpha, out-of-range idx, a layer extent that misses the
+/// canvas, or — non-Normal modes only — when no pixel would change.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `src` must
+/// be NULL or a valid pointer to at least `w * h * 4` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_painting_layer_blend(
+    doc: *const RzDocument,
+    idx: usize,
+    src: *const u8,
+    w: u32,
+    h: u32,
+    mode: c_int,
+    alpha: f32,
+) -> *mut RzDocument {
+    if src.is_null() {
+        return ptr::null_mut();
+    }
+    let body = |d: &RzDocument| {
+        let mode = BlendMode::from_c(mode)?;
+        // Validate against the canvas dimensions before touching `src`, so
+        // the raw read below is bounded by the canvas buffer size.
+        if w != d.width || h != d.height {
+            return None;
+        }
+        let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+        let src = unsafe { std::slice::from_raw_parts(src, len) };
+        d.painting_layer_blend(idx, src, mode, alpha)
+    };
+    unsafe { doc_op(doc, body) }
+}
+
+/// Dodges (brightens, `burn` false) or burns (darkens, `burn` true) layer
+/// `idx` where a stroke overlay covers it. `src` is the same canvas-frame
+/// premultiplied RGBA8 overlay `rz_doc_painting_layer` takes (`w`/`h` must
+/// equal the canvas size); only its alpha channel is read, as per-pixel
+/// stroke coverage. `exposure` is clamped to [0, 1]; `range` selects the
+/// tonal band (0 shadows, 1 midtones, 2 highlights). Layer alpha is never
+/// touched. NULL on NULL args, dimension mismatch, non-finite exposure,
+/// range > 2, out-of-range idx, a layer extent that misses the canvas, or
+/// when no pixel would change.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `src` must
+/// be NULL or a valid pointer to at least `w * h * 4` readable bytes.
+// The parameter list mirrors the C declaration one-for-one; bundling the
+// arguments into a struct would only move the count somewhere else.
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_dodge_burn_layer(
+    doc: *const RzDocument,
+    idx: usize,
+    src: *const u8,
+    w: u32,
+    h: u32,
+    exposure: f32,
+    range: u8,
+    burn: bool,
+) -> *mut RzDocument {
+    if src.is_null() {
+        return ptr::null_mut();
+    }
+    let body = |d: &RzDocument| {
+        // Validate against the canvas dimensions before touching `src`, so
+        // the raw read below is bounded by the canvas buffer size.
+        if w != d.width || h != d.height {
+            return None;
+        }
+        let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+        let src = unsafe { std::slice::from_raw_parts(src, len) };
+        d.dodge_burn_layer(idx, src, w, h, exposure, range, burn)
+    };
+    unsafe { doc_op(doc, body) }
+}
+
 /// Rotates the whole document 90 degrees clockwise.
 ///
 /// # Safety
@@ -769,6 +887,33 @@ pub unsafe extern "C" fn rz_doc_transform_layer(
     unsafe { doc_op(doc, |d| d.transform_layer(idx, m, filter_from_c(filter)?)) }
 }
 
+/// Maps layer `idx`'s rect corner-for-corner onto a destination quad: eight
+/// doubles, the canvas points of the source rect's TL, TR, BR, BL corners.
+/// A parallelogram quad delegates to the affine `transform_layer`, exact
+/// fast paths included. NULL for a NULL doc/quad, a non-finite coordinate,
+/// a concave/self-intersecting/collapsed quad, an unknown filter, or a
+/// destination extent that is empty, outside i32 or over the pixel budget.
+///
+/// # Safety
+/// `doc` must be NULL or a valid pointer to a live `RzDocument`; `quad`
+/// must be NULL or a valid pointer to at least eight readable doubles.
+#[no_mangle]
+pub unsafe extern "C" fn rz_doc_perspective_layer(
+    doc: *const RzDocument,
+    idx: usize,
+    quad: *const c_double,
+    filter: c_int,
+) -> *mut RzDocument {
+    if quad.is_null() {
+        return ptr::null_mut();
+    }
+    // The element count is fixed by the contract (eight), never a caller-
+    // supplied length, so the slice is bounded before anything reads it.
+    let q = unsafe { std::slice::from_raw_parts(quad, 8) };
+    let q = [q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7]];
+    unsafe { doc_op(doc, |d| d.perspective_layer(idx, q, filter_from_c(filter)?)) }
+}
+
 // ------------------------------------------------------- selection & fill --
 
 /// Similar-color selection from the flattened composite: writes a
@@ -802,21 +947,6 @@ pub unsafe extern "C" fn rz_doc_magic_wand(
             true
         }
         _ => false,
-    }
-}
-
-/// Reads an optional caller buffer pointer (a canvas-sized selection mask, a
-/// canvas-sized paint overlay) into a slice of exactly `len` bytes. `len` is
-/// always derived from the document, never from the caller.
-///
-/// # Safety
-/// `mask` must be NULL or valid for `len` bytes for the duration of the
-/// caller.
-unsafe fn mask_slice<'a>(mask: *const u8, len: usize) -> Option<&'a [u8]> {
-    if mask.is_null() {
-        None
-    } else {
-        Some(unsafe { std::slice::from_raw_parts(mask, len) })
     }
 }
 
@@ -1334,7 +1464,9 @@ pub unsafe extern "C" fn rz_doc_with_layer_meta(
 pub unsafe extern "C" fn rz_doc_layer_is_adjustment(doc: *const RzDocument, idx: usize) -> bool {
     unsafe {
         doc_get(doc, false, |d| {
-            let meta = d.layers.get(idx)?.meta.as_deref()?;
+            // Never for a group: the core does not interpret a group's meta,
+            // so a blob that happens to parse cannot make one an adjustment.
+            let meta = d.raster_layer(idx)?.meta.as_deref()?;
             Some(Adjustment::from_meta(meta).is_some())
         })
     }
