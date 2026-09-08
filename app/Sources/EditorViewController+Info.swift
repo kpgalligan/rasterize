@@ -50,6 +50,11 @@ extension EditorViewController {
     /// keeps its last value rather than blanking: the reason to look at the
     /// panel is often the pixel you have just moved away from.
     func cursorMoved(to point: CGPoint?) {
+        // The ruler marks track the pointer whether or not the Info tab is
+        // open, so this goes ABOVE the early-out below. Each strip dirties
+        // only its mark's own two rectangles and never the canvas, which is
+        // what onCursorMove's contract requires.
+        rulerCursorMoved(point)
         // Only the visible Info tab reads pixels; every other tab pays
         // nothing for mouse tracking.
         guard layersPanelVisible, panelTab == 3, let infoPanel = infoPanel else { return }

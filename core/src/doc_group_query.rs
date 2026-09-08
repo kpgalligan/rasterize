@@ -4,6 +4,15 @@
 //! expand a selection with. `doc_group` owns the layout, the invariant and the
 //! compositor these read; this module only asks questions of them and is where
 //! that file's ~600-line budget sends its second half.
+//!
+//! The one per-pixel answer here — the content box — is MEMOIZED on the `Arc`
+//! allocations it is a function of (the foot of this file says why that is
+//! exact), because every caller re-asks after each settled edit and an edit
+//! that touched one layer leaves every other layer's box unchanged.
+
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+use image::{GrayImage, RgbaImage};
 
 use crate::adjust::Adjustment;
 use crate::doc::{Layer, LayerKind, RzDocument};
@@ -189,7 +198,7 @@ fn pixel_rect(layer: &Layer) -> (i64, i64, i64, i64) {
 
 /// The box `(x0, y0, x1, y1)` (exclusive, canvas coordinates) of a raster
 /// entry's non-transparent pixels, its enabled mask applied; `None` when none
-/// are.
+/// are. [`content_box`] fronts this with the memo — call that, not this.
 ///
 /// Four EDGE searches with early exits, not one full sweep, because this is
 /// on the hot path: [`RzDocument::layer_bounds`] answers the layers panel, the
@@ -200,7 +209,7 @@ fn pixel_rect(layer: &Layer) -> (i64, i64, i64, i64) {
 /// probe, so the whole box costs four reads instead of `w * h`. A sparse layer
 /// degrades gracefully towards the old cost and an entirely empty one still
 /// pays it once, which is the honest price of the answer.
-fn content_box(layer: &Layer) -> Option<(i64, i64, i64, i64)> {
+fn scan_content_box(layer: &Layer) -> Option<(i64, i64, i64, i64)> {
     let (lw, lh) = layer.pixels.dimensions();
     let raw = layer.pixels.as_raw();
     let mask = layer.active_mask().map(|m| m.as_raw().as_slice());
@@ -223,6 +232,103 @@ fn content_box(layer: &Layer) -> Option<(i64, i64, i64, i64)> {
         i64::from(x1) + ox,
         i64::from(y1) + oy,
     ))
+}
+
+// ------------------------------------------------------------- the memo --
+//
+// [`scan_content_box`] is a per-pixel walk, and everything that asks where an
+// entry's content is re-asks after every settled edit: the layers panel, the
+// boundary overlay, `get_document`, align and distribute — and, since the
+// snapping phase, the host's fold of the WHOLE stack at the start of every
+// drag (`DragSnapping.foldedSnapBoxes`). An edit that changed one layer
+// leaves every other layer's answer identical, so without a memo that fold
+// re-scans the untouched ones every time: measured at 58 ms on a 3000 x 2000
+// document with 20 sparse canvas-sized layers, paid again after each brush
+// stroke, on the main thread, inside a mouse-down.
+//
+// KEYED ON THE `Arc` ALLOCATIONS, exactly as `style_cache` is and for the
+// same reason. The box is a function of the pixel buffer, the ACTIVE mask and
+// the offset alone; every op in this crate rebuilds a changed buffer into a
+// FRESH `Arc` (nothing mutates one in place); and a `Weak` keeps the
+// allocation alive — only the payload is dropped when the last strong
+// reference goes — so a stored address can never be reused by a different
+// buffer while its entry lives. Pointer equality is therefore EXACT, not a
+// guess, and an entry whose buffer has died can match nothing.
+//
+// Bounded and least-recently-used, the `adjust_lut::memoized` shape. An entry
+// is two `Weak`s, an offset and a rect — it pins no pixels — so the capacity
+// answers "how many layers might a document being dragged have", not a memory
+// budget.
+
+/// Entries kept. Comfortably past any real document's layer count, because a
+/// fold of the whole stack only pays off if every entry hits — and at some
+/// 70 bytes an entry, holding this many costs about 36 KB and pins no pixels.
+const CONTENT_BOX_MEMO_CAPACITY: usize = 512;
+
+/// One memo slot: the pixel allocation, the ACTIVE mask allocation (`None`
+/// when the layer has none or it is disabled — which is why the flag needs no
+/// field of its own), the offset the box was measured at, and the box.
+type ContentBoxEntry = (
+    Weak<RgbaImage>,
+    Option<Weak<GrayImage>>,
+    (i32, i32),
+    Option<(i64, i64, i64, i64)>,
+);
+
+static CONTENT_BOX_MEMO: OnceLock<Mutex<Vec<ContentBoxEntry>>> = OnceLock::new();
+
+/// [`scan_content_box`] behind the memo above. Transparent: the same three
+/// inputs always give the same box, and a poisoned lock simply scans again.
+fn content_box(layer: &Layer) -> Option<(i64, i64, i64, i64)> {
+    // The mask the scan will actually read, as an `Arc` to key on: taken
+    // through `active_mask` so a disabled or wrongly sized mask keys as
+    // "none", the same way it reads as none.
+    let mask = match layer.active_mask() {
+        Some(_) => layer.mask.clone(),
+        None => None,
+    };
+    let matches = |entry: &ContentBoxEntry| {
+        std::ptr::eq(entry.0.as_ptr(), Arc::as_ptr(&layer.pixels))
+            && match (&entry.1, &mask) {
+                (None, None) => true,
+                (Some(weak), Some(arc)) => std::ptr::eq(weak.as_ptr(), Arc::as_ptr(arc)),
+                _ => false,
+            }
+            && entry.2 == layer.offset
+    };
+    let memo = CONTENT_BOX_MEMO.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(mut entries) = memo.lock() {
+        if let Some(i) = entries.iter().position(&matches) {
+            // Moved to the back, so eviction is genuinely least recently
+            // USED: a document with more layers than the memo holds then
+            // keeps the ones it is walking rather than the ones it happened
+            // to measure first.
+            let hit = entries.remove(i);
+            let box_ = hit.3;
+            entries.push(hit);
+            return box_;
+        }
+    }
+    // Scanned OUTSIDE the lock: an agent read on the server thread and a
+    // redraw on the main one should not serialize on each other.
+    let box_ = scan_content_box(layer);
+    if let Ok(mut entries) = memo.lock() {
+        // A store is the moment to drop the dead: nothing can match them by
+        // pointer any more, and each still holds an (empty) allocation.
+        entries.retain(|entry| entry.0.strong_count() > 0);
+        if !entries.iter().any(&matches) {
+            while entries.len() >= CONTENT_BOX_MEMO_CAPACITY {
+                entries.remove(0);
+            }
+            entries.push((
+                Arc::downgrade(&layer.pixels),
+                mask.as_ref().map(Arc::downgrade),
+                layer.offset,
+                box_,
+            ));
+        }
+    }
+    box_
 }
 
 fn union(box_: &mut Option<(i64, i64, i64, i64)>, rect: Option<(i64, i64, i64, i64)>) {

@@ -1,6 +1,6 @@
 # From Compositor to Photo Editor: a Gap Review
 
-**Status: in progress (updated 7 September 2026) — phases 1 to 6 of the order in section 4 have shipped, and so has the first half of phase 7 (§3F rows 1–6); section 0 records what landed, what was decided along the way, and where to restart.** A
+**Status: in progress (updated 7 September 2026) — phases 1 to 7 of the order in section 4 have shipped: §3F rows 1–6 and, with them, §3H's guides / rulers / grid / snapping row; section 0 records what landed, what was decided along the way, and where to restart.** A
 fresh-eyes review of the shipped feature set against what a working
 photographer actually reaches for in Photoshop, followed by a large, sized
 catalog of what to build. Companion to `next-features.md` (whose open
@@ -877,11 +877,257 @@ exports and **no changed signature**. Decisions worth knowing:
   exactly three layers selected; and the two Distribute SF Symbols, which
   fall back to "⇹"/"⇳" on an OS that lacks them.
 
+### Phase 7b — guides, rulers, the grid and snapping (§3H's last row): shipped on `refactor` (commit hash to fill in when the phase lands)
+
+The LAST row of §3H, and nothing else in it: arbitrary canvas rotation,
+perspective crop, the skew / distort / warp submodes, Content-Aware Scale and
+Trim / Reveal All are untouched. Rulers in six units, guides as document
+state, a document grid and a pixel grid, ONE snapping engine behind every
+drag in the app, and Smart Guides while a layer moves. The three disabled
+option placeholders this phase existed to turn on — `view.rulers`,
+`view.guides`, `view.pixelgrid` — and the crop tool's "Snap to guides"
+checkbox are live, and no `// … the next phase` comment survives in the tree.
+MCP: 95 → **100** tools; core tests 703 → **728** (`guide_tests.rs` 14,
+`guide_format.rs` 6 and `content_box_tests.rs` 5, plus the null-safety
+sweep); `.rz` `RZDC_VERSION` 7 → **8**;
+11 new `rz_*` exports and **no changed signature** (three Swift closure types
+widened by a `modifiers` argument, which is the app side only).
+Decisions worth knowing:
+
+- **The state split, and why it is not negotiable.** GUIDES and the RULER
+  ORIGIN are core state — per-document geometry that must survive save,
+  reopen and undo, on the same shelf as alpha channels. Everything else —
+  ruler visibility and unit, guide visibility, guide LOCK, guide colour, the
+  grid and its spacing and subdivisions, the pixel-grid mode, snap on/off and
+  its five targets — is an app preference in `ToolOptionsStore`, whose own
+  doc already says why: "tool options follow the user, not the document". A
+  ruler unit or a snap toggle describes how *this user* works, so putting one
+  in `.rz` would make a document arriving from someone else silently change
+  the app's behaviour. Two consequences are worth naming: **Lock Guides is
+  one app-wide boolean, not a per-guide byte** (Photoshop's own shape), and
+  the version-8 block therefore carries no lock byte and no unit byte.
+- **The snap distance is 8 SCREEN points, and that is what makes it
+  zoom-independent.** The app already grabs a hairline at 8 screen points
+  (`transformHandleSize`, the lasso-close test), so a pull at the same
+  distance a handle grabs at is one number rather than two: 1 canvas pixel at
+  800 %, 32 at 25 % — exactly the right behaviour at both ends. **⌃ suspends
+  snapping**, Photoshop's own modifier and the only one free on the canvas
+  (⇧/⌥/⇧⌥ are taken at mouse-down by the marquees' combine modes and by the
+  transform box, ⌘ by distort), and it is read on every drag TICK rather than
+  latched at mouse-down so it can be pressed mid-drag. A PERIODIC target caps
+  its pull at a QUARTER of its own period, and a grid ladder is dropped
+  entirely when its lines are closer together on screen than TWICE the pull:
+  without those rules, at 12 % zoom the pull is 67 canvas px against a 25 px
+  subdivision, so every coordinate is inside some grid line's radius, nothing
+  can be placed off the grid, and the winning line flips on every pointer
+  sample. Neither number is a round-up of the other. A quarter rather than a
+  half because the grid candidate is computed analytically as the NEAREST
+  multiple, so its distance is at most half a period by construction and a
+  half-period cap excludes nothing at all; a quarter leaves half of every
+  cell out of reach, which is the largest pull that still lets an edge be put
+  BETWEEN two grid lines. Twice the pull rather than the pull because the
+  radius is `8 / magnification`, so a ladder admitted at exactly the pull has
+  a radius equal to its whole period — the cap's worst case, not its best.
+  With the default 100 px / 4 grid that puts the subdivisions on offer from
+  64 % zoom, the majors from 16 %, and no grid target below that.
+- **The nearest line wins, ties go guides > layer edges and centres >
+  selection > document bounds > grid**, and exactly ONE offset per axis is
+  applied — but EVERY line at the winning coordinate is returned for drawing,
+  so a guide sitting on a layer edge draws both. A guide is the most
+  deliberate thing on the canvas; the grid is the most numerous and would
+  otherwise swamp what it coincides with.
+- **ONE solver owns the correction, and it is `SnapEngine.pull`.** This is
+  the phase's most important structural rule. Alignment lines are NOT a
+  second solver: comparing a moving box's edges and centres against the
+  static boxes' edges and centres is exactly what `pull` already does against
+  the `.layers` target, so `SmartGuideSolver` produces no correction at all —
+  it contributes equal-spacing candidates into the same contest and then
+  draws, from the box AFTER the winning offset is applied. Two functions
+  deriving the same offset from the same rects is how a layer gets corrected
+  twice, or corrected by one and annotated by the other; because the drawings
+  come from the corrected box, they can never annotate an alignment that did
+  not happen. A group's bounds are its whole subtree's, which comes free from
+  `transformSourceRect`. Each spacing candidate carries the ONE edge of the
+  moving box it was computed for (`SnapLine.appliesTo`, against a
+  `SnapCoordinate`'s tag) and `pull` applies it to that coordinate alone: an
+  untagged position meant for `minX` is otherwise applied to whichever of
+  `minX`, `midX` and `maxX` is nearest it, and wins on the wrong one whenever
+  the intended correction falls outside the pull radius but within it of
+  another — constantly for a box narrower than twice the radius (at 25 % zoom
+  every layer under about 64 canvas px across), and for any box whose width
+  the correction happens to match. The result is a pull to a coordinate that
+  equalizes nothing, with no drawing to explain it, since the drawings are
+  computed from the corrected box and find no equal gap there.
+- **Snapping does not round to whole pixels by default** — a guide at 100.5
+  pulls an edge to 100.5. Four sites opt into a `.wholePixels` quantization
+  that rounds each CANDIDATE before the distance test, so the result is on a
+  whole pixel and on the line simultaneously rather than one and then nudged
+  off the other: the crop box and the rect marquee (both already round at
+  commit), the Move drag (the canvas hands it an integer delta), and a guide
+  drag (a dragged guide commits `.rounded()`). Typed and computed positions —
+  New Guide…, `add_guide` — stay fractional on purpose.
+- **A transform or shape-edit HANDLE snaps only where it can actually go.**
+  `LayerTransform.scaling` solves in the box's own axes: an edge handle
+  cannot move on its dead axis at all, ⇧ makes one factor drive both so a
+  corner traces a line rather than a plane, and `clampScale` can absorb the
+  result. So handle candidates are gated per axis by the handle's own unit
+  vector, and handle snapping is skipped entirely on a rotated, warped or
+  ⇧-constrained box. An engine that reports a hit and draws a line the handle
+  then does not land on is worse than no snap. `.move` and `.distort` keep
+  full snapping (the latter inverts its matrix exactly), and the shape re-edit
+  gets the identical treatment because it solves in local space through a
+  non-identity placement.
+- **The crop box snaps the POINT, before the switch, never the rect after
+  it.** `CropSession.resizing` takes a point plus a handle index and
+  `clamped` has the last word, so snapping the finished rect would break the
+  aspect-ratio constraint the ordering rule exists to protect — and could not
+  be undone, because `resizing` cannot be re-run from a rect. The `.move`
+  case takes a delta form instead, since its point is a grab offset.
+- **The ruler ORIGIN moves LABELS and nothing else** — the on-screen numbers
+  and the New Guide sheet's field. The grid is anchored at canvas (0, 0),
+  drawn AND snapped, so what is drawn and what is landed on cannot disagree
+  the moment someone drags the origin off the corner; no snap target and no
+  MCP coordinate is origin-relative. Positions over MCP are absolute canvas
+  pixels, and `get_document` reports the origin so a model that wants
+  ruler-relative arithmetic does it explicitly.
+- **`.rz` version 8 is a tail append.** One block at the very end of the
+  file: the ruler origin as two `f64`, a `u32` guide count, then 9 bytes per
+  guide (a one-byte orientation and an `f64` position). A guide-less
+  version-8 file is a version-7 file with the version word bumped plus
+  exactly 20 bytes appended — the property versions 4 and 7 both broke by
+  writing their bytes inside each layer record. `f64`, not the `f32` the
+  display scalars use, because a guide position must survive an Image Size
+  down and back. The reader follows the file's standing split: a broken
+  VALUE is repaired (a non-finite origin becomes 0, a non-finite position
+  drops that guide, an out-of-canvas position is CLAMPED) and a structural
+  CLAIM is refused (an unknown orientation byte, a count past the cap).
+  `MAX_GUIDES` is 1024 and is exported as `rz_max_guides()` — unlike
+  `MAX_CHANNELS` it does not vary with the canvas, so the query takes no
+  argument, but the host needs the number to tell "the list is full" from
+  "that guide already exists".
+- **Every geometry op carries the guides, and crop DROPS rather than
+  clamps.** Rotate and flip permute, Canvas Size and crop translate then drop
+  what left the window (boundary inclusive: a guide exactly on 0 or on the
+  new width survives), Image Size scales in `f64` and deliberately does NOT
+  round — 1000 → 333 → 1000 would otherwise walk a guide off its feature.
+  Keeping an out-of-window guide would leave a line that is invisible,
+  unclickable and undeletable and that reappears from nowhere on a later
+  Canvas Size; undo restores the whole handle, so nothing is lost. The ORIGIN
+  is CLAMPED where a guide is dropped, because there is exactly one and a
+  document is never without it. The one trap was `RzDocument::flattening`,
+  the single struct literal that spreads `..from_pixels` and would have lost
+  both fields silently; it names them explicitly and a test pins it.
+- **The CONTENT box is memoized, and that is this phase's other core
+  change.** `doc_group_query`'s per-pixel content scan is now fronted by a
+  bounded LRU memo keyed on the pixel `Arc` allocation, the ACTIVE mask's
+  `Arc` and the offset — the three things the box is a function of. Pointer
+  equality is exact rather than a guess because every op in the crate
+  rebuilds a changed buffer into a FRESH `Arc` and nothing mutates one in
+  place, and the entries hold `Weak`s, so a stored address cannot be reused
+  by a different buffer while its entry lives (the `style_cache` shape).
+  Snapping is what forced it: the host folds the WHOLE stack's boxes at the
+  start of every drag, and an edit that touched one layer leaves every other
+  layer's box unchanged — 58 ms on a 3000 × 2000 document with 20 sparse
+  canvas-sized layers, paid after each brush stroke, on the main thread,
+  inside a mouse-down. `content_box_tests.rs` is its coverage: each test
+  changes exactly one of the three keys and re-asks, because a stale answer
+  is the failure a pointer-keyed cache can actually have.
+- **MCP: five tools, and the view preferences deliberately get none.**
+  `list_guides`, `add_guide`, `remove_guide`, `clear_guides`,
+  `set_ruler_origin`; no `move_guide`, because a move is a remove plus an add
+  and the list re-sorts on every edit, so an index-stable "move" would be a
+  promise a model cannot rely on. The omission of rulers, the grid, the snap
+  toggles and the unit is written down in `app/CLAUDE.md`, in
+  `AgentCatalog.swift` and in `AgentServer+Guides.swift` rather than left to
+  be discovered: a call carrying `document_id` would change every other open
+  window, no undo step could walk it back, a model computes its coordinates
+  exactly and never benefits from a snap, and a preference writes nothing
+  `save_copy` would carry.
+- **The three answers come from the HANDLER, not the core.** The core returns
+  one undifferentiated `None` for a duplicate, an out-of-canvas position and
+  a full list, so each mutating handler runs the checks itself in a fixed
+  order: an unusable position THROWS naming the legal range (the
+  `set_resolution` precedent — "the difference between telling the model its
+  number was wrong and silently clamping 0.5 to 1 and calling that a
+  change"), a same-orientation duplicate answers `changed: false` with a
+  note, and only then can a surviving nil mean the cap, which is named with
+  the number `rz_max_guides()` gives.
+- **`applyGuideEdit` is the one guide-edit entry point for the UI and the
+  agent, and it does not reproject.** It is `applyEdit`'s body with
+  `refreshProjection()` dropped — a guide changes no pixel, and re-flattening
+  a 100 MP document per guide edit is pure waste — while still counting a
+  change, because a field that saves without dirtying loses itself. The agent
+  wrapper copies `performGroupedEdit`'s undo-grouping LOOP but not its call:
+  the call reaches `applyEdit` (the reprojecting path), and dropping the loop
+  would let three `add_guide` calls collapse into one undo step, so one
+  `undo` would take all three guides away.
+- **⌫ was the sharpest trap.** Edit ▸ Clear carries a bare ⌫, and a
+  modifier-less key equivalent is resolved ahead of the first responder, so a
+  Delete branch for a grabbed guide would have been unreachable whenever a
+  selection existed — and would have cleared that selection's PIXELS instead.
+  The fix is one condition in Clear's own guard, the same shape the
+  text-editing case already uses. **⌘R was taken** by Image ▸ Rotate 90°
+  Clockwise, so Rulers ships on ⌃⌘R (the View menu's own ⌃⌘ convention)
+  rather than renegotiating a shortcut silently.
+- **A guide is grabbed by the MOVE tool, or by any tool with ⌘ held** —
+  Photoshop's rule, and the only one that leaves the canvas to the tool. An
+  intercept that fired for every tool but zoom and hand put a 5-screen-point
+  dead band along every visible guide (20 canvas pixels at 25 %) in which a
+  brush stroke, a text click, a fill, a gradient or a marquee silently became
+  a guide move, with no modifier to bypass it: painting up against a guide is
+  the workflow guides exist for, so the tool's press is the default and the
+  guide grab is the one that asks. ⌘ is free — no canvas mouse path reads it.
+  The press and the hover cursor read ONE predicate
+  (`ImageCanvasView.canGrabGuide`), so the cursor can never promise a grab
+  the press will not honour.
+- **The three ruler gestures are gated on `chromeSessionActive` like the two
+  menu items.** `imageDidChange` closes an open Free Transform or shape
+  re-edit by DROPPING it, so any document edit posted underneath one throws
+  that work away with no prompt and no undo step. New Guide… and Clear Guides
+  already stood down inside a session and the canvas's own grab is
+  unreachable while transforming; the ruler strips' drag-out, the corner
+  box's origin drag and its double-click reset were the ungated paths, and
+  they now refuse with a beep (the origin drag beeps once, at the commit,
+  rather than once per tick).
+- **The grid draws above the base image, not above the checkerboard.** Taken
+  literally, "beneath the content" would put it under an opaque photograph,
+  which is every photograph, and the feature exists to align things that sit
+  ON the picture; so it is honoured as "beneath every overlay the user is
+  manipulating". Both grids stand down during a crop STRAIGHTEN — the
+  straighten ANGLE, not the crop session, which opens the moment the tool is
+  picked — for the reason the channel washes already give: the preview
+  rotates the picture while an axis-aligned grid would not. The `.grid` snap
+  target asks the canvas whether the grid is DRAWN (`drawsDocumentGrid`)
+  rather than restating the preference, so the crop box can never be pulled
+  to lines that have left the screen, and cropping to the grid — the reason
+  to have both on — works by eye. The pixel grid draws at 6× in Auto
+  (Photoshop's own 600 %, and the canvas is already at `.none` interpolation
+  by then) and has a 2× FLOOR in On, because a lattice denser than the pixels
+  it describes is a grey wash.
+- Not exercised on screen (worth one manual pass — `render` returns the
+  DOCUMENT's pixels, so MCP can see none of this): the rulers' tick schedule
+  at several zooms and in each of the six units, and the cursor marks; the
+  ruler-origin drag from the corner box and its double-click reset; dragging
+  a guide out, moving one, the hand-over-a-guide cursor while merely hovering
+  (the `resetCursorRects` path), deleting by dragging back into the ruler,
+  and Lock Guides making a guide unclickable; ⌫ deleting a grabbed guide
+  WITH a live selection present; a guide grabbed while Quick Mask is active;
+  each of the seven snapping drags actually pulling and ⌃ suspending it —
+  including whether ⌃-click even reaches `mouseDown` rather than being routed
+  toward the contextual menu, which is why the modifier is read on every
+  drag tick; Smart Guides' alignment lines and equal-spacing bars, and that a
+  moving layer is corrected once with no visible double-nudge; the absence of
+  a hitch at Move mouse-down on a multi-layer document (the engine is built
+  once per gesture, from a bottom-up fold); and the View menu's checkmarks
+  and radio marks.
+
 ### Remaining order
 
-Section 4's step 7 SECOND half next — guides, rulers, grid and snapping
-(§3H) — then step 8's RAW develop and Actions, then the breadth of
-section 3. The rest of §3F (layer colour labels, filter-by-kind and search,
+Section 4's step 8 next — RAW develop and Actions — then the breadth of
+section 3. The REST of §3H (arbitrary canvas rotation and auto-straighten,
+perspective crop, the skew / distort / warp submodes, Content-Aware Scale,
+Trim and Reveal All) is untouched and is a phase of its own whenever it is
+reached. The rest of §3F (layer colour labels, filter-by-kind and search,
 linked image layers, layer comps, the History panel) and the rest of §3C
 (the Smudge / Blur / Sharpen / Sponge brushes, frequency separation and
 Liquify) are each a phase of their own whenever they are reached. Kevin asked
@@ -1211,7 +1457,7 @@ deferred (GIMP §5). Cost is that the adjustment renders per composite;
 cache it as §2.1 caches effects. **M** for the mechanism, then each
 filter opts in.
 
-### 3H. Geometry
+### 3H. Geometry — the guides / rulers / grid / snapping row SHIPPED (§0, Phase 7b)
 
 - **Arbitrary canvas rotation** (Image > Rotate… by angle), and
   **auto-straighten** from `VNDetectHorizonRequest`. S.
@@ -1224,9 +1470,14 @@ filter opts in.
 - **Content-Aware Scale** — seam carving with a protect mask. M.
 - **Trim** (to transparent or to a corner colour) and **Reveal All**
   (canvas to the union of layer bounds). S.
-- **Guides, rulers, grid, and snapping** — every tool's drag snaps to
+- ✅ **Guides, rulers, grid, and snapping** — every tool's drag snaps to
   guides, canvas edges, layer bounds and selection bounds; Smart Guides
-  when moving. M, and the single most-missed piece of chrome.
+  when moving. M, and the single most-missed piece of chrome. Shipped with
+  ONE engine behind every drag and a pull of 8 SCREEN points (⌃ suspends
+  it); guides and the ruler origin are core state carried through every
+  geometry op and saved in `.rz` version 8, while the rulers, the grid, the
+  units and the snap toggles are app preferences — §0's Phase 7b entry says
+  why that line falls where it does.
 
 ### 3I. Files, export and sharing
 
@@ -1278,10 +1529,10 @@ a **command palette** (⌘K-style fuzzy search over the whole menu).
    two weeks of S items that make the Adjustments menu look like a photo
    editor's.
 6. ✅ **Healing brush and Content-Aware Fill** (§3C) — the retouching gap.
-7. ▶ **Groups, lock, multi-select** (§3F rows 1–6 ✅) and
-   **guides / rulers / snapping** (§3H, next) — the workflow layer that
-   20-layer documents demand.
-8. **RAW develop** (§3A) and **Actions** (§3J) — the two features that
+7. ✅ **Groups, lock, multi-select** (§3F rows 1–6) and
+   **guides / rulers / grid / snapping** (§3H's last row) — the workflow
+   layer that 20-layer documents demand.
+8. ▶ **RAW develop** (§3A) and **Actions** (§3J) — the two features that
    would make this app a reason to leave Photoshop rather than a
    replacement for it.
 

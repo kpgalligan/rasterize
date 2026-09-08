@@ -26,6 +26,7 @@ use crate::blend::{
 use crate::doc_align;
 use crate::doc_channel::{self, Channel};
 use crate::doc_group;
+use crate::doc_guide::{self, Guide};
 use crate::doc_lock::EditKind;
 use crate::doc_plane::channel_lerp;
 use crate::icc::IccProfile;
@@ -216,6 +217,15 @@ pub struct RzDocument {
     /// Named canvas-sized coverage planes — saved selections. See
     /// `doc_channel`; they never composite.
     pub channels: Vec<Channel>,
+    /// Alignment guides — each an orientation and a canvas position, sorted
+    /// and de-duplicated. See `doc_guide`; like channels they are canvas
+    /// space, they never composite, and every geometry op moves them.
+    pub guides: Vec<Guide>,
+    /// The ruler zero point, in canvas coordinates; (0, 0) — the canvas's
+    /// top-left — by default. See `doc_guide`: it moves the ruler's LABELS
+    /// and nothing else, but it is a property of the picture's coordinate
+    /// frame, so every geometry op carries it.
+    pub ruler_origin: (f64, f64),
     /// The document's working colour space: the ICC profile its pixel
     /// numbers belong to, embedded on export. Defaults to the built-in
     /// sRGB and is never absent — an untagged file is assumed sRGB at open,
@@ -565,6 +575,8 @@ impl RzDocument {
             layers: vec![Layer::new(pixels, "Background")],
             global_light: GlobalLight::default(),
             channels: Vec::new(),
+            guides: Vec::new(),
+            ruler_origin: (0.0, 0.0),
             // Bare pixels are assumed sRGB with no metadata and a 72 ppi
             // print size; `RzDocument::open` overwrites all three from
             // whatever the file said.
@@ -1016,11 +1028,13 @@ impl RzDocument {
     /// left that could describe those pixels. The document's global light
     /// is a preference, not layer state, and is kept; so are the alpha
     /// channels, which are canvas-sized document state and have nothing to
-    /// do with the layer stack being collapsed; and so, for the same reason,
-    /// are the colour profile (the flattened pixels are still in that
-    /// space), the metadata packets and the print resolution.
+    /// do with the layer stack being collapsed; so are the GUIDES and the
+    /// RULER ORIGIN, canvas-space state for exactly the same reason (the
+    /// canvas does not move, so they are carried verbatim); and so, again for
+    /// that reason, are the colour profile (the flattened pixels are still in
+    /// that space), the metadata packets and the print resolution.
     ///
-    /// Every one of those five is listed EXPLICITLY: this builds on
+    /// Every one of those seven is listed EXPLICITLY: this builds on
     /// `..from_pixels`, so anything not named here is silently replaced by a
     /// default. That applies to the LAYER-level state too, deliberately: the
     /// one surviving entry is a raster layer at depth 0 with no locks, no
@@ -1030,6 +1044,8 @@ impl RzDocument {
         RzDocument {
             global_light: self.global_light,
             channels: self.channels.clone(),
+            guides: self.guides.clone(),
+            ruler_origin: self.ruler_origin,
             profile: Arc::clone(&self.profile),
             metadata: self.metadata.clone(),
             resolution: self.resolution,
@@ -1183,6 +1199,13 @@ impl RzDocument {
             layers,
             global_light: self.global_light,
             channels: doc_channel::geometry_channels(&self.channels, geom),
+            guides: doc_guide::geometry_guides(&self.guides, geom, self.width, self.height),
+            ruler_origin: doc_guide::geometry_origin(
+                self.ruler_origin,
+                geom,
+                self.width,
+                self.height,
+            ),
             profile: Arc::clone(&self.profile),
             metadata: self.metadata.clone(),
             // A 300 x 150 ppi document turned 90 degrees is 150 x 300; the
@@ -1245,6 +1268,8 @@ impl RzDocument {
             layers,
             global_light: self.global_light,
             channels: doc_channel::cropped_channels(&self.channels, x, y, w, h),
+            guides: doc_guide::cropped_guides(&self.guides, x, y, w, h),
+            ruler_origin: doc_guide::cropped_origin(self.ruler_origin, x, y, w, h),
             profile: Arc::clone(&self.profile),
             metadata: self.metadata.clone(),
             resolution: self.resolution,
@@ -1299,6 +1324,8 @@ impl RzDocument {
             layers,
             global_light: self.global_light,
             channels: doc_channel::padded_channels(&self.channels, w, h, origin),
+            guides: doc_guide::padded_guides(&self.guides, w, h, origin),
+            ruler_origin: doc_guide::padded_origin(self.ruler_origin, w, h, origin),
             profile: Arc::clone(&self.profile),
             metadata: self.metadata.clone(),
             resolution: self.resolution,
@@ -1365,6 +1392,13 @@ impl RzDocument {
             layers,
             global_light: self.global_light,
             channels: doc_channel::resized_channels(&self.channels, w, h, filter),
+            // Unlike the layer offsets above, a guide's scaled position is
+            // deliberately NOT rounded: an offset is an integer pixel
+            // address while a guide position is a continuous coordinate, and
+            // rounding at every Image Size accumulates — 1000 -> 333 -> 1000
+            // would walk a guide off the feature it marks.
+            guides: doc_guide::resized_guides(&self.guides, fx, fy, w, h),
+            ruler_origin: doc_guide::resized_origin(self.ruler_origin, fx, fy, w, h),
             profile: Arc::clone(&self.profile),
             metadata: self.metadata.clone(),
             // Photoshop's "Resample: on" case — the pixels change and so

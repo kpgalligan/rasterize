@@ -741,6 +741,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item(
                 "Info", #selector(EditorViewController.showInfo(_:)), "i",
                 [.command, .control]))
+        menu.addItem(.separator())
+        // Photoshop puts Rulers on ⌘R, which is TAKEN here by Image > Rotate
+        // 90° Clockwise — and renegotiating a shortcut silently is exactly
+        // what the Merge Visible comment below forbids. ⌃⌘R is free and is
+        // the View menu's own convention (Channels ⌃⌘C, Assistant ⌃⌘A,
+        // Info ⌃⌘I). Every other shortcut in this block is Photoshop's own.
+        menu.addItem(
+            item(
+                "Rulers", #selector(EditorViewController.toggleRulers(_:)), "r",
+                [.command, .control]))
+        menu.addItem(submenuItem(rulerUnitsMenu()))
+        menu.addItem(.separator())
+        menu.addItem(
+            item("Show Guides", #selector(EditorViewController.toggleGuides(_:)), ";"))
+        menu.addItem(
+            item(
+                "Lock Guides", #selector(EditorViewController.toggleLockGuides(_:)), ";",
+                [.command, .option]))
+        menu.addItem(item("Clear Guides", #selector(EditorViewController.clearGuides(_:))))
+        menu.addItem(item("New Guide…", #selector(EditorViewController.newGuide(_:))))
+        menu.addItem(submenuItem(guideColorMenu()))
+        menu.addItem(.separator())
+        menu.addItem(item("Show Grid", #selector(EditorViewController.toggleGrid(_:)), "'"))
+        menu.addItem(submenuItem(gridSpacingMenu()))
+        menu.addItem(submenuItem(gridSubdivisionsMenu()))
+        menu.addItem(.separator())
+        menu.addItem(
+            item(
+                "Snap", #selector(EditorViewController.toggleSnap(_:)), ";",
+                [.command, .shift]))
+        menu.addItem(submenuItem(snapToMenu()))
+        return menu
+    }
+
+    /// View ▸ Ruler Units: one radio item per CanvasUnit, its tag indexing
+    /// `CanvasUnit.allCases` (the workingSpaceMenu idiom).
+    private func rulerUnitsMenu() -> NSMenu {
+        let menu = NSMenu(title: "Ruler Units")
+        for (tag, unit) in CanvasUnit.allCases.enumerated() {
+            let entry = item(unit.displayName, #selector(EditorViewController.setRulerUnit(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    /// View ▸ Guide Color, tag-indexing `GuideColor.allCases`.
+    private func guideColorMenu() -> NSMenu {
+        let menu = NSMenu(title: "Guide Color")
+        for (tag, color) in GuideColor.allCases.enumerated() {
+            let entry = item(
+                color.displayName, #selector(EditorViewController.setGuideColor(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    /// View ▸ Grid Spacing — presets in the CURRENT ruler unit, so the same
+    /// 100 is 100 px, 100 in or 100 % depending on View ▸ Ruler Units.
+    private func gridSpacingMenu() -> NSMenu {
+        let menu = NSMenu(title: "Grid Spacing")
+        for (tag, spacing) in CanvasGrid.spacingPresets.enumerated() {
+            let entry = item(
+                "\(Int(spacing))", #selector(EditorViewController.setGridSpacing(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    private func gridSubdivisionsMenu() -> NSMenu {
+        let menu = NSMenu(title: "Grid Subdivisions")
+        for (tag, count) in CanvasGrid.subdivisionPresets.enumerated() {
+            let entry = item(
+                "\(count)", #selector(EditorViewController.setGridSubdivisions(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    /// View ▸ Snap To: five independent bits plus All / None — the Layer ▸
+    /// Lock template with a different set, so five toggles cost ONE selector
+    /// (the tag indexes `SnapTarget.named`).
+    private func snapToMenu() -> NSMenu {
+        let menu = NSMenu(title: "Snap To")
+        for (tag, target) in SnapTarget.named.enumerated() {
+            let entry = item(
+                target.name, #selector(EditorViewController.toggleSnapTarget(_:)))
+            entry.tag = tag
+            menu.addItem(entry)
+        }
+        menu.addItem(.separator())
+        menu.addItem(item("All", #selector(EditorViewController.snapToAll(_:))))
+        menu.addItem(item("None", #selector(EditorViewController.snapToNone(_:))))
         return menu
     }
 

@@ -398,6 +398,38 @@ final class ImageDocument: NSDocument {
         docDidChange()
     }
 
+    /// `applyEdit` for an edit that changes the document's GUIDES or its
+    /// RULER ORIGIN — and the ONE path for both the UI and the agent.
+    ///
+    /// It is `applyEdit`'s body with `docDidChange()` replaced by the
+    /// notification alone: undo, dirty and notify, WITHOUT `refreshProjection()`.
+    /// A guide changes no pixel, so re-flattening a 100 MP document once per
+    /// guide edit is pure waste — and a guide drag would pay it on the one
+    /// edit it makes, on the main thread, while the pointer is still down.
+    /// It still COUNTS a change, for the reason `setGroupExpanded` gives
+    /// just below: a field that saves without dirtying loses itself.
+    ///
+    /// The agent's wrapper (`AgentServer+Guides.editGuides`) adds only the
+    /// explicit undo grouping `performGroupedEdit` uses, and must never
+    /// route a guide edit through `applyEdit`: that is the reprojecting path
+    /// this method exists to avoid, and using it would make a second entry
+    /// point for the same edit.
+    func applyGuideEdit(_ actionName: String, _ transform: (RasterDocument) -> RasterDocument?) {
+        guard let current = doc, let updated = transform(current) else {
+            NSSound.beep()
+            return
+        }
+        let selection = layerSelection
+        undoManager?.registerUndo(withTarget: self) { document in
+            document.restoreDoc(current, selection: selection, actionName: actionName)
+        }
+        undoManager?.setActionName(actionName)
+        doc = updated
+        countEditChange(.changeDone)
+        NotificationCenter.default.post(
+            name: .imageDocumentImageDidChange, object: self, userInfo: ["isLive": false])
+    }
+
     /// Replaces the whole selection, clamped to the document. Like the
     /// single-layer `activeLayerIndex` write it retargets future edits only:
     /// no undo step, no dirty flag. The ONE setter, so the "always in range,

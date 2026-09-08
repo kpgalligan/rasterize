@@ -11,6 +11,9 @@ use crate::blend::BlendMode;
 use crate::doc::{sane_opacity, Layer, LayerKind, RzDocument, MAX_PIXELS};
 use crate::doc_channel::{Channel, MAX_CHANNELS};
 use crate::doc_group::{validate_structure, MAX_GROUP_DEPTH};
+use crate::doc_guide::{
+    normalized, sane_origin, sane_position, Guide, GuideOrientation, MAX_GUIDES,
+};
 use crate::doc_lock::LOCK_ALL;
 use crate::icc::IccProfile;
 use crate::metadata::{Metadata, Resolution};
@@ -51,10 +54,10 @@ pub(crate) const MAX_RZDC_BLOB_LEN: u32 = 16 * 1024 * 1024;
 /// The RZDC revision this build writes. Version 1 files (no mask, no layer
 /// meta), version 2 files (no clipped flag), version 3 files (no layer style,
 /// no global light), version 4 files (no channels), version 5 files (no
-/// colour profile, no metadata packets, no resolution) and version 6 files
-/// (no group structure, no locks, no links) still load; anything newer is
-/// refused.
-const RZDC_VERSION: u32 = 7;
+/// colour profile, no metadata packets, no resolution), version 6 files
+/// (no group structure, no locks, no links) and version 7 files (no guides
+/// and no ruler origin) still load; anything newer is refused.
+const RZDC_VERSION: u32 = 8;
 
 /// Parse-time ceiling on the canvas area a file's ISOLATED groups could ask
 /// the compositor for: the canvas pixel count summed over every Group record
@@ -186,6 +189,38 @@ impl RzDocument {
     /// so a version-6 file is not a byte-prefix of the version-7 file of the
     /// same document — exactly as version 4 already broke it, and for the same
     /// reason.
+    ///
+    /// Version 8 appends the GUIDE BLOCK at the very end of the file, after
+    /// the version-6 tail's four blobs: f64 ruler-origin x, f64 ruler-origin
+    /// y (the canvas coordinate of the ruler's zero point), u32 guide count
+    /// (at most `doc_guide::MAX_GUIDES`; more is an ERROR at both ends),
+    /// then per guide, in the model's sorted order, u8 orientation (0 =
+    /// horizontal, a line of constant y; 1 = vertical, a line of constant x;
+    /// ANY OTHER VALUE IS REFUSED, because an orientation is a structural
+    /// claim like the kind byte, not a cosmetic one) and f64 position, the
+    /// canvas coordinate of the line. Nine bytes per guide; 1024 of them is
+    /// 9 KB beside the 1.6 GB of layer pixels this format already admits.
+    ///
+    /// Because the block is a TAIL, the size property holds again: a
+    /// GUIDE-LESS version-8 file is a version-7 file with the version word
+    /// bumped plus exactly 20 bytes appended, everything after the version
+    /// word unchanged. (It is a SIZE property and not a literal byte prefix —
+    /// the version `u32` sits at byte offset 4, so the two files necessarily
+    /// differ there. Versions 4 and 7 broke even this, because their bytes go
+    /// inside each layer record.)
+    ///
+    /// f64 rather than the f32 this format uses for every DISPLAY scalar
+    /// (opacity, ppi, the light angle): a guide position is a geometric
+    /// quantity that must survive an Image Size down and back, `resize`
+    /// already computes with f64 factors, and the FFI already carries
+    /// geometry as `double`. Both the origin and each position are written
+    /// through `doc_guide`'s own sanitizers — clamped into the canvas and
+    /// quantized to four decimals, a guide with a non-finite position simply
+    /// not written — so a file this build produces reads back to exactly the
+    /// model that wrote it. There is deliberately NO per-guide lock byte and
+    /// NO ruler-unit byte: Lock Guides and the ruler's unit are app-wide
+    /// preferences, not properties of the picture (see `doc_guide`).
+    /// `Guide::id` is not written either, for `Channel::id`'s reason.
     ///
     /// A GROUP entry's pixel PNG is a 1x1 fully transparent PNG (~70 bytes),
     /// so the record layout stays uniform and the writer needs no conditional
@@ -384,6 +419,38 @@ impl RzDocument {
             "IPTC packet",
             MAX_RZDC_BLOB_LEN,
         )?;
+        // Version 8: the ruler origin and the guide list, at the very end of
+        // the file. Both go through `doc_guide`'s own sanitizers — the same
+        // ones the reader applies — so the bytes and the model agree by
+        // construction; a guide whose position is not finite is not written
+        // at all, which is why the list is built BEFORE the count.
+        let origin = sane_origin(self.ruler_origin, self.width, self.height);
+        let guides: Vec<(u8, f64)> = self
+            .guides
+            .iter()
+            .filter_map(|g| {
+                let extent = match g.orientation {
+                    GuideOrientation::Horizontal => f64::from(self.height),
+                    GuideOrientation::Vertical => f64::from(self.width),
+                };
+                Some((
+                    g.orientation.to_c() as u8,
+                    sane_position(g.position, extent)?,
+                ))
+            })
+            .collect();
+        // The writer enforces the reader's cap, as with layers and channels.
+        let guide_count = u32::try_from(guides.len())
+            .ok()
+            .filter(|&c| c as usize <= MAX_GUIDES)
+            .ok_or_else(|| format!("too many guides (max {MAX_GUIDES})"))?;
+        buf.extend_from_slice(&origin.0.to_le_bytes());
+        buf.extend_from_slice(&origin.1.to_le_bytes());
+        buf.extend_from_slice(&guide_count.to_le_bytes());
+        for (orientation, position) in &guides {
+            buf.push(*orientation);
+            buf.extend_from_slice(&position.to_le_bytes());
+        }
         Ok(buf)
     }
 
@@ -563,9 +630,18 @@ impl<'a> Reader<'a> {
             self.take(4)?.try_into().expect("4 bytes"),
         ))
     }
+
+    /// The version-8 guide block's currency: a guide position and each ruler
+    /// origin component are geometric quantities that must survive an Image
+    /// Size round trip, so they are stored at f64 precision.
+    fn f64(&mut self) -> Result<f64, String> {
+        Ok(f64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
+    }
 }
 
-/// Parses an RZDC buffer of version 1 to 7 (version 1 predates layer masks
+/// Parses an RZDC buffer of version 1 to 8 (version 1 predates layer masks
 /// and layer meta, which default to absent; versions 1 and 2 predate the
 /// clipped flag, which defaults to false; versions 1 to 3 predate the layer
 /// style and the global light, which default to absent / (120°, 30°);
@@ -574,14 +650,28 @@ impl<'a> Reader<'a> {
 /// 72 x 72 ppi, the colour profile to the built-in sRGB and the three
 /// metadata packets to absent; versions 1 to 6 predate group structure,
 /// locks and links, so every record loads as an unlocked, unlinked, open
-/// RASTER entry at depth 0 — a flat stack, exactly what those files hold).
+/// RASTER entry at depth 0 — a flat stack, exactly what those files hold;
+/// versions 1 to 7 predate the guide block, so a file of those versions loads
+/// with no guides and its ruler origin at the canvas's top-left).
 /// Corrupt or truncated input produces `Err`, never a panic; unknown
 /// blend-mode values fall back to Normal, unknown LOCK bits are masked off,
 /// opacity is clamped, the light and the resolution are sanitized, the four
-/// document blobs are length-capped but otherwise uninterpreted, and a style
+/// document blobs are length-capped but otherwise uninterpreted, a style
 /// is read LENIENTLY (`LayerStyle::from_json_lenient`: a style from a newer
 /// build keeps the effects this build knows; only a structurally malformed
-/// style — or an identity — loads as no style).
+/// style — or an identity — loads as no style), a non-finite ruler-origin
+/// component becomes 0.0, a guide with a non-finite position is dropped, an
+/// out-of-canvas guide position or origin component is CLAMPED to the nearest
+/// canvas edge, and the guide list is then re-sorted and de-duplicated into
+/// the model's canonical form (`doc_guide::normalized`).
+///
+/// **Why the reader CLAMPS an out-of-canvas guide where `RzDocument::crop`
+/// DROPS one.** The two are not in conflict: a guide that leaves a CROP
+/// window was cut out of the picture by a deliberate user op, and keeping it
+/// would leave a line that is invisible, unclickable and undeletable; a
+/// nonsense position in a crafted file is a broken VALUE, and this reader's
+/// standing rule is to put a broken value at the nearest legal one rather
+/// than throw away the author's claim that a guide exists there.
 ///
 /// What is REFUSED rather than repaired, because each is a RELATION between
 /// stored quantities and a guess would be silent data loss: a mask length
@@ -589,8 +679,10 @@ impl<'a> Reader<'a> {
 /// one for the entry's kind (see [`RzDocument::encode_native`]'s deferred
 /// mask construction); a kind byte other than 0 or 1; a depth past
 /// `doc_group::MAX_GROUP_DEPTH`; a malformed depth SEQUENCE, caught by one
-/// `doc_group::validate_structure` walk after the records are read; and a
-/// file whose isolated groups declare more canvas area than
+/// `doc_group::validate_structure` walk after the records are read; a guide
+/// ORIENTATION byte other than 0 or 1 and a guide COUNT over
+/// `doc_guide::MAX_GUIDES`, which are the guide block's two structural
+/// claims; and a file whose isolated groups declare more canvas area than
 /// [`MAX_RZDC_GROUP_CANVAS_PIXELS`], checked as soon as the records are read,
 /// which is as early as the information exists — the decoding ahead of it is
 /// already bounded by [`MAX_RZDC_TOTAL_LAYER_PIXELS`].
@@ -613,6 +705,8 @@ pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
     let has_document_tail = version >= 6;
     // Version 7 records end with the structure, the locks and the link.
     let has_groups = version >= 7;
+    // Version 8 closes the FILE with the ruler origin and the guide list.
+    let has_guides = version >= 8;
     let width = r.u32()?;
     let height = r.u32()?;
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
@@ -861,12 +955,46 @@ pub(crate) fn parse_native(bytes: &[u8]) -> Result<RzDocument, String> {
             Metadata::default(),
         )
     };
+    // Version 8: the ruler origin and the guide list, closing the file.
+    // Values are REPAIRED (a non-finite origin component becomes 0.0, a
+    // non-finite position drops that guide, an out-of-canvas position or
+    // origin is clamped to the nearest edge, everything is quantized) while
+    // the two structural claims — the orientation byte and the count — are
+    // REFUSED, which is this reader's standing split.
+    let (ruler_origin, guides) = if has_guides {
+        let origin = sane_origin((r.f64()?, r.f64()?), width, height);
+        let count = r.u32()?;
+        if count as usize > MAX_GUIDES {
+            return Err(format!("invalid guide count {count}"));
+        }
+        let mut list = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let raw = r.u8()?;
+            let orientation = GuideOrientation::from_c(i32::from(raw))
+                .ok_or_else(|| format!("unsupported guide orientation {raw}"))?;
+            let extent = match orientation {
+                GuideOrientation::Horizontal => f64::from(height),
+                GuideOrientation::Vertical => f64::from(width),
+            };
+            // Through `Guide::new`, so the loaded guide gets a fresh
+            // identity: `Guide::id` is a host-facing handle for as long as a
+            // document is open, never a persisted property (see its doc).
+            if let Some(position) = sane_position(r.f64()?, extent) {
+                list.push(Guide::new(orientation, position));
+            }
+        }
+        (origin, normalized(list))
+    } else {
+        ((0.0, 0.0), Vec::new())
+    };
     Ok(RzDocument {
         width,
         height,
         layers,
         global_light,
         channels,
+        guides,
+        ruler_origin,
         profile,
         metadata,
         resolution,

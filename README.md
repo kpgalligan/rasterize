@@ -179,7 +179,7 @@ decoding, encoding, and manipulation.
   pane per effect, copied/pasted/cleared from the same menu, badged "fx" in
   the layers panel (double-click a plain raster layer's row to open the
   sheet), scaled with Free Transform and Image Size, baked by Merge Down and
-  Flatten, and saved losslessly in `.rz` (format version 7; older files
+  Flatten, and saved losslessly in `.rz` (format version 8; older files
   still load). A document-level global light (angle, altitude) drives every
   effect with Use Global Light on. The Free Transform preview shows the
   layer without its effects until commit
@@ -235,6 +235,37 @@ decoding, encoding, and manipulation.
   (Z: click steps in, ⌥-click out, drag a marquee to fill the window with
   it, or turn on scrubby zoom and drag left/right) and a Hand tool (H) that
   drags the view
+- **Guides and rulers, the grid, and snapping** — View > Rulers (⌃⌘R; ⌘R is
+  Rotate 90°) puts rulers along the top and left edges, drawn in pixels,
+  inches, centimetres, millimetres, points or percent (View > Ruler Units —
+  the inch and metric scales come from the document's own ppi), with the
+  ticks rescaling as you zoom and the pointer marked on both strips. Drag out
+  of the corner box to move the ruler's zero point, double-click it to reset.
+  Drag out of a ruler to place a **guide**; with the Move tool — or ⌘ held
+  with any other tool, so painting along a guide stays painting — drag a
+  guide to move it (the cursor changes as you pass over one), and drag it
+  back into its ruler, or press ⌫ while it is grabbed, to delete it; View > New Guide… places one by
+  typing a position in the current unit, with Show Guides (⌘;), Lock Guides
+  (⌥⌘;), Clear Guides, and a Guide Color preference. Guides are *document*
+  state: they persist in `.rz`, undo and redo as their own steps, and ride
+  along with crop, Canvas Size, Image Size, rotate and flip exactly as the
+  pixels do — a crop drops the ones it cuts away. View > Show Grid (⌘') draws
+  a grid at the spacing and subdivision count you choose (View > Grid
+  Spacing / Grid Subdivisions, authored in the ruler's unit), and the Pixel
+  Grid option on the Zoom/Hand tool's bar (Auto / On / Off) draws the
+  one-pixel lattice once the zoom is high enough for it to read as a grid
+  rather than a wash. **Snap** (⇧⌘;) pulls every drag in the app — moving a
+  layer, each Free Transform handle and the whole box, the crop box, the
+  shape tools, the three marquees, and a guide itself — onto
+  whichever of Guides, Grid, Layers, Document Bounds and Selection (View >
+  Snap To, each independently toggleable, plus All and None) is nearest
+  within **8 screen points**, so the pull is the same distance on screen at
+  any zoom — one canvas pixel at 800 %, thirty-two at 25 %; hold ⌃ to suspend
+  it, and let go to have it back without releasing the mouse. Moving a layer
+  also shows **Smart Guides**:
+  alignment lines to the nearby layers' edges and centres (a group's bounds
+  are its whole subtree's) and equal-spacing bars, in the guide colour's
+  accent
 - Rotate 90°/180°, flip horizontal/vertical
 - **Free Transform** (Layer > Free Transform, ⌘T): rotate, scale and move the
   active layer in one session — drag the eight handles to scale (Shift keeps
@@ -635,7 +666,7 @@ model defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 95 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 100 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG — `render`'s `channel` shows ONE plane as a grayscale PNG
 instead — and `sample_color` reads single pixels off the flattened
@@ -718,6 +749,15 @@ erroring), channel arithmetic (`apply_image` and `calculations` over the
 separable blend modes — the four HSL modes need an RGB triple, so only
 `apply_image` onto a whole layer takes them — plus `add_luminosity_masks`
 for the nine tone masks),
+guides and the ruler origin (`list_guides`, `add_guide`, `remove_guide`,
+`clear_guides` and `set_ruler_origin` mirror View > New Guide… / Clear
+Guides, a guide dragged out of a ruler and the ruler corner box; positions
+are absolute canvas pixels, *not* measured from the ruler origin, and
+`get_document` reports the guides, the origin and the unit the rulers are
+drawn in. The view preferences beside them — rulers, the grid, the snap
+toggles, the ruler unit — deliberately have no tool: they live in
+`UserDefaults` and are app-wide, so a call naming one document would change
+every other open window and no undo step could walk it back),
 bucket fill and gradients (either on the layer or, through the same
 `target`, straight into a colour plane or an alpha channel), colour
 management and metadata (`get_color_profile` reports the document's profile,

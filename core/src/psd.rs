@@ -264,6 +264,11 @@ pub(crate) fn open_psd(bytes: &[u8], path: &str) -> Result<RzDocument, String> {
         // and the ICC profile (id 1039) are unreachable, so an imported
         // document takes the sRGB / no-metadata / 72 ppi defaults.
         channels: Vec::new(),
+        // PSD guides and the ruler origin live in image resource 1032, which
+        // `psd` 0.3.5 does not expose either, so an imported document arrives
+        // with no guides and its ruler zero at the canvas's top-left.
+        guides: Vec::new(),
+        ruler_origin: (0.0, 0.0),
         profile: IccProfile::srgb(),
         metadata: Metadata::default(),
         resolution: Resolution::default(),

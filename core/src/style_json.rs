@@ -26,6 +26,22 @@ pub(crate) fn q4(v: f64) -> f32 {
     ((v * 1e4).round() / 1e4) as f32
 }
 
+/// [`q4`]'s f64 twin: the same four-decimal quantization, KEEPING the f64 —
+/// for the geometric quantities the model stores at full precision because
+/// they must survive a round trip through an Image Size (`doc_guide`'s guide
+/// positions and ruler origin). It lives here, beside `q4`, so the crate has
+/// exactly ONE four-decimal quantizer rather than a second copy elsewhere;
+/// the reason for quantizing at all is `metadata`'s — so a host that echoes a
+/// reported value back through the setter is refused as unchanged instead of
+/// registering a phantom edit.
+///
+/// A magnitude large enough that `v * 1e4` overflows answers infinity rather
+/// than panicking; every caller either clamps into the canvas afterwards or
+/// range-checks and refuses.
+pub(crate) fn q4_f64(v: f64) -> f64 {
+    (v * 1e4).round() / 1e4
+}
+
 /// An inclusive clamp range for one numeric key; [`Range::apply`] is the
 /// parser's and `LayerStyle::scaled`'s shared "clamp then quantize".
 #[derive(Clone, Copy, Debug)]

@@ -72,6 +72,12 @@ fn rich_document(dir: &TempDir) -> RzDocument {
     out
 }
 
+/// The version-8 guide block a document with no guides writes: an f64 (0, 0)
+/// ruler origin and a u32 zero count, twenty zero bytes closing every file
+/// this build produces. It sits AFTER the version-6 document tail this file
+/// is about, so every "the tail is last" assertion now measures from here.
+const GUIDELESS_TAIL: [u8; 20] = [0; 20];
+
 const EXIF: &[u8] = b"II*\x00\x08\x00\x00\x00\x00\xff\x00\xfe";
 const XMP: &[u8] = b"<x:xmpmeta\x00\xc3\xa9/>";
 const IPTC: &[u8] = b"8BIM\x04\x04\x00\x00\x00\x00\x00\x02\xff\x00";
@@ -86,12 +92,15 @@ fn rzdc_v6_round_trips_the_profile_packets_and_resolution() {
     assert_eq!(&bytes[..4], b"RZDC");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        7,
+        8,
         "the writer always writes the current version (the colour profile and \
-         the packets bumped it to 6, groups and locks to 7)"
+         the packets bumped it to 6, groups and locks to 7, guides and the \
+         ruler origin to 8)"
     );
-    // The tail is at the very END of the file: the four blobs in order,
-    // each preceded by its present byte and length.
+    // The version-6 tail is still the last thing before the version-8 GUIDE
+    // BLOCK that now closes the file: the four blobs in order, each preceded
+    // by its present byte and length, then a (0, 0) ruler origin and a zero
+    // guide count.
     let mut expected_tail = Vec::new();
     expected_tail.extend_from_slice(&300.0f32.to_le_bytes());
     expected_tail.extend_from_slice(&150.5f32.to_le_bytes());
@@ -105,9 +114,10 @@ fn rzdc_v6_round_trips_the_profile_packets_and_resolution() {
         expected_tail.extend_from_slice(&(blob.len() as u32).to_le_bytes());
         expected_tail.extend_from_slice(blob);
     }
+    expected_tail.extend_from_slice(&GUIDELESS_TAIL);
     assert!(
         bytes.ends_with(&expected_tail),
-        "the document tail is the last thing in the file"
+        "the document tail, then the empty guide block, close the file"
     );
 
     let back = open_bytes(&dir, "rich-back.rzdc", &bytes).expect("reopen");
@@ -134,11 +144,18 @@ fn the_builtin_srgb_profile_is_elided_from_the_file() {
     let dir = TempDir::new().unwrap();
     let doc = RzDocument::from_pixels(opaque_pattern(4, 3));
     let bytes = save_and_read(&doc, &dir, "plain.rzdc");
-    // 12 bytes: two resolution floats and four absent-blob flags.
+    // 12 bytes: two resolution floats and four absent-blob flags — now
+    // followed by the version-8 guide block, so they are no longer last.
+    let end = bytes.len() - GUIDELESS_TAIL.len();
     assert_eq!(
-        &bytes[bytes.len() - 12..],
+        &bytes[end - 12..end],
         &[0, 0, 144, 66, 0, 0, 144, 66, 0, 0, 0, 0],
         "72 ppi twice, then four absent blobs"
+    );
+    assert_eq!(
+        &bytes[end..],
+        &GUIDELESS_TAIL,
+        "and the empty version-8 guide block closes the file"
     );
     let back = open_bytes(&dir, "plain-back.rzdc", &bytes).expect("reopen");
     assert!(

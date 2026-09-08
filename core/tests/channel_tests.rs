@@ -1411,9 +1411,9 @@ fn rzdc_v5_round_trips_channels_byte_for_byte() {
     assert_eq!(&bytes[..4], b"RZDC");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        7,
+        8,
         "channels bumped the format to 5, colour and metadata to 6, groups \
-         and locks to 7"
+         and locks to 7, guides and the ruler origin to 8"
     );
 
     let mut err: *mut c_char = ptr::null_mut();
@@ -1456,24 +1456,46 @@ fn rzdc_v5_round_trips_channels_byte_for_byte() {
 }
 
 #[test]
-fn version_4_files_load_with_no_channels_and_version_8_is_refused() {
+fn version_4_files_load_with_no_channels_and_version_9_is_refused() {
     let dir = TempDir::new().unwrap();
-    // A plain document written today ends with the 12-byte version-6
-    // document tail (two 72 ppi floats and four "no blob" bytes) preceded by
-    // the four bytes of a zero channel count. Version 7 broke the trick this
-    // test used to derive its older fixtures: its twelve bytes go INSIDE each
-    // layer record (after the style slot), not at the file's tail, so
-    // truncating the tail alone would leave a "v4" file with twelve stray
-    // bytes per record — which `parse_native` has no trailing-byte check to
-    // catch, so it would still parse, for the wrong reason. The per-record
-    // suffix has to come off as well, and with one layer it sits immediately
-    // before the channel count.
+    // A plain document written today ends with the 20-byte version-8 GUIDE
+    // BLOCK (an f64 (0, 0) ruler origin and a u32 zero count), preceded by
+    // the 12-byte version-6 document tail (two 72 ppi floats and four "no
+    // blob" bytes), itself preceded by the four bytes of a zero channel
+    // count. Version 8 appends, so winding back to version 7 is a truncation
+    // like versions 5 and 6 — but version 7 broke that trick for anything
+    // older: its twelve bytes go INSIDE each layer record (after the style
+    // slot), not at the file's tail, so truncating the tail alone would leave
+    // a "v4" file with twelve stray bytes per record — which `parse_native`
+    // has no trailing-byte check to catch, so it would still parse, for the
+    // wrong reason. The per-record suffix has to come off as well, and with
+    // one layer it sits immediately before the channel count.
     let doc = doc_from(&dir, "v4.png", &opaque_pattern(5, 3));
-    let path = dir.path().join("v7-empty.rzdc");
+    let path = dir.path().join("v8-empty.rzdc");
     let c = cpath(&path);
     let mut err: *mut c_char = ptr::null_mut();
     assert!(unsafe { rz_doc_save_native(doc, c.as_ptr(), &mut err) });
-    let v7 = std::fs::read(&path).unwrap();
+    let v8_written = std::fs::read(&path).unwrap();
+    assert_eq!(
+        &v8_written[v8_written.len() - 20..],
+        &[0u8; 20],
+        "a guide-less version-8 file closes with a zero origin and a zero \
+         guide count"
+    );
+    // A v7 file is this one with that block cut off.
+    let mut v7 = v8_written[..v8_written.len() - 20].to_vec();
+    v7[4..8].copy_from_slice(&7u32.to_le_bytes());
+    let v7_path = dir.path().join("v7-empty.rzdc");
+    std::fs::write(&v7_path, &v7).unwrap();
+    let c7 = cpath(&v7_path);
+    let mut err: *mut c_char = ptr::null_mut();
+    let back7 = unsafe { rz_doc_open(c7.as_ptr(), &mut err) };
+    assert!(
+        !back7.is_null(),
+        "a v7 file must still load: {}",
+        take_err_string(err)
+    );
+    unsafe { rz_doc_free(back7) };
     let tail = &v7[v7.len() - 12..];
     assert_eq!(
         f32::from_le_bytes(tail[0..4].try_into().unwrap()),
@@ -1555,15 +1577,15 @@ fn version_4_files_load_with_no_channels_and_version_8_is_refused() {
     assert_eq!(channel_count(back5), 0);
 
     // A future version is refused by number.
-    let mut v8 = v7.clone();
-    v8[4..8].copy_from_slice(&8u32.to_le_bytes());
-    let v8_path = dir.path().join("v8.rzdc");
-    std::fs::write(&v8_path, &v8).unwrap();
-    let c8 = cpath(&v8_path);
+    let mut v9 = v7.clone();
+    v9[4..8].copy_from_slice(&9u32.to_le_bytes());
+    let v9_path = dir.path().join("v9.rzdc");
+    std::fs::write(&v9_path, &v9).unwrap();
+    let c9 = cpath(&v9_path);
     let mut err: *mut c_char = ptr::null_mut();
-    assert!(unsafe { rz_doc_open(c8.as_ptr(), &mut err) }.is_null());
+    assert!(unsafe { rz_doc_open(c9.as_ptr(), &mut err) }.is_null());
     let msg = take_err_string(err);
-    assert!(msg.contains("unsupported RZDC version 8"), "got: {msg}");
+    assert!(msg.contains("unsupported RZDC version 9"), "got: {msg}");
 
     unsafe {
         rz_doc_free(back5);

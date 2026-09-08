@@ -1635,6 +1635,124 @@ final class RasterDocument {
         return wrap(rz_doc_painting_layer_plane(ptr, idx, plane, data, UInt32(w), UInt32(h)))
     }
 
+    // MARK: - Guides and rulers
+
+    /// Value snapshot of one guide (see the header's "Guides, rulers and
+    /// snapping" section): a line across the whole canvas at `position`, in
+    /// the canvas's continuous coordinate space — x for a vertical guide, y
+    /// for a horizontal one, absolute and NOT measured from the ruler origin.
+    struct GuideInfo {
+        /// The core's stable per-guide identity: unique while the app runs,
+        /// kept through a move, the geometry ops and undo/redo, and gone when
+        /// the guide is. The list is re-SORTED by position on every edit, so
+        /// an index cannot identify a guide across one — this is what a drag
+        /// holds on to.
+        let id: UInt64
+        let orientation: GuideOrientation
+        let position: Double
+    }
+
+    /// The largest guide list any document may carry (1024), asked of the
+    /// core so the number has one home. Unlike `maxChannels` it takes no
+    /// canvas: a guide is a line, not a plane. `addingGuide` answers one nil
+    /// for four different refusals, so a caller that wants to SAY the list is
+    /// full compares against this first.
+    static var maxGuides: Int { rz_max_guides() }
+
+    var guideCount: Int { Int(rz_doc_guide_count(ptr)) }
+
+    private func isValidGuide(_ i: Int) -> Bool {
+        i >= 0 && i < guideCount
+    }
+
+    /// Guide `i`'s stable identity alone (see `GuideInfo.id`), 0 for an
+    /// out-of-range index. The cheap half of `guideInfo`, for the drag state
+    /// that only needs identity.
+    func guideID(_ i: Int) -> UInt64 {
+        guard isValidGuide(i) else { return 0 }
+        return rz_doc_guide_id(ptr, i)
+    }
+
+    /// One guide read WITHOUT the bounds check, for an index already known to
+    /// be in range: the body `guideInfo` and `guides` share, so reading the
+    /// whole list costs three FFI calls per guide rather than four.
+    private func guideAt(_ i: Int) -> GuideInfo? {
+        guard let orientation = GuideOrientation(rawValue: rz_doc_guide_orientation(ptr, i))
+        else { return nil }
+        return GuideInfo(
+            id: rz_doc_guide_id(ptr, i),
+            orientation: orientation,
+            position: rz_doc_guide_position(ptr, i))
+    }
+
+    func guideInfo(_ i: Int) -> GuideInfo? {
+        guard isValidGuide(i) else { return nil }
+        return guideAt(i)
+    }
+
+    /// The whole list in the core's own order — sorted by orientation, then
+    /// by position — read in one pass. The canvas caches this on every
+    /// document change so a redraw crosses the boundary not at all.
+    var guides: [GuideInfo] {
+        (0..<guideCount).compactMap { guideAt($0) }
+    }
+
+    /// The index a guide id currently sits at, or nil once it is gone. A
+    /// linear scan on purpose: the list is a handful of entries, and a
+    /// dictionary would have to be rebuilt on every edit that re-sorts it.
+    func guideIndex(id: UInt64) -> Int? {
+        guard id != 0 else { return nil }
+        return (0..<guideCount).first { rz_doc_guide_id(ptr, $0) == id }
+    }
+
+    /// Adds a guide; the list re-sorts, so the new guide is not necessarily
+    /// last. nil when the position is outside the canvas, non-finite, already
+    /// occupied by a same-orientation guide, or the list is full — the core
+    /// answers one refusal for all four, so a host that must distinguish them
+    /// checks first (see `AgentServer+Guides`).
+    func addingGuide(_ orientation: GuideOrientation, at position: Double) -> RasterDocument? {
+        guard position.isFinite else { return nil }
+        return wrap(rz_doc_add_guide(ptr, orientation.rawValue, position))
+    }
+
+    /// Moves guide `i` along its own axis, keeping its identity and its
+    /// orientation. nil for an out-of-range index, a non-finite or
+    /// out-of-canvas position, the position it already has, or one another
+    /// same-orientation guide occupies — again one refusal for all of them.
+    func movingGuide(_ i: Int, to position: Double) -> RasterDocument? {
+        guard isValidGuide(i), position.isFinite else { return nil }
+        return wrap(rz_doc_move_guide(ptr, i, position))
+    }
+
+    func removingGuide(_ i: Int) -> RasterDocument? {
+        guard isValidGuide(i) else { return nil }
+        return wrap(rz_doc_remove_guide(ptr, i))
+    }
+
+    /// nil on an already empty list (clearing nothing is not an edit).
+    func clearingGuides() -> RasterDocument? {
+        wrap(rz_doc_clear_guides(ptr))
+    }
+
+    /// The ruler's zero point in canvas coordinates, (0, 0) — the canvas's
+    /// top-left — by default. It moves the rulers' LABELS and the New Guide
+    /// sheet's typed number; it moves no grid, no snap target and no
+    /// coordinate any other API reports.
+    var rulerOrigin: (x: Double, y: Double) {
+        var out = [Double](repeating: 0, count: 2)
+        let ok = out.withUnsafeMutableBufferPointer { rz_doc_ruler_origin(ptr, $0.baseAddress) }
+        return ok ? (out[0], out[1]) : (0, 0)
+    }
+
+    /// Moves the ruler zero point. nil on a non-finite component, a point
+    /// outside the canvas, or the origin the document already has (after the
+    /// core's four-decimal quantization, so a reported value echoed back
+    /// registers no edit).
+    func settingRulerOrigin(x: Double, y: Double) -> RasterDocument? {
+        guard x.isFinite, y.isFinite else { return nil }
+        return wrap(rz_doc_set_ruler_origin(ptr, x, y))
+    }
+
     // MARK: - Clipping masks
 
     /// Sets or clears layer `idx`'s clipped flag: a clipped layer is
@@ -2007,6 +2125,25 @@ enum RasterProfileKind: Int32 {
 
     /// True for the two the core will store on a document.
     var isStorable: Bool { self == .rgbUnconvertible || self == .rgbMatrix }
+}
+
+/// Which way a guide runs — the core's `RzGuideOrientation`, whose two values
+/// are `RZ_GUIDE_HORIZONTAL` (0) and `RZ_GUIDE_VERTICAL` (1). The name is the
+/// LINE's direction, so a horizontal guide has a constant y and its position
+/// is measured against the canvas HEIGHT. Wrapping it here is what keeps the
+/// raw C int inside `RasterCore.swift`.
+enum GuideOrientation: Int32 {
+    /// A line of constant y.
+    case horizontal = 0
+    /// A line of constant x.
+    case vertical = 1
+
+    /// The canvas extent this orientation's position is measured against:
+    /// the height for a horizontal guide, the width for a vertical one. Both
+    /// ends are legal — a guide may sit exactly on a canvas edge.
+    func extent(inCanvas size: CGSize) -> Double {
+        self == .horizontal ? Double(size.height) : Double(size.width)
+    }
 }
 
 /// What an open did to a document's colour. Describes THE OPEN and is not

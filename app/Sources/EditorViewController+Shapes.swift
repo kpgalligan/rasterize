@@ -235,16 +235,28 @@ extension EditorViewController {
         return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
     }
 
-    func shapeEditMouseDragged(_ point: CGPoint) {
+    /// `modifiers` carries ⌃, which suspends snapping for this tick — read
+    /// per tick, never latched, so it can be pressed and released mid-drag.
+    ///
+    /// The snap goes on the canvas point, before the inverse map — guides are
+    /// canvas objects and the local box is derived from the canvas point —
+    /// and a HANDLE is restricted exactly like a transform handle, to an
+    /// identity placement (`DragSnapping.snapShapeEditPoint`, which carries
+    /// the argument).
+    func shapeEditMouseDragged(_ rawPoint: CGPoint, _ modifiers: NSEvent.ModifierFlags) {
         guard var session = shapeEditSession, let drag = session.drag else { return }
         // Sub-2-screen-point movement is a click, not a drag — the same
         // misclick threshold the other canvas gestures apply. Without it,
         // trackpad jitter inside a double-click would dirty the session
-        // and commit a phantom edit.
+        // and commit a phantom edit. Measured on the RAW point: a snap can
+        // move a coordinate by a whole pull radius, and a click that landed
+        // beside a guide would otherwise cross the threshold on its own and
+        // dirty the session nobody dragged.
         if !session.dirty, let press = session.pressPoint,
-           hypot(point.x - press.x, point.y - press.y) * canvas.magnification < 2 {
+           hypot(rawPoint.x - press.x, rawPoint.y - press.y) * canvas.magnification < 2 {
             return
         }
+        let point = snapShapeEditPoint(rawPoint, drag: drag, modifiers)
         switch drag {
         case let .handle(index, start):
             // The pointer goes into the shape's own space (relative to the

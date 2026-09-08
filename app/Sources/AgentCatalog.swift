@@ -337,7 +337,14 @@ extension AgentServer {
                     + "ALPHA CHANNELS (saved selections, never part of the picture) also "
                     + "reports a channels array of {index, name, overlay_color, "
                     + "overlay_opacity, color_indicates} — list_channels returns the same "
-                    + "list. Layer index 0 is the bottom "
+                    + "list. A document that carries GUIDES also reports a guides array of "
+                    + "{index, orientation, position} — non-printing lines in canvas pixels "
+                    + "that tools snap to, never part of the picture; list_guides returns the "
+                    + "same list. ruler is always present: origin_x/origin_y are the ruler's "
+                    + "zero point in canvas pixels (document state, set with set_ruler_origin, "
+                    + "affecting only what the on-screen rulers LABEL), and unit is the "
+                    + "app-wide ruler-unit preference, not part of this document. "
+                    + "Layer index 0 is the bottom "
                     + "layer; offsets are measured from the canvas top-left corner, y "
                     + "increasing down.",
                 ["document_id": docID]),
@@ -2075,6 +2082,84 @@ extension AgentServer {
             // Channels — saved selections, per-plane arithmetic (the
             // Channels panel, Select > Save/Load Selection, Image > Apply
             // Image… / Calculations…).
+            // Guides and the ruler origin — View ▸ New Guide… / Clear
+            // Guides, dragging a guide out of a ruler strip, and the ruler
+            // corner box. The view PREFERENCES beside them (rulers, the
+            // grid, the snap toggles, the ruler unit) deliberately have no
+            // tool: they live in UserDefaults and are app-wide, so a call
+            // naming one document would change every other open window,
+            // undo could not walk one back, a model computes its coordinates
+            // exactly and never benefits from a snap, and a preference
+            // writes nothing save_copy would carry.
+            tool(
+                "list_guides",
+                "Lists the document's GUIDES: non-printing lines the tools snap to, drawn "
+                    + "across the whole canvas and never part of the picture. Each is "
+                    + "{index, orientation, position}, sorted by orientation then position — "
+                    + "so an index is stable only until the next guide edit. position is an "
+                    + "absolute canvas pixel coordinate (x for a vertical guide, y for a "
+                    + "horizontal one), measured from the canvas top-left, NOT from the ruler "
+                    + "origin. The reply also carries the same ruler block get_document "
+                    + "reports — origin_x/origin_y plus the app-wide ruler unit — so placing a "
+                    + "guide relative to what a ruler LABELS needs no second call.",
+                ["document_id": docID]),
+            tool(
+                "add_guide",
+                "Adds a guide — View ▸ New Guide…, and dragging one out of a ruler strip. "
+                    + "position is an absolute canvas coordinate: x for a vertical guide "
+                    + "(0 to the canvas width), y for a horizontal one (0 to the canvas "
+                    + "height), both ends legal because a guide may sit exactly on an edge. "
+                    + "It is NOT measured from the ruler origin, which get_document reports "
+                    + "separately. A position another guide of the same orientation already "
+                    + "occupies changes nothing and says so. Guides ride along with crop, "
+                    + "canvas size, image size, rotate and flip exactly as the pixels do, and "
+                    + "persist in .rz. One undo step.",
+                [
+                    "orientation": [
+                        "type": "string",
+                        "enum": ["horizontal", "vertical"],
+                        "description": "horizontal is a line of constant y; vertical of "
+                            + "constant x.",
+                    ],
+                    "position": [
+                        "type": "number",
+                        "description": "Canvas pixels along the guide's own axis.",
+                    ],
+                    "document_id": docID,
+                ], required: ["orientation", "position"]),
+            tool(
+                "remove_guide",
+                "Deletes one guide by its index in list_guides — the same edit as dragging it "
+                    + "back into its ruler, or pressing Delete while it is grabbed. Indices "
+                    + "shift after any guide edit, so read list_guides immediately before. "
+                    + "One undo step.",
+                [
+                    "guide": [
+                        "type": "integer",
+                        "description": "Index from list_guides.",
+                    ],
+                    "document_id": docID,
+                ], required: ["guide"]),
+            tool(
+                "clear_guides",
+                "Removes every guide — View ▸ Clear Guides. Works even while guides are "
+                    + "locked in the app, because that lock only stops an accidental drag. "
+                    + "One undo step, which restores all of them.",
+                ["document_id": docID]),
+            tool(
+                "set_ruler_origin",
+                "Moves the rulers' zero point — dragging from the box where the two ruler "
+                    + "strips meet (double-clicking it resets to 0, 0). x and y are canvas "
+                    + "pixels inside the canvas. This affects ONLY what the on-screen rulers "
+                    + "label and what View ▸ New Guide… seeds its field with: the grid, every "
+                    + "snap target and every coordinate any tool reports or accepts stay "
+                    + "measured from the canvas top-left. Document state, so it persists in "
+                    + ".rz and rides along with the geometry ops. One undo step.",
+                [
+                    "x": ["type": "number", "description": "Canvas pixels from the left."],
+                    "y": ["type": "number", "description": "Canvas pixels from the top."],
+                    "document_id": docID,
+                ], required: ["x", "y"]),
             tool(
                 "list_channels",
                 "Lists the document's ALPHA CHANNELS: named canvas-sized coverage planes "

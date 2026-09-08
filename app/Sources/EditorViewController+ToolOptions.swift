@@ -286,9 +286,10 @@ extension EditorViewController {
                     kind: .checkbox(
                         label: "Snap to guides",
                         get: { ToolOptionsStore.shared.crop.snapToGuides },
-                        set: { ToolOptionsStore.shared.crop.snapToGuides = $0 }),
-                    // There are no guides yet.
-                    isEnabled: { false }),
+                        set: { [weak self] value in
+                            ToolOptionsStore.shared.crop.snapToGuides = value
+                            self?.syncCanvasPaintState()
+                        })),
             ]),
         ]
     }
@@ -371,19 +372,20 @@ extension EditorViewController {
                     kind: .checkbox(
                         label: "Snap to layers",
                         get: { ToolOptionsStore.shared.move.snapToLayers },
-                        set: { ToolOptionsStore.shared.move.snapToLayers = $0 }),
-                    // Snapping is guides/grid work — the next phase.
-                    isEnabled: { false }),
+                        set: { [weak self] value in
+                            ToolOptionsStore.shared.move.snapToLayers = value
+                            self?.syncCanvasPaintState()
+                        })),
                 OptionDescriptor(
                     id: "move.nudge", microLabel: "Nudge", overflowLabel: "Nudge step",
                     kind: .field(
                         width: 52, unit: " px", decimals: 0, min: 1, max: 100,
                         quick: Self.quickPx,
                         get: { ToolOptionsStore.shared.move.nudgeStep },
-                        set: { ToolOptionsStore.shared.move.nudgeStep = $0 }),
-                    // Arrow nudges are 1px (Shift: 10); a settable step rides
-                    // with the same phase that adds snapping.
-                    isEnabled: { false }),
+                        set: { [weak self] value in
+                            ToolOptionsStore.shared.move.nudgeStep = value
+                            self?.syncCanvasPaintState()
+                        })),
             ]),
         ]
     }
@@ -1218,22 +1220,30 @@ extension EditorViewController {
                     kind: .checkbox(
                         label: "Rulers",
                         get: { ToolOptionsStore.shared.view.rulers },
-                        set: { ToolOptionsStore.shared.view.rulers = $0 }),
-                    isEnabled: { false }),
+                        set: { [weak self] value in
+                            ToolOptionsStore.shared.view.rulers = value
+                            // The broadcast relayouts every window, this
+                            // one included (EditorViewController+Rulers).
+                            self?.viewChromeChanged()
+                        })),
                 OptionDescriptor(
                     id: "view.guides", overflowLabel: "Guides",
                     kind: .checkbox(
                         label: "Guides",
                         get: { ToolOptionsStore.shared.view.guides },
-                        set: { ToolOptionsStore.shared.view.guides = $0 }),
-                    isEnabled: { false }),
+                        set: { [weak self] value in
+                            ToolOptionsStore.shared.view.guides = value
+                            self?.viewChromeChanged()
+                        })),
                 OptionDescriptor(
                     id: "view.pixelgrid", overflowLabel: "Pixel grid",
                     kind: .popup(
                         width: 76, items: ["Auto", "On", "Off"],
                         get: { ToolOptionsStore.shared.view.pixelGridIndex },
-                        set: { ToolOptionsStore.shared.view.pixelGridIndex = $0 }),
-                    isEnabled: { false }),
+                        set: { [weak self] index in
+                            ToolOptionsStore.shared.view.pixelGridIndex = index
+                            self?.viewChromeChanged()
+                        })),
             ]),
         ]
     }

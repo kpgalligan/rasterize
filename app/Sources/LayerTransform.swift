@@ -451,6 +451,24 @@ struct LayerTransform {
             && Double(extent.width) * Double(extent.height) <= Self.maxTransformPixels
     }
 
+    /// The EXACT bounding box of `points` — nil when there are none, or when
+    /// any coordinate is not finite.
+    ///
+    /// The twin of `boundingExtent` for a caller that needs the box the
+    /// pixels actually occupy rather than the buffer the core would allocate
+    /// for them. That rounding is not decoration — it mirrors the core's own
+    /// destination extent — but it rounds OUTWARD, so a snap, whose whole job
+    /// is to put an EDGE on a line, would be up to a pixel out on every side
+    /// if it measured a quad that way (`DragSnapping.swift`).
+    static func exactBounds(of points: [CGPoint]) -> CGRect? {
+        let xs = points.map { $0.x }
+        let ys = points.map { $0.y }
+        guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(),
+              let maxY = ys.max(), minX.isFinite, maxX.isFinite, minY.isFinite, maxY.isFinite
+        else { return nil }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
     /// The outward-rounded bounding box of `points`, rounded exactly the
     /// way the core rounds a destination extent — the shared tail of
     /// `destinationExtent(of:)` and `warpedDestinationExtent(of:)`.

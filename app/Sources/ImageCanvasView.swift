@@ -64,6 +64,12 @@ final class ImageCanvasView: NSView {
             // more drag — and so did undoing one.
             if image?.width != oldValue?.width || image?.height != oldValue?.height {
                 patchSession.cancel()
+                // Same rule for a guide drag and a pending ruler origin:
+                // both are canvas GEOMETRY, not a reading of the pixels, so
+                // a same-size doc swap (undo, an agent edit landing
+                // mid-press) leaves them alone and only a resize ends them.
+                guideDrag = nil
+                rulerOriginDrag = nil
             }
             redEyeSession.cancel()
             needsDisplay = true
@@ -120,6 +126,58 @@ final class ImageCanvasView: NSView {
     /// the geometry and the drawing, this view only points them at events.
     var patchSession = PatchSession()
     var redEyeSession = RedEyeSession()
+
+    // Guides, the grid and snapping — the same arrangement again: the values
+    // are pushed in, the geometry and the drawing live in Guides.swift,
+    // SnapEngine.swift, ImageCanvasView+Guides.swift and
+    // ImageCanvasView+Grid.swift.
+
+    /// The whole of the view chrome's preferences as ONE value, so this
+    /// frozen file gains one stored property and one assignment in
+    /// syncCanvasPaintState rather than nine of each (CanvasChromeSettings
+    /// carries the argument). The canvas still never reads ToolOptionsStore.
+    var chrome = CanvasChromeSettings() {
+        didSet { needsDisplay = true }
+    }
+    /// The document's guides, cached on every document change so a redraw
+    /// and a hit test cross the FFI boundary not at all.
+    var guides: [CanvasGuide] = []
+    /// The guide drag in flight (GuideDragSession.swift).
+    var guideDrag: GuideDragSession?
+    /// The cursor a guide under the pointer asks for, or nil. It has to be a
+    /// property rather than an NSCursor.set(): hovering is governed by
+    /// resetCursorRects, which four existing invalidateCursorRects sites
+    /// re-apply.
+    var guideHoverCursor: NSCursor?
+    /// The pending ruler origin while the corner box is being dragged.
+    var rulerOriginDrag: CGPoint?
+    /// The alignment lines and equal-gap bars a live Move or Free Transform
+    /// drag produced, computed from the CORRECTED box (SnapEngine.swift).
+    var smartGuides: [SmartGuideLine] = []
+    /// The engine this canvas's own point drags snap against — asked for at
+    /// mouse-DOWN through `onSnapEngine` and then held unchanged for the
+    /// whole gesture, never rebuilt mid-drag.
+    var snapEngine = SnapEngine.inactive
+    /// Builds the engine above. It is a closure rather than a stored value a
+    /// sync pushes because a guide dragged out of a ruler must be a target
+    /// for the very next marquee, without a tool switch in between — and
+    /// rebuilding on every document change instead would run the
+    /// content-bounds fold per brush stroke (DragSnapping.swift).
+    var onSnapEngine: (() -> SnapEngine)?
+
+    /// The guide gestures. `onGuideMouseDown` returns true when it took the
+    /// press, which is what keeps it from reaching the active tool.
+    var onGuideMouseDown: ((CGPoint, NSEvent.ModifierFlags) -> Bool)?
+    var onGuideMouseDragged: ((CGPoint, NSEvent.ModifierFlags) -> Void)?
+    /// Mouse-up takes no point: the drag's own state decides both what is
+    /// committed and whether the guide is being dropped back into its ruler,
+    /// so that one release event cannot disagree with the last tick the user
+    /// actually saw (EditorViewController+Guides.guideMouseUp).
+    var onGuideMouseUp: (() -> Void)?
+    /// ⌫ while a guide is grabbed.
+    var onGuideDelete: (() -> Void)?
+    /// Escape while a guide is grabbed.
+    var onGuideCancel: (() -> Void)?
 
     /// When non-nil, drawn instead of `image` (live-preview sheets).
     var previewImage: CGImage? {
@@ -214,6 +272,15 @@ final class ImageCanvasView: NSView {
                 moveDragOrigin = nil
                 onMoveEnd?()
             }
+            // The guide grab cursor belongs to the OLD tool's answer to
+            // `canGrabGuide`, and the pointer has not moved, so nothing will
+            // re-derive it: without this the invalidation below would put
+            // the guide's arrows straight back over a guide the new tool
+            // cannot grab (picking crop while hovering one, say), and the
+            // pointer would promise a grab the press will not honour. The
+            // next `mouseMoved` re-derives it through the predicate
+            // (ImageCanvasView+Guides.swift).
+            clearGuideHoverCursor()
             window?.invalidateCursorRects(for: self)
             needsDisplay = true
         }
@@ -318,7 +385,11 @@ final class ImageCanvasView: NSView {
         didSet { needsDisplay = true }
     }
     var onCropMouseDown: ((CGPoint) -> Void)?
-    var onCropMouseDragged: ((CGPoint) -> Void)?
+    /// The modifiers ride along because ⌃ suspends snapping and must be read
+    /// on every tick, never latched at mouse-down: the user may suspend
+    /// mid-drag, and the crop box is one of the three drags that could not
+    /// see the flag at all before this phase.
+    var onCropMouseDragged: ((CGPoint, NSEvent.ModifierFlags) -> Void)?
     var onCropMouseUp: ((CGPoint) -> Void)?
     /// Return, keypad Enter, or a double-click.
     var onCropCommit: (() -> Void)?
@@ -345,7 +416,8 @@ final class ImageCanvasView: NSView {
         didSet { needsDisplay = true }
     }
     var onShapeEditMouseDown: ((CGPoint) -> Void)?
-    var onShapeEditMouseDragged: ((CGPoint) -> Void)?
+    /// With the modifiers, for the reason onCropMouseDragged gives.
+    var onShapeEditMouseDragged: ((CGPoint, NSEvent.ModifierFlags) -> Void)?
     var onShapeEditMouseUp: (() -> Void)?
     /// Return, keypad Enter, or a double-click.
     var onShapeEditCommit: (() -> Void)?
@@ -476,7 +548,9 @@ final class ImageCanvasView: NSView {
     // Auto-Select decides which entry the drag moves from where the press
     // landed (EditorViewController+Groups.swift).
     var onMoveBegin: ((_ point: CGPoint, _ modifiers: NSEvent.ModifierFlags) -> Void)?
-    var onMoveUpdate: ((_ dx: Int, _ dy: Int) -> Void)?
+    /// The TOTAL delta from the press, plus the live modifiers — ⌃ suspends
+    /// snapping and must be read on every tick (see onCropMouseDragged).
+    var onMoveUpdate: ((_ dx: Int, _ dy: Int, _ modifiers: NSEvent.ModifierFlags) -> Void)?
     var onMoveEnd: (() -> Void)?
     var onMoveNudge: ((_ dx: Int, _ dy: Int) -> Void)?
 
@@ -526,6 +600,12 @@ final class ImageCanvasView: NSView {
     var hasActiveTextSession: Bool { activeTextView != nil }
 
     private var dragAnchor: CGPoint?
+
+    /// The last marquee drag tick's SNAPPED rect — what the user is looking
+    /// at — latched so that is what commits, the way `shapePreview` latches
+    /// the shape drag's. nil until the first tick, and again after the
+    /// commit.
+    private var marqueePreview: CGRect?
 
     // Move-drag state: the unclamped image-space point the drag started at.
     private var moveDragOrigin: CGPoint?
@@ -741,6 +821,20 @@ final class ImageCanvasView: NSView {
                 previewingPlane: previewImage != nil && paintTarget.targetsPlaneOrChannel)
         }
 
+        // The document grid and the one-pixel lattice: above the base image
+        // and its washes, below every overlay being manipulated (the slot's
+        // reasoning is in ImageCanvasView+Grid.swift). Both stand down
+        // during a crop STRAIGHTEN — `gridsStandDown`, which is the angle
+        // and not the session — for the reason the washes just above give:
+        // the preview rotates the picture while an axis-aligned grid would
+        // not, showing the grid where it will not land. An axis-aligned crop
+        // keeps its grid, because cropping to the grid is what having both
+        // on is for.
+        if !gridsStandDown {
+            drawDocumentGrid(in: context, dirty: dirtyRect)
+            drawPixelGrid(in: context, dirty: dirtyRect)
+        }
+
         // A coverage stroke in progress: the projection has not moved, so the
         // overlay itself is ghosted on top until the stroke commits — ABOVE
         // the washes, since a wash drawn over it hid the very stroke that is
@@ -775,6 +869,13 @@ final class ImageCanvasView: NSView {
         if let selection = selection, !isTransforming {
             drawSelection(selection)
         }
+
+        // Guides sit ABOVE the selection: drawSelection washes everything
+        // outside the selection with 0.35 black, and a guide drawn under it
+        // would be visibly dimmed inside the same document depending on
+        // whether a selection happened to exist.
+        drawGuides()
+        drawRulerOriginCrosshair()
 
         // Both of these belong to a tool gesture the session has suspended;
         // like the selection, they survive it without drawing over the box.
@@ -818,6 +919,11 @@ final class ImageCanvasView: NSView {
         if let marquee = zoomMarquee {
             drawZoomMarquee(marquee)
         }
+
+        // Deliberately NOT gated on !isTransforming, unlike the overlays
+        // above: a Free Transform drag is one of the two gestures that
+        // produce smart guides.
+        drawSmartGuides()
 
         if let preview = transformPreview {
             drawTransformBox(preview)
@@ -1293,6 +1399,7 @@ final class ImageCanvasView: NSView {
         gradientAnchor = nil
         gradientCurrent = nil
         dragAnchor = nil
+        marqueePreview = nil
         // A shape drag caught mid-flight (Q lands during it) must not
         // commit a document edit into the mode.
         shapeAnchor = nil
@@ -1413,6 +1520,22 @@ final class ImageCanvasView: NSView {
             // clicks again to start a new one.
             if tool == .text { return }
         }
+        // A guide grab, intercepted ABOVE the Quick Mask gate and above the
+        // eyedropper latch. Above the gate deliberately: that gate RETURNS
+        // for every tool but zoom and hand (brush/eraser stroke and return,
+        // the default arm beeps), so an intercept below it could never fire
+        // in the mode and attempting a guide drag would beep — while a guide
+        // drag reads and writes no pixel and never touches the mode's
+        // buffer, so there is nothing here for Quick Mask to protect. WHICH
+        // presses may take a guide — the Move tool's, and any tool's with ⌘
+        // held — is `canGrabGuide`'s, in ImageCanvasView+Guides.swift, so
+        // the hover cursor and this press cannot disagree.
+        if canGrabGuide(event.modifierFlags),
+           onGuideMouseDown?(
+               convert(event.locationInWindow, from: nil), event.modifierFlags) == true
+        {
+            return
+        }
         // Quick Mask mode: only brush (add coverage) and eraser (remove)
         // strokes are live — they edit the mode's buffer. The view tools
         // stay live too (they change what you see, never the document,
@@ -1446,9 +1569,29 @@ final class ImageCanvasView: NSView {
             return
         }
         let point = clamp(point: convert(event.locationInWindow, from: nil))
+        // The four gestures this view snaps by itself ask for their engine
+        // HERE, once, and hold it for the press (DragSnapping.swift's
+        // build-once rule). Only these four: every other tool's mouse-down
+        // would be paying for a list it never reads.
+        if Self.snappingCanvasTools.contains(tool), let engine = onSnapEngine?() {
+            snapEngine = engine
+        }
         switch tool {
         case .select, .ellipseSelect:
+            // The RAW press point: `snappedMarqueeRect` snaps BOTH corners on
+            // every tick with that tick's own ⌃ flag. Snapping the anchor
+            // here instead pinned it to whatever it landed on at mouse-down,
+            // so pressing ⌃ mid-drag freed the moving corner and left the
+            // fixed one stuck on a line the user was trying to get off. The
+            // anchor does not move, so its own pull answers identically on
+            // every tick — the same argument the crop box and the shape drag
+            // already make for snapping their fixed corner per tick.
             dragAnchor = point
+            // Cleared here as well as at the commit, so the latch's life is
+            // exactly this gesture's: a drag that never reaches `mouseUp`
+            // (a tool switched mid-drag, a window closed) would otherwise
+            // leave a rect behind for the NEXT press to commit on a click.
+            marqueePreview = nil
             dragCombineMode = combineMode(for: event)
             dragBaseSelection = selection
         case .lasso:
@@ -1465,7 +1608,16 @@ final class ImageCanvasView: NSView {
                     // The click that starts a new polygon decides the mode.
                     lassoCombineMode = combineMode(for: event)
                 }
-                lassoPoints.append(point)
+                // Clamped after the snap for the reason the marquee anchor
+                // is: a lasso vertex is a canvas coordinate and every other
+                // one in this file is inside the canvas.
+                lassoPoints.append(
+                    clamp(
+                        point: snapEngine.snapped(
+                            point: point,
+                            in: SnapContext(
+                                magnification: magnification,
+                                suspended: event.modifierFlags.contains(.control)))))
                 needsDisplay = true
             }
         case .wand:
@@ -1493,6 +1645,10 @@ final class ImageCanvasView: NSView {
         case .brush, .eraser:
             beginStroke(at: point, pressure: Self.tabletPressure(of: event))
         case .text:
+            // Deliberately unsnapped (DragSnapping.swift's table): this is a
+            // click, not a drag — the insertion point is placed by the
+            // layout, and snapping it would move a baseline the user never
+            // aimed at.
             onTextClick?(point)
         case .eyedropper:
             break // handled before the switch
@@ -1569,12 +1725,20 @@ final class ImageCanvasView: NSView {
         // use as the dab's centre; the Info panel wants the raw point, which
         // is what `onCursorMove` has always carried.
         setHoverPoint(clamp(point: raw))
+        // The hand-over-a-guide cursor. It invalidates the cursor rects only
+        // when the value actually changes, and reads the same `canGrabGuide`
+        // predicate mouseDown does — ⌘ included, which is why the event's
+        // flags come with it (ImageCanvasView+Guides.swift).
+        updateGuideHoverCursor(at: raw, modifiers: event.modifierFlags)
         onCursorMove?(raw)
     }
 
     override func mouseExited(with event: NSEvent) {
         setHoverPoint(nil)
         onCursorMove?(nil)
+        // A guide's grab cursor belongs to the pointer being over the guide
+        // (ImageCanvasView+Guides.swift).
+        clearGuideHoverCursor()
     }
 
     /// Latches the pointer position, redrawing only the source marker's own
@@ -1618,14 +1782,25 @@ final class ImageCanvasView: NSView {
             onEyedropper?(raw)
             return
         }
+        // A guide drag owns the canvas until it is released.
+        if guideDrag != nil {
+            onGuideMouseDragged?(raw, event.modifierFlags)
+            return
+        }
+        let suspended = event.modifierFlags.contains(.control)
         switch tool {
         case .select:
             guard let anchor = dragAnchor else { return }
-            setSelectionRect(rect(from: anchor, to: clamp(point: raw)))
+            let rect = snappedMarqueeRect(
+                from: anchor, to: raw, quantize: .wholePixels, suspended: suspended)
+            marqueePreview = rect
+            setSelectionRect(rect)
         case .ellipseSelect:
             guard let anchor = dragAnchor else { return }
-            setSelection(
-                shapeSelection(.ellipse(rect(from: anchor, to: clamp(point: raw)))))
+            let rect = snappedMarqueeRect(
+                from: anchor, to: raw, quantize: .exact, suspended: suspended)
+            marqueePreview = rect
+            setSelection(shapeSelection(.ellipse(rect)))
         case .lasso, .wand, .fill, .eyedropper:
             break
         case .subject:
@@ -1639,11 +1814,18 @@ final class ImageCanvasView: NSView {
         case .move:
             guard let origin = moveDragOrigin else { return }
             NSCursor.closedHand.set()
-            onMoveUpdate?(Int((raw.x - origin.x).rounded()), Int((raw.y - origin.y).rounded()))
+            onMoveUpdate?(
+                Int((raw.x - origin.x).rounded()), Int((raw.y - origin.y).rounded()),
+                event.modifierFlags)
         case .brush, .eraser, .clone, .dodge, .heal, .spotHeal:
             // No clamping: the image-sized overlay context clips naturally,
             // so a stroke that leaves the canvas paints up to the edge and
             // stops instead of smearing along the border.
+            //
+            // And NO SNAPPING, deliberately (DragSnapping.swift's table): a
+            // stroke is freehand, and pulling one dab to a guide would break
+            // the spacing engine's arc length, leaving a gap or a blot at
+            // the guide.
             continueStroke(to: raw, pressure: Self.tabletPressure(of: event))
         case .patch:
             if patchSession.mouseDragged(clamp(point: raw)) { needsDisplay = true }
@@ -1653,16 +1835,18 @@ final class ImageCanvasView: NSView {
         case .text:
             break
         case .crop:
-            onCropMouseDragged?(clamp(point: raw))
+            onCropMouseDragged?(clamp(point: raw), event.modifierFlags)
         case .shapeRect, .shapeEllipse, .shapeLine:
             if shapeEditOverlay != nil {
-                onShapeEditMouseDragged?(raw)
+                onShapeEditMouseDragged?(raw, event.modifierFlags)
                 return
             }
             guard let anchor = shapeAnchor else { return }
             shapePreview = ShapeToolPreview(
                 kind: tool, from: anchor, to: clamp(point: raw),
-                constrained: event.modifierFlags.contains(.shift), style: shapeStyle)
+                constrained: event.modifierFlags.contains(.shift), style: shapeStyle,
+                snap: snapEngine,
+                context: SnapContext(magnification: magnification, suspended: suspended))
         case .zoom:
             guard let anchorWindow = zoomAnchorWindow, let anchor = zoomAnchor else { return }
             if scrubbyZoom {
@@ -1705,6 +1889,10 @@ final class ImageCanvasView: NSView {
             eyedropperDragActive = false
             return
         }
+        if guideDrag != nil {
+            onGuideMouseUp?()
+            return
+        }
         switch tool {
         case .select, .ellipseSelect:
             guard let anchor = dragAnchor else { return }
@@ -1712,14 +1900,33 @@ final class ImageCanvasView: NSView {
             let mode = dragCombineMode
             let base = dragBaseSelection
             dragBaseSelection = nil
-            let point = clamp(point: convert(event.locationInWindow, from: nil))
-            let dragged = rect(from: anchor, to: point)
+            // The LAST TICK'S rect, latched, so what commits is exactly what
+            // was previewed — and so the 2-screen-point click threshold
+            // below is measured on it too. Re-deriving here instead read the
+            // ⌃ flag off the MOUSE-UP event: letting go of ⌃ a fraction of a
+            // second before lifting the mouse snapped a rect the preview had
+            // just shown free, and pressing it discarded a snap the preview
+            // had shown, either way moving an edge by up to a pull radius at
+            // the last instant. `guideMouseUp` refuses to consult mouse-up
+            // flags for the same reason, and the shape drag and the crop box
+            // are immune because they commit their last tick's geometry.
+            // No tick means no preview: a press and release in one place is
+            // a click, whose raw rect is degenerate and takes the click
+            // branch below.
+            let dragged = marqueePreview
+                ?? rect(
+                    from: clamp(point: anchor),
+                    to: clamp(point: convert(event.locationInWindow, from: nil)))
+            marqueePreview = nil
             // The click-vs-drag threshold is ~2 SCREEN points; `dragged` is in
             // image pixels, so scale by the current magnification. Otherwise a
             // deliberate 1-px-wide selection is impossible at high zoom, and at
             // low zoom a jittery click commits a many-pixel accidental selection.
+            // The same number bounds how far `snappedMarqueeRect` may pull a
+            // band, so it is named once (DragSnapping.swift).
             let scale = magnification
-            if dragged.width * scale < 2 || dragged.height * scale < 2 {
+            let threshold = Self.marqueeClickScreenPoints
+            if dragged.width * scale < threshold || dragged.height * scale < threshold {
                 // Treat a tiny drag as click-to-deselect; with a combine
                 // modifier held it restores the base selection instead.
                 setSelection(mode == .replace ? nil : base)
@@ -1820,6 +2027,56 @@ final class ImageCanvasView: NSView {
         CGPoint(
             x: min(max(point.x, 0), bounds.width),
             y: min(max(point.y, 0), bounds.height))
+    }
+
+    /// The marquee's box, snapped — the ONE place a marquee rect is built,
+    /// called on every drag tick and latched into `marqueePreview`, which is
+    /// what the commit then uses. The commit does NOT call it again: a rect
+    /// re-derived at mouse-up would carry the release event's ⌃ flag, not
+    /// the last tick's, and could differ from the preview by a pull radius.
+    ///
+    /// BOTH corners snap, on every tick, under this tick's own `suspended`
+    /// flag: the anchor is the raw press point, and a fixed corner snapped
+    /// once at mouse-down could never be released by ⌃ for the rest of the
+    /// gesture. Each result is re-clamped because a grid line just outside
+    /// the canvas can be inside the pull of a point on its edge, and every
+    /// other marquee coordinate is clamped.
+    ///
+    /// A SNAP THAT WOULD COLLAPSE THE BAND IS DROPPED, PER AXIS. The two
+    /// corners snap INDEPENDENTLY, so a drag whose whole width (or height)
+    /// fits inside one line's pull sends both corners to that line and the
+    /// extent becomes zero — and `mouseUp` then reads its own click
+    /// threshold on the latched rect and treats the drag as a click,
+    /// CLEARING the user's selection instead of making the thin one they
+    /// dragged. The dead band is the pull radius either side of every guide,
+    /// grid line, layer edge and canvas edge, and it grows as the zoom drops
+    /// (32 canvas px at 25 %). So each axis keeps its snapped coordinates
+    /// only while they leave a band the commit will still call a drag; a
+    /// deliberate thin drag falls back to the raw one and stays a drag. The
+    /// crop box's rubber band has the same problem and answers it with a
+    /// `max(abs(…), 1)` floor (`EditorViewController+Crop`, `.draw`); a
+    /// per-axis fallback is the marquee's form of the same rule, and it
+    /// keeps the OTHER axis's snap.
+    func snappedMarqueeRect(
+        from anchor: CGPoint, to point: CGPoint, quantize: SnapQuantize, suspended: Bool
+    ) -> CGRect {
+        let context = SnapContext(magnification: magnification, suspended: suspended)
+        let raw = rect(from: clamp(point: anchor), to: clamp(point: point))
+        let from = clamp(
+            point: snapEngine.snapped(
+                point: clamp(point: anchor), in: context, quantize: quantize))
+        let to = clamp(
+            point: snapEngine.snapped(
+                point: clamp(point: point), in: context, quantize: quantize))
+        let snapped = rect(from: from, to: to)
+        let scale = magnification
+        let threshold = Self.marqueeClickScreenPoints
+        let keepX = !(raw.width * scale >= threshold && snapped.width * scale < threshold)
+        let keepY = !(raw.height * scale >= threshold && snapped.height * scale < threshold)
+        return CGRect(
+            x: keepX ? snapped.minX : raw.minX, y: keepY ? snapped.minY : raw.minY,
+            width: keepX ? snapped.width : raw.width,
+            height: keepY ? snapped.height : raw.height)
     }
 
     private func rect(from a: CGPoint, to b: CGPoint) -> CGRect {
@@ -2430,6 +2687,34 @@ final class ImageCanvasView: NSView {
             }
             return
         }
+        // A grabbed guide owns Escape and Delete, and it owns them AHEAD of
+        // the crop and shape-edit sessions below: a crop session exists from
+        // the moment the tool is picked, so a guide dragged out of a ruler to
+        // line the crop box up against — the workflow the crop tool's own
+        // "Snap to guides" option exists for — would otherwise have its
+        // Escape eaten, resetting the crop box to the whole canvas while the
+        // guide drag carried on and still committed on mouse-up. A guide drag
+        // is also the more transient gesture, so it is the one the keystroke
+        // is aimed at.
+        //
+        // ⌫ reaches keyDown at all only because Edit ▸ Clear stands down
+        // while `guideDrag != nil`: Clear carries a BARE ⌫ key equivalent,
+        // and a modifier-less key equivalent is resolved ahead of the first
+        // responder, so without that guard this branch would be dead whenever
+        // a selection existed — and the keystroke would clear the selection's
+        // PIXELS instead (EditorViewController.validateUserInterfaceItem).
+        if guideDrag != nil {
+            switch event.keyCode {
+            case 53: // Escape
+                onGuideCancel?()
+                return
+            case 51, 117: // Delete, forward delete
+                onGuideDelete?()
+                return
+            default:
+                break
+            }
+        }
         // A crop session's keys: Return commits, Escape resets the box.
         // Inert in Quick Mask mode, like the crop clicks — a commit is a
         // document edit, and only the mode's buffer may change there.
@@ -2488,7 +2773,10 @@ final class ImageCanvasView: NSView {
         // is a document edit, and only the mode's buffer may change there.
         if tool == .move, !hasActiveTextSession, !quickMaskActive,
            event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
-            let step = event.modifierFlags.contains(.shift) ? 10 : 1
+            // The Move tool's Nudge option, pushed in with the rest of the
+            // chrome — never a ToolOptionsStore read from the canvas.
+            let base = chrome.moveNudgeStep
+            let step = event.modifierFlags.contains(.shift) ? base * 10 : base
             switch event.keyCode {
             case 123: onMoveNudge?(-step, 0); return // left
             case 124: onMoveNudge?(step, 0); return // right
@@ -2533,6 +2821,15 @@ final class ImageCanvasView: NSView {
         // session was entered from.
         guard !isTransforming else {
             addCursorRect(bounds, cursor: .arrow)
+            return
+        }
+        // A guide under the pointer takes the cursor. This branch is the
+        // ONLY way a hover cursor survives: four existing
+        // invalidateCursorRects sites re-apply the whole-bounds rect below,
+        // and every NSCursor.set() in this file is inside a
+        // mouseDown/mouseDragged, where AppKit is not re-applying rects.
+        if let cursor = guideHoverCursor {
+            addCursorRect(bounds, cursor: cursor)
             return
         }
         // The enum knows each tool's resting cursor; the move and hand

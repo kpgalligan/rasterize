@@ -18,6 +18,14 @@ final class EditorWindowController: NSWindowController {
         var contentSize = document.doc?.canvasSize ?? NSSize(width: 480, height: 320)
         contentSize.width += DS.panelWidth + 1 + DS.railWidth
         contentSize.height += DS.optionsBarHeight + DS.statusBarHeight
+        // …and the two ruler strips when they are on, or a document that
+        // exactly fits at 100 % opens zoomed-to-fit instead:
+        // EditorViewController.viewDidAppear decides 1:1-vs-fit from
+        // scrollView.contentSize, which the strips take a bite out of.
+        if ToolOptionsStore.shared.view.rulers {
+            contentSize.width += DS.rulerThickness
+            contentSize.height += DS.rulerThickness
+        }
         if let screen = NSScreen.main {
             let limit = screen.visibleFrame
             contentSize.width = min(contentSize.width, limit.width * 0.8)

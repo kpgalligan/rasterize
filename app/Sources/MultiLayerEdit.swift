@@ -87,14 +87,39 @@ extension EditorViewController {
     ///   a refused tick simply leaves the remaining delta to the next one.
     func moveDidBegin(at point: CGPoint, modifiers: NSEvent.ModifierFlags) {
         guard let document = document, document.doc != nil else { return }
+        // The previous drag's leftovers go first: a smart guide belongs to
+        // the gesture that earned it, and `movePressBox` must never be read
+        // by a drag that did not write it.
+        moveDidEnd()
         autoSelectLayer(at: point, modifiers: modifiers)
         // A POSITION lock refuses the drag before it opens a live edit, and
         // the alert names the layer that stopped it. Checked over the
         // EXPANDED set, because that is what would move.
         let moving = document.doc?.movingSet(document.selectedLayerIndices) ?? []
         if refuseLockedEdit(layers: moving, kind: RZ_EDIT_POSITION) { return }
+        // What the drag SNAPS: a delta cannot be snapped — only a box can —
+        // and nothing during the gesture otherwise knows where the moving set
+        // is, because the canvas reports an offset. `transformSourceRect` is
+        // the group-aware union the Free Transform box opens with, so a Move
+        // and a ⌘T over the same selection snap the same rectangle.
+        movePressBox = document.doc.flatMap { transformSourceRect($0, layers: moving) }
         moveAppliedDelta = (0, 0)
         document.beginLiveEdit()
+    }
+
+    /// The Move drag's teardown: the press-time box and the smart guides are
+    /// both the gesture's, and neither survives it.
+    ///
+    /// Called from BOTH ends of the gesture: from `canvas.onMoveEnd` when
+    /// the mouse comes up, which is what takes the lines off the screen at
+    /// the moment the drag finishes, and again at the start of
+    /// `moveDidBegin`, so a gesture can never inherit the previous one's
+    /// press box or its smart guides — an interrupted drag (a session that
+    /// tore the gesture down, a document swapped underneath it) has no
+    /// mouse-up to run the first call.
+    func moveDidEnd() {
+        movePressBox = nil
+        pushSmartGuides([])
     }
 
     /// One drag tick, as ONE `moveLayers` call so linked entries and group
@@ -102,24 +127,41 @@ extension EditorViewController {
     ///
     /// The canvas reports the TOTAL delta from the press, so the step is that
     /// total minus what has already been applied.
-    func moveDidUpdate(_ dx: Int, _ dy: Int) {
+    ///
+    /// `modifiers` carries ⌃, which suspends snapping for the tick — read
+    /// per tick, never latched, so it can be pressed and released mid-drag.
+    ///
+    /// The snap goes on the TOTAL delta, ABOVE the step subtraction, so the
+    /// existing bookkeeping absorbs the correction for free — exactly as it
+    /// already absorbs a core refusal. `moveAppliedDelta` therefore tracks
+    /// the SNAPPED total: the next tick's step is measured from where the
+    /// layers actually are, which is what makes a snapped set stick to its
+    /// line while the pointer wanders inside the pull radius.
+    func moveDidUpdate(_ dx: Int, _ dy: Int, _ modifiers: NSEvent.ModifierFlags) {
+        let (totalX, totalY) = snapMoveDelta(dx, dy, modifiers)
         guard let document = document, let doc = document.doc,
               let applied = moveAppliedDelta
         else { return }
-        let stepX = dx - applied.x
-        let stepY = dy - applied.y
+        let stepX = totalX - applied.x
+        let stepY = totalY - applied.y
         guard stepX != 0 || stepY != 0 else { return }
         guard let updated = doc.moveLayers(
             document.selectedLayerIndices, dx: stepX, dy: stepY)
         else { return }
-        moveAppliedDelta = (dx, dy)
+        moveAppliedDelta = (totalX, totalY)
         document.updateLiveEdit(updated)
     }
 
-    /// An arrow-key nudge of the whole selection: 1 px, 10 with Shift (the
-    /// canvas decides the step). One `moveLayers` call and one undo step per
-    /// press, the same op the drag ticks use, so a nudged group and a nudged
-    /// link group behave exactly like a dragged one.
+    /// An arrow-key nudge of the whole selection: the store's nudge step, ten
+    /// times it with Shift (the canvas decides the step). One `moveLayers`
+    /// call and one undo step per press, the same op the drag ticks use, so a
+    /// nudged group and a nudged link group behave exactly like a dragged
+    /// one.
+    ///
+    /// A nudge deliberately does NOT snap: an arrow key is an explicit
+    /// N-pixel request, and a snap would swallow it whole whenever a guide
+    /// sat inside the pull radius — the one keystroke whose whole purpose is
+    /// to move by exactly what it says.
     func moveNudge(_ dx: Int, _ dy: Int) {
         guard let document = document, let doc = document.doc else { return }
         let indices = document.selectedLayerIndices

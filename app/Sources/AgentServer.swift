@@ -230,6 +230,15 @@ final class AgentServer {
         "apply_image": { $0.applyImage },
         "calculations": { $0.calculations },
         "add_luminosity_masks": { $0.addLuminosityMasks },
+        // Guides and the ruler origin (AgentServer+Guides.swift). The view
+        // PREFERENCES beside them — rulers, the grid, the snap toggles, the
+        // ruler unit — deliberately get no tool at all; that file's header
+        // records why.
+        "list_guides": { $0.listGuides },
+        "add_guide": { $0.addGuide },
+        "remove_guide": { $0.removeGuide },
+        "clear_guides": { $0.clearGuides },
+        "set_ruler_origin": { $0.setRulerOrigin },
         // Whole-document geometry
         "rotate": rotate,
         "flip": flip,
@@ -451,6 +460,15 @@ final class AgentServer {
         // the picture (AgentServer+ChannelTargets.swift).
         let channels = Self.channelFields(doc)
         if !channels.isEmpty { result["channels"] = channels }
+        // The document's GUIDES — non-printing lines tools snap to, never
+        // part of the picture — and its ruler block (AgentServer+Guides.swift).
+        // The guides key is omitted when there are none, on the channels
+        // line's own pattern; the ruler block is always present, because a
+        // document always has an origin.
+        let guides = Self.guideFields(doc)
+        if !guides.isEmpty { result["guides"] = guides }
+        let ruler = Self.rulerFields(doc)
+        if !ruler.isEmpty { result["ruler"] = ruler }
         if let selection = editor(document)?.agentSelection {
             let b = selection.bounds
             let kind: String

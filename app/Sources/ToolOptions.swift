@@ -297,12 +297,53 @@ struct SampleToolOptions: Codable, Equatable {
     var copyOnPick = false
 }
 
+/// The view chrome's preferences: rulers, guides, the grid and snapping.
+///
+/// None of this is document state, and the split is deliberate. The guide
+/// LIST and the ruler ORIGIN live in the core and in `.rz`, because they are
+/// per-document geometry that must survive save/reopen and undo. Everything
+/// here describes how this USER works — which unit the rulers speak, whether
+/// snapping is on, what a guide is coloured — and this store "follows the
+/// user, not the document" (see the class comment below), so putting any of
+/// it in a file would make a document arrive and silently change the app's
+/// behaviour. LOCK GUIDES is one app-wide boolean rather than a per-guide
+/// byte for the same reason, and because Photoshop's own Lock Guides is one
+/// toggle.
+///
+/// Adding a field resets every saved blob of this family once (the
+/// synthesized decoder throws on the first missing key and
+/// `ToolOptionsStore.load` falls back to defaults) — what every earlier
+/// addition here did, and deliberately not `TextToolOptions`' all-optional
+/// escape hatch, because a hand-written decoder silently reads a LATER
+/// forgotten field as its default instead of resetting loudly once.
 struct ViewToolOptions: Codable, Equatable {
     var scrubbyZoom = false
-    var rulers = false
+    /// On by default from this phase: the rulers are the chrome the app was
+    /// most missed for, and the family's saved blob resets once anyway (see
+    /// the note above), so nobody loses a setting they chose.
+    var rulers = true
     var guides = true
     /// 0 auto, 1 on, 2 off.
     var pixelGridIndex = 0
+    /// Index into `CanvasUnit.allCases` — the unit BOTH rulers label in and
+    /// the grid's spacing is authored in.
+    var rulerUnitIndex = 0
+    /// Lock Guides: the mouse alone. New Guide…, Clear Guides and every MCP
+    /// mutator still work, because the lock exists to stop an accidental
+    /// drag, not to freeze the document.
+    var guidesLocked = false
+    /// Index into `GuideColor.allCases`.
+    var guideColorIndex = 0
+    var showGrid = false
+    /// In the RULER's unit, so 100 with the default Pixels unit is a 100 px
+    /// grid — the sensible twin of Photoshop's 1 inch.
+    var gridSpacing: Double = 100
+    var gridSubdivisions = 4
+    /// View ▸ Snap, the master switch that outranks the two per-tool
+    /// checkboxes (`crop.snapToGuides`, `move.snapToLayers`).
+    var snapEnabled = true
+    /// `SnapTarget`'s raw value — View ▸ Snap To.
+    var snapTargets = SnapTarget.all.rawValue
 }
 
 /// Cross-tool state that is nobody's option in particular: the rail's two

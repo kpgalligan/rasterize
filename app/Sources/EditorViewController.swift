@@ -5,11 +5,26 @@ final class EditorViewController: NSViewController {
     // are handlers of this controller and need the document they act on.
     weak var document: ImageDocument?
 
-    private let scrollView = NSScrollView()
+    // Not private, like `document` and `canvas`: EditorViewController
+    // +Rulers.swift owns the two constraints that move the well's top and
+    // leading edges when the rulers appear, and creates them against it.
+    let scrollView = NSScrollView()
     // Not private, like `document` above: the extension files need the two
     // things every editor command works against.
     let canvas = ImageCanvasView()
     private var didRunInitialZoom = false
+
+    // The two ruler strips and the corner box they meet in (RulerView.swift;
+    // laid out, wired and refreshed by EditorViewController+Rulers.swift),
+    // plus the two constraint pairs its visibility toggle swaps — the
+    // scrollTrailingToRoot/scrollTrailingToPanel template below.
+    let hRuler = RulerView(orientation: .horizontal)
+    let vRuler = RulerView(orientation: .vertical)
+    let rulerCorner = RulerCornerView()
+    var scrollTopToOptions: NSLayoutConstraint!
+    var scrollTopToHRuler: NSLayoutConstraint!
+    var scrollLeadingToRail: NSLayoutConstraint!
+    var scrollLeadingToVRuler: NSLayoutConstraint!
 
     // Design chrome: fixed 36px options bar under the title bar, 48px left
     // tool rail, floating zoom pill, 26px status bar with mono segments.
@@ -62,6 +77,22 @@ final class EditorViewController: NSViewController {
     // why). Internal, like `transformSession` below: the gesture itself lives
     // in MultiLayerEdit.swift, and a stored property cannot.
     var moveAppliedDelta: (x: Int, y: Int)?
+    // …and the union box of the moving set at the press, which is what a
+    // snap needs and a pure delta cannot supply: the gesture reports an
+    // offset, and nothing during it otherwise knows where the moving set
+    // actually is. Written by moveDidBegin and read by moveDidUpdate, both
+    // in MultiLayerEdit.swift — it lives here for the same reason
+    // moveAppliedDelta does, that a stored property cannot live in an
+    // extension.
+    var movePressBox: CGRect?
+
+    // The snapping engine's folded layer content boxes, cached against the
+    // document HANDLE they were measured from (handles are copy-on-write
+    // values, so identity is the right key). Invalidated in imageDidChange
+    // on a settled change only: the fold is a per-pixel sweep per leaf, and
+    // a Move drag posts that notification on every mouse-moved event.
+    // Internal, not private: DragSnapping.swift fills and reads it.
+    var snapBoxes: (doc: RasterDocument, boxes: [CGRect?])?
 
     // The open Free Transform session (see TransformSession, which lives in
     // MultiLayerEdit.swift together with the preview it feeds), and the flag
@@ -381,10 +412,16 @@ final class EditorViewController: NSViewController {
         canvas.onMoveBegin = { [weak self] point, modifiers in
             self?.moveDidBegin(at: point, modifiers: modifiers)
         }
-        canvas.onMoveUpdate = { [weak self] dx, dy in self?.moveDidUpdate(dx, dy) }
+        canvas.onMoveUpdate = { [weak self] dx, dy, modifiers in
+            self?.moveDidUpdate(dx, dy, modifiers)
+        }
         canvas.onMoveEnd = { [weak self] in
             guard let self = self, let document = self.document else { return }
             self.moveAppliedDelta = nil
+            // The press-time box and the smart guides belong to the gesture
+            // that earned them, and neither survives the mouse coming up
+            // (MultiLayerEdit.moveDidEnd).
+            self.moveDidEnd()
             document.endLiveEdit("Move Layer")
         }
         canvas.onMoveNudge = { [weak self] dx, dy in self?.moveNudge(dx, dy) }
@@ -396,12 +433,17 @@ final class EditorViewController: NSViewController {
         }
         canvas.onTransformMouseUp = { [weak self] _, _ in
             self?.transformSession?.drag = nil
+            // Same rule as the Move drag: the alignment lines a transform
+            // drag earned come off the screen when it ends.
+            self?.pushSmartGuides([])
         }
         canvas.onTransformCommit = { [weak self] in self?.commitTransformSession() }
         canvas.onTransformCancel = { [weak self] in self?.endTransformSession() }
         canvas.onTransformNudge = { [weak self] dx, dy in self?.transformNudge(dx, dy) }
         canvas.onCropMouseDown = { [weak self] point in self?.cropMouseDown(point) }
-        canvas.onCropMouseDragged = { [weak self] point in self?.cropMouseDragged(point) }
+        canvas.onCropMouseDragged = { [weak self] point, modifiers in
+            self?.cropMouseDragged(point, modifiers)
+        }
         canvas.onCropMouseUp = { [weak self] point in self?.cropMouseUp(point) }
         canvas.onCropCommit = { [weak self] in self?.commitCropSession() }
         canvas.onCropCancel = { [weak self] in self?.resetCropSession() }
@@ -409,13 +451,30 @@ final class EditorViewController: NSViewController {
             self?.commitShapeLayer(box: box, flipped: flipped)
         }
         canvas.onShapeEditMouseDown = { [weak self] point in self?.shapeEditMouseDown(point) }
-        canvas.onShapeEditMouseDragged = { [weak self] point in
-            self?.shapeEditMouseDragged(point)
+        canvas.onShapeEditMouseDragged = { [weak self] point, modifiers in
+            self?.shapeEditMouseDragged(point, modifiers)
         }
         canvas.onShapeEditMouseUp = { [weak self] in self?.shapeEditSession?.drag = nil }
         canvas.onShapeEditCommit = { [weak self] in self?.commitShapeEditSession() }
         canvas.onShapeEditCancel = { [weak self] in self?.cancelShapeEditSession() }
         canvas.onCursorMove = { [weak self] point in self?.cursorMoved(to: point) }
+        // Guides (EditorViewController+Guides.swift): the canvas routes the
+        // press, the drag, the release, ⌫ and Escape; the geometry is the
+        // extension's.
+        canvas.onGuideMouseDown = { [weak self] point, modifiers in
+            self?.guideMouseDown(point, modifiers) ?? false
+        }
+        canvas.onGuideMouseDragged = { [weak self] point, modifiers in
+            self?.guideMouseDragged(point, modifiers)
+        }
+        canvas.onGuideMouseUp = { [weak self] in self?.guideMouseUp() }
+        canvas.onGuideDelete = { [weak self] in self?.guideDragDelete() }
+        canvas.onGuideCancel = { [weak self] in self?.guideDragCancel() }
+        // The engine the canvas's own point drags snap against, built at
+        // each of their mouse-downs (DragSnapping.swift).
+        canvas.onSnapEngine = { [weak self] in
+            self?.makeSnapEngine(for: .canvasPoint) ?? .inactive
+        }
         canvas.onZoomClick = { [weak self] point, out in self?.zoomStep(at: point, out: out) }
         canvas.onZoomTo = { [weak self] target in self?.applyZoom(target) }
         canvas.onZoomRect = { [weak self] rect in self?.zoomToRect(rect) }
@@ -589,8 +648,9 @@ final class EditorViewController: NSViewController {
             toolRail.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
             toolRail.widthAnchor.constraint(equalToConstant: DS.railWidth),
 
-            scrollView.leadingAnchor.constraint(equalTo: toolRail.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
+            // The well's top and leading edges are the two the rulers move,
+            // so their constraints are created as a swappable pair in
+            // installRulers(in:) rather than pinned here.
             scrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             zoomPill.leadingAnchor.constraint(
@@ -598,29 +658,32 @@ final class EditorViewController: NSViewController {
             zoomPill.bottomAnchor.constraint(
                 equalTo: scrollView.bottomAnchor, constant: -16),
 
+            // The four panels and the separator pin to the OPTIONS BAR,
+            // not to the well's top: the rulers push the well down, and
+            // following it would leave a notch beside the horizontal strip.
             panelView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             panelView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
-            panelView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            panelView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
             panelView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             channelsView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             channelsView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
-            channelsView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            channelsView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
             channelsView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             assistantView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             assistantView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
-            assistantView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            assistantView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
             assistantView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             infoView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             infoView.widthAnchor.constraint(equalToConstant: DS.panelWidth),
-            infoView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            infoView.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
             infoView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             panelSeparator.trailingAnchor.constraint(equalTo: panelView.leadingAnchor),
             panelSeparator.widthAnchor.constraint(equalToConstant: 1),
-            panelSeparator.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            panelSeparator.topAnchor.constraint(equalTo: optionsBar.bottomAnchor),
             panelSeparator.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             statusBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -643,6 +706,9 @@ final class EditorViewController: NSViewController {
         scrollTrailingToPanel = scrollView.trailingAnchor.constraint(
             equalTo: panelSeparator.leadingAnchor)
         scrollTrailingToPanel.isActive = true
+        // The strips, the corner box, their gestures and the top/leading
+        // constraint pairs (EditorViewController+Rulers.swift).
+        installRulers(in: root)
 
         view = root
         updateOptionsBar()
@@ -665,9 +731,22 @@ final class EditorViewController: NSViewController {
         center.addObserver(
             self, selector: #selector(imageDidChange(_:)),
             name: .imageDocumentImageDidChange, object: document)
+        // The view chrome is an APP-WIDE preference, so every open editor
+        // answers the change and not only the window that made it
+        // (EditorViewController+Rulers.swift).
+        center.addObserver(
+            self, selector: #selector(viewChromeDidChange(_:)),
+            name: .editorViewChromeDidChange, object: nil)
         updateStatus()
         updateActiveLayerRect()
         updateZoomLabel()
+        // A document arrives already carrying its guides and its ruler
+        // origin (they are .rz state), and the notification that refreshes
+        // both caches only fires on a CHANGE — so the first read has to
+        // happen here, or a file saved with guides would show none until
+        // something edited it.
+        refreshCanvasGuides()
+        refreshRulers()
     }
 
     override func viewDidAppear() {
@@ -771,6 +850,13 @@ final class EditorViewController: NSViewController {
         canvas.selectionCombineBase = modes[min(max(store.select.modeIndex, 0), 3)]
         canvas.selectionFeather = max(store.select.feather, 0)
         canvas.scrubbyZoom = store.view.scrubbyZoom
+        // The whole of this phase's view chrome as ONE value (Guides.swift
+        // says why it is one), built in ONE place — the grid's spacing is
+        // derived from the document as well as from the preferences, so
+        // `imageDidChange` refreshes it too. The snap engine is NOT pushed
+        // here: the canvas asks for it at each gesture's mouse-down instead
+        // (`onSnapEngine`, DragSnapping.swift).
+        refreshCanvasChrome()
         syncCanvasShapeStyle()
     }
 
@@ -1199,8 +1285,13 @@ final class EditorViewController: NSViewController {
             updated = LayerTransform.distorting(
                 start, corner: corner, to: point, in: session.sourceRect)
         }
-        guard updated.isFinite else { return }
-        transformSession?.transform = updated
+        // ONE snap for all four drag kinds, restricted per kind in
+        // DragSnapping.swift — a rotated, warped or ⇧-constrained handle
+        // cannot reach an arbitrary point, so it does not snap at all.
+        let snapped = snapTransform(
+            updated, drag: drag, session: session, modifiers: modifiers)
+        guard snapped.isFinite else { return }
+        transformSession?.transform = snapped
         refreshTransformPreview()
         updateTransformFields()
     }
@@ -1387,6 +1478,10 @@ final class EditorViewController: NSViewController {
         guard transformSession != nil else { return }
         transformSession = nil
         canvas.transformPreview = nil
+        // The box's smart guides go with the box (DragSnapping.swift): a
+        // session torn down by Escape or a tool switch must not leave its
+        // alignment lines drawn over the picture.
+        pushSmartGuides([])
         updateOptionsBar()
         updateStatus()
         updateActiveLayerRect()
@@ -1589,6 +1684,25 @@ final class EditorViewController: NSViewController {
         }
         canvas.needsDisplay = true
         syncPaintTarget()
+        // The guides are the document's; the rulers' unit conversion reads
+        // its resolution and its ruler origin, and the grid's spacing — in
+        // canvas pixels — is converted through that same resolution and the
+        // canvas extent, so all three are refreshed on exactly the events
+        // that can move them. Each is guarded on its own value, so an edit
+        // that touched none of them costs three comparisons.
+        refreshCanvasGuides()
+        refreshRulers()
+        refreshCanvasChrome()
+        // The snap engine's folded content boxes are a per-pixel sweep per
+        // leaf, and a Move drag posts this notification on EVERY mouse-moved
+        // event — so only a SETTLED change invalidates them. A live tick
+        // differs from the base only in the layers being moved, which the
+        // engine excludes anyway, and the engine is frozen for the gesture
+        // regardless.
+        // "not explicitly live", rather than "explicitly settled": a stale
+        // cache is a correctness bug while an extra invalidation only costs
+        // one fold, so a post that carried no flag at all must clear it.
+        if (note.userInfo?["isLive"] as? Bool) != true { snapBoxes = nil }
         updateStatus()
         updateActiveLayerRect()
         view.window?.subtitle = "\(doc.width) × \(doc.height) px"
@@ -1686,6 +1800,10 @@ final class EditorViewController: NSViewController {
 
     @objc private func magnificationDidChange(_ note: Notification) {
         updateZoomLabel()
+        // Scrolling and live pinch both arrive here through the clip view's
+        // bounds change, so this one call keeps the ticks under the picture
+        // at every zoom and every scroll offset.
+        refreshRulers()
     }
 
     // MARK: - Edit actions (responder chain)
@@ -2630,6 +2748,16 @@ extension EditorViewController: NSUserInterfaceValidations {
             return !tool.planned
         }
 
+        // Rulers, guides, the grid and the snap toggles answer through ONE
+        // early-out, and it sits ABOVE the session guard below rather than
+        // beside validateStructureItem: a view-only toggle changes no pixels
+        // and is perfectly safe inside a text, shape-edit or transform
+        // session — Photoshop keeps them live too — while the two items that
+        // EDIT the document (New Guide…, Clear Guides) return false there
+        // themselves (EditorViewController+Rulers.swift). nil means "not one
+        // of mine".
+        if let handled = validateViewChromeItem(item) { return handled }
+
         // While a text session, a shape-edit session or a Free Transform is
         // active, only tool switching (handled above — it commits the
         // session) and zooming are safe; edit/filter/clipboard actions must
@@ -2703,8 +2831,16 @@ extension EditorViewController: NSUserInterfaceValidations {
             // route in this build, so rather than erase the photograph while
             // the status bar, the channel row's ring and both unringed layer
             // wells name a channel, the item stands down (the Fill tool is
-            // how a plane or channel is cleared).
-            guard !isEditingText, canvas.selection != nil, !activeLayerIsAdjustment,
+            // how a plane or channel is cleared). It also stands down while a
+            // GUIDE is grabbed, for the identical reason it stands down while
+            // text is being edited: ⌫ deletes the grabbed guide, and a
+            // modifier-less key equivalent is resolved ahead of the first
+            // responder — so without this the guide branch in
+            // ImageCanvasView.keyDown would be unreachable whenever a
+            // selection existed, and the keystroke would erase pixels
+            // instead. (cut(_:) needs nothing: ⌘X is not a bare key.)
+            guard !isEditingText, canvas.guideDrag == nil, canvas.selection != nil,
+                  !activeLayerIsAdjustment,
                   !activeLayerIsGroup, !paintTarget.targetsPlaneOrChannel
             else { return false }
             return document?.doc?.layerInfo(document?.activeLayerIndex ?? 0) != nil

@@ -80,28 +80,56 @@ extension EditorViewController {
         cropSession = session
     }
 
-    func cropMouseDragged(_ point: CGPoint) {
+    /// `modifiers` carries ⌃, which suspends snapping for this tick — read
+    /// per tick, never latched, so it can be pressed and released mid-drag.
+    ///
+    /// The snap goes on the POINT, ahead of `resizing` and `clamped`, for
+    /// `.handle` and `.draw` — so that chain runs unchanged and
+    /// "snap → re-derive → clamp" falls out for free. `.move`'s point is a
+    /// grab OFFSET, so it takes the delta form instead
+    /// (`DragSnapping.snapCropPoint` / `snapCropDelta`).
+    func cropMouseDragged(_ point: CGPoint, _ modifiers: NSEvent.ModifierFlags) {
         guard var session = cropSession, let drag = session.drag,
               let doc = document?.doc else { return }
         let canvasSize = CGSize(width: CGFloat(doc.width), height: CGFloat(doc.height))
         switch drag {
         case let .handle(index, start):
+            // The POINT, before `resizing` — never `session.rect` after it.
+            // `resizing` takes a point plus a handle index and cannot be
+            // re-run from a rect, so a rect snapped here would have already
+            // been through the ratio derivation and the canvas clamp, and
+            // snapping it would break the very aspect ratio the ordering
+            // rule protects.
+            let snapped = snapCropPoint(point, drag: drag, modifiers: modifiers)
             session.rect = CropSession.clamped(
-                CropSession.resizing(start, handle: index, to: point, ratio: session.ratio),
+                CropSession.resizing(start, handle: index, to: snapped, ratio: session.ratio),
                 to: canvasSize, ratio: session.ratio)
         case let .move(grab, start):
+            // The point here is a grab OFFSET inside the box, not the moved
+            // geometry, so what snaps is the DELTA against the press-time
+            // box. `clamped` still has the final word, exactly as before.
+            let delta = snapCropDelta(
+                from: start, by: CGVector(dx: point.x - grab.x, dy: point.y - grab.y),
+                modifiers: modifiers)
             session.rect = CropSession.clamped(
-                start.offsetBy(dx: point.x - grab.x, dy: point.y - grab.y), to: canvasSize)
+                start.offsetBy(dx: delta.dx, dy: delta.dy), to: canvasSize)
         case let .draw(anchor):
+            // BOTH corners snap, and the fixed one is snapped on every tick
+            // rather than at mouse-down: `onCropMouseDown` carries no
+            // modifier flags, so an anchor snapped there could not be
+            // suspended with ⌃ — and the anchor does not move, so its own
+            // pull is the same answer on every tick.
+            let corner = snapCropPoint(anchor, drag: drag, modifiers: modifiers)
+            let moved = snapCropPoint(point, drag: drag, modifiers: modifiers)
             var rect = CGRect(
-                x: min(anchor.x, point.x), y: min(anchor.y, point.y),
-                width: max(abs(point.x - anchor.x), 1), height: max(abs(point.y - anchor.y), 1))
+                x: min(corner.x, moved.x), y: min(corner.y, moved.y),
+                width: max(abs(moved.x - corner.x), 1), height: max(abs(moved.y - corner.y), 1))
             if let ratio = session.ratio, ratio > 0 {
                 let height = rect.width / CGFloat(ratio)
                 // The re-derived height grows away from the ANCHOR: an
                 // upward drag keeps the anchor as the bottom edge.
-                if point.y < anchor.y {
-                    rect.origin.y = anchor.y - height
+                if moved.y < corner.y {
+                    rect.origin.y = corner.y - height
                 }
                 rect.size.height = height
             }

@@ -18,6 +18,7 @@ use rasterize_core::ffi_channel::*;
 use rasterize_core::ffi_color::*;
 use rasterize_core::ffi_doc::*;
 use rasterize_core::ffi_group::*;
+use rasterize_core::ffi_guide::*;
 use rasterize_core::ffi_heal::*;
 use rasterize_core::ffi_style::*;
 use rasterize_core::RzImage;
@@ -2228,6 +2229,24 @@ fn null_safety_sweep() {
         assert!(rz_doc_duplicate_channel(null_doc, 0).is_null());
         assert!(rz_doc_invert_channel(null_doc, 0).is_null());
         assert!(rz_doc_add_luminosity_masks(null_doc).is_null());
+
+        // Guides and the ruler origin (ffi_guide). Every export takes a NULL
+        // doc, and the one with a caller buffer takes a NULL buffer.
+        // `rz_max_guides` takes no pointer at all — the cap does not vary
+        // with the canvas — so it gets a value assertion instead.
+        let mut origin = [0.0f64; 2];
+        assert_eq!(rz_max_guides(), 1024);
+        assert_eq!(rz_doc_guide_count(null_doc), 0);
+        assert_eq!(rz_doc_guide_id(null_doc, 0), 0);
+        assert_eq!(rz_doc_guide_orientation(null_doc, 0), -1);
+        assert_eq!(rz_doc_guide_position(null_doc, 0), -1.0);
+        assert!(!rz_doc_ruler_origin(null_doc, origin.as_mut_ptr()));
+        assert!(!rz_doc_ruler_origin(null_doc, ptr::null_mut()));
+        assert!(rz_doc_add_guide(null_doc, 0, 10.0).is_null());
+        assert!(rz_doc_move_guide(null_doc, 0, 10.0).is_null());
+        assert!(rz_doc_remove_guide(null_doc, 0).is_null());
+        assert!(rz_doc_clear_guides(null_doc).is_null());
+        assert!(rz_doc_set_ruler_origin(null_doc, 1.0, 1.0).is_null());
         assert!(rz_doc_transform_channels(null_doc, identity.as_ptr(), FILTER_NEAREST).is_null());
         assert!(rz_doc_transform_channels(null_doc, ptr::null(), FILTER_NEAREST).is_null());
         assert!(!rz_doc_composite_plane(

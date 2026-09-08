@@ -32,13 +32,35 @@ struct ShapeToolPreview {
 
     /// Geometry from a drag: Shift constrains rect/ellipse to a square and
     /// a line to the nearer of horizontal / vertical / 45°.
+    ///
+    /// `snap` and `context` arrive because the drag becomes geometry HERE
+    /// and nowhere else, and the call site is in the frozen canvas. The
+    /// order is constrain → snap the driving axis → re-derive the other from
+    /// the constraint: ⇧ wins, so a square stays square. Both default to
+    /// inert, which is what keeps the second, non-drag initializer (the
+    /// shape-edit overlay) untouched.
     init(kind: EditorTool, from anchor: CGPoint, to point: CGPoint,
-         constrained: Bool, style: ShapeToolStyle) {
+         constrained: Bool, style: ShapeToolStyle,
+         snap: SnapEngine = .inactive, context: SnapContext = .identity) {
         self.kind = kind
         self.style = style
         self.placement = .identity
-        var dx = point.x - anchor.x
-        var dy = point.y - anchor.y
+        // BOTH corners snap, and the FIXED one is snapped on every tick
+        // rather than once at mouse-down: the canvas's shape press carries no
+        // modifier flags, so an anchor snapped there could not be suspended
+        // with ⌃ — and the anchor does not move, so its own pull answers the
+        // same on every tick. It is also what keeps a zero-length drag a
+        // zero-length box when a line runs through the press point: both
+        // corners land on that line instead of only the moving one.
+        let base = CGPoint(
+            x: Self.snapped(anchor.x, .vertical, snap, context),
+            y: Self.snapped(anchor.y, .horizontal, snap, context))
+        var dx = point.x - base.x
+        var dy = point.y - base.y
+        // Which axis the ⇧ constraint let the pointer DRIVE, decided before
+        // the constraint rewrites both components: the one that set the side
+        // length. A tie goes to x, matching `max`'s own answer below.
+        let drivesX = abs(dx) >= abs(dy)
         if constrained {
             if kind == .shapeLine {
                 // Snap to the nearest 45° step by flattening the smaller
@@ -58,12 +80,51 @@ struct ShapeToolPreview {
                 dy = dy < 0 ? -side : side
             }
         }
-        let end = CGPoint(x: anchor.x + dx, y: anchor.y + dy)
+        // CONSTRAIN → SNAP THE DRIVING AXIS → RE-DERIVE THE OTHER. ⇧ wins: a
+        // square stays square and a 45° line stays at 45°, because the axis
+        // the constraint tied to the other one is never given a coordinate of
+        // its own. Unconstrained, the two axes are independent and each takes
+        // its own pull; a line flattened to one axis has only that axis left
+        // to drive.
+        let corner = CGPoint(x: base.x + dx, y: base.y + dy)
+        if !constrained {
+            dx = Self.snapped(corner.x, .vertical, snap, context) - base.x
+            dy = Self.snapped(corner.y, .horizontal, snap, context) - base.y
+        } else if dy == 0 {
+            // A line flattened to the horizontal (or a drag that has not left
+            // the anchor) has only this axis left to drive.
+            dx = Self.snapped(corner.x, .vertical, snap, context) - base.x
+        } else if dx == 0 {
+            dy = Self.snapped(corner.y, .horizontal, snap, context) - base.y
+        } else {
+            let side = drivesX
+                ? abs(Self.snapped(corner.x, .vertical, snap, context) - base.x)
+                : abs(Self.snapped(corner.y, .horizontal, snap, context) - base.y)
+            dx = dx < 0 ? -side : side
+            dy = dy < 0 ? -side : side
+        }
+        let end = CGPoint(x: base.x + dx, y: base.y + dy)
         box = CGRect(
-            x: min(anchor.x, end.x), y: min(anchor.y, end.y),
+            x: min(base.x, end.x), y: min(base.y, end.y),
             width: abs(dx), height: abs(dy))
         // Up-right and down-left drags run bottom-left → top-right.
         flipped = kind == .shapeLine && dx != 0 && dy != 0 && (dx < 0) != (dy < 0)
+    }
+
+    /// One coordinate pulled onto the nearest line, or left exactly where it
+    /// was when nothing is within the engine's radius (which is also what an
+    /// inactive engine and a ⌃-suspended tick answer).
+    ///
+    /// `.exact`, not `.wholePixels`: a shape commits its box as a `Double` in
+    /// its own payload and its anchor through
+    /// `DescribedLayer.placementAnchor`, so nothing downstream re-rounds a
+    /// snapped edge off the line it landed on.
+    private static func snapped(
+        _ coordinate: CGFloat, _ axis: SnapAxis, _ snap: SnapEngine, _ context: SnapContext
+    ) -> CGFloat {
+        guard let offset = snap.pull([coordinate], axis: axis, in: context, quantize: .exact)
+        else { return coordinate }
+        return coordinate + offset
     }
 
     /// Direct geometry (no drag): the shape-edit session's overlay — the

@@ -191,8 +191,9 @@ fn version_7_round_trips_the_structure_locks_links_and_the_open_flag() {
     assert_eq!(&bytes[..4], b"RZDC");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        7,
-        "groups and locks bumped the format to 7"
+        8,
+        "the writer always writes the current version (groups and locks \
+         bumped it to 7, guides and the ruler origin to 8)"
     );
 
     let back = reopen(&dir, "nested.rzdc");

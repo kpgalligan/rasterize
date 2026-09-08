@@ -222,7 +222,8 @@ void rz_doc_free(RzDocument *doc);
  * sequence, a nesting deeper than ten levels, and a document whose isolated
  * groups declare more canvas area than this build will composite are errors
  * too, at BOTH ends: the writer refuses to produce a file it could not read
- * back. Layout (little-endian): "RZDC", u32 version=7,
+ * back, and so is more than 1024 guides. Layout (little-endian): "RZDC",
+ * u32 version=8,
  * u32 canvas width, u32 canvas height, u32 layer count, then (version 4)
  * f32 global-light angle and f32 altitude in degrees; then per layer
  * bottom-to-top: u32 name byte length + UTF-8 name, i32 offset x, i32
@@ -264,16 +265,26 @@ void rz_doc_free(RzDocument *doc);
  * stored verbatim and never interpreted; the ICC slot is written ABSENT
  * when the document's profile is the built-in sRGB, and an absent slot
  * reads back as that profile, so a blob-less version-6 file is a version-5
- * file plus exactly 12 bytes. Version-1, -2, -3, -4, -5 and -6 files still
+ * file plus exactly 12 bytes. Last comes the version-8 GUIDE BLOCK, closing
+ * the file (see "Guides, rulers and snapping" below): f64 ruler-origin x, f64
+ * ruler-origin y, u32 guide count (more than 1024 is an error), then per
+ * guide u8 orientation (0 = horizontal, 1 = vertical; any other value is an
+ * error) and f64 position. Because it is a TAIL, a guide-less version-8 file
+ * is a version-7 file with the version word bumped plus exactly 20 bytes —
+ * a SIZE property, not a literal byte prefix, since the version word itself
+ * sits at byte 4. Version-1, -2, -3, -4, -5, -6 and -7 files still
  * load, missing fields taking their defaults: no mask and no metadata on any
  * layer (v1), clipped false (v1 and v2), no style on any layer and a
  * (120°, 30°) global light (v1–v3), no channels (v1–v4), a 72 × 72 ppi
- * resolution, the built-in sRGB profile and no metadata packets (v1–v5), and
+ * resolution, the built-in sRGB profile and no metadata packets (v1–v5),
  * an unlocked, unlinked, open RASTER entry at depth 0 — a flat stack — for
- * every layer (v1–v6). A
+ * every layer (v1–v6), and no guides with the ruler origin at the canvas's
+ * top-left (v1–v7). A
  * style is read leniently: a style from a newer build keeps the effects this
  * build knows; the resolution is sanitized rather than refused, exactly like
- * the global light. */
+ * the global light, and so are the ruler origin and each guide position (a
+ * non-finite origin component becomes 0, a non-finite position drops that
+ * guide, an out-of-canvas value is clamped to the nearest edge). */
 bool rz_doc_save_native(const RzDocument *doc, const char *path,
                         char **err_out);
 
@@ -1878,6 +1889,128 @@ RzDocument *rz_doc_layer_via(const RzDocument *doc, size_t idx,
  * selection alone rather than emptying it. */
 bool rz_doc_layer_at(const RzDocument *doc, int32_t x, int32_t y,
                      bool top_level, size_t *out_idx);
+
+/* ---- Guides, rulers and snapping ----------------------------------------
+ *
+ * A document carries a list of GUIDES and a RULER ORIGIN. A guide is one
+ * line across the whole canvas: an orientation (horizontal = a line of
+ * constant y, vertical = a line of constant x) and a position. The ruler
+ * origin is the canvas coordinate of the ruler's zero point, (0, 0) — the
+ * canvas's top-left — by default.
+ *
+ * POSITIONS ARE GRID-LINE COORDINATES in the continuous canvas space
+ * [0, width] / [0, height], not pixel indices: a vertical guide at x = 0 lies
+ * on the left canvas edge and one at x = width on the right, so BOTH extremes
+ * are legal and the range is inclusive at both ends. The orientation names
+ * the LINE, not the axis its position is measured on, so a vertical guide's
+ * position is measured against the WIDTH. Positions are quantized to four
+ * decimals, exactly like the resolution and the global light, so a value read
+ * back and echoed in is refused as unchanged rather than registering an edit.
+ * They are absolute canvas coordinates and are NOT measured from the ruler
+ * origin — the origin moves the ruler's LABELS and nothing else.
+ *
+ * Every canvas-geometry op moves them the way it moves the pixels, and where
+ * an op could either DROP a guide or CLAMP it the choice is deliberate:
+ *   - the rotations and the flips PERMUTE (a quarter turn also exchanges each
+ *     guide's orientation, because the line has turned with the picture);
+ *   - rz_doc_crop and rz_doc_canvas_resize shift and then DROP whatever now
+ *     lies outside the new canvas — a guide cut out of the picture would
+ *     otherwise be invisible, unclickable and undeletable, and reappear from
+ *     nowhere on a later Canvas Size (undo restores the whole document, so
+ *     nothing is lost);
+ *   - rz_doc_resize scales without rounding — a guide position is a
+ *     continuous coordinate, and rounding it at every Image Size would
+ *     accumulate — and nothing can leave the canvas under a scale;
+ *   - rz_doc_flattening carries both verbatim; the per-layer ops leave them
+ *     alone. A host-composed straighten (rz_doc_transform_layer over every
+ *     layer plus rz_doc_crop) has NO guide op and needs none: a rotated guide
+ *     is not a guide, so the trailing crop simply shifts and drops.
+ * The RULER ORIGIN is CLAMPED where a guide is dropped: there is exactly one
+ * origin and a document is never without one.
+ *
+ * At most rz_max_guides() guides (1024). They are written by
+ * rz_doc_save_native — they are what bumped the RZDC format to version 8.
+ *
+ * WHAT THE CORE DOES NOT KNOW ABOUT. The ruler's UNIT, whether rulers, guides
+ * or the grid are shown, the guide COLOUR, the guide LOCK, the grid's spacing
+ * and subdivisions, the pixel grid, and every snapping toggle are all HOST
+ * preferences: they describe how a user works rather than what the picture
+ * contains, they are app-wide rather than per-document, and none of them is
+ * in the file. In particular there is no per-guide lock byte and no
+ * rz_doc_lock_guides — Lock Guides is one host-side boolean governing the
+ * mouse. Snapping itself is entirely the host's: the core stores the lines
+ * and answers where they are. */
+
+typedef enum {
+  RZ_GUIDE_HORIZONTAL = 0, /* a line of constant y */
+  RZ_GUIDE_VERTICAL = 1,   /* a line of constant x */
+} RzGuideOrientation;
+
+/* The guide-count cap, 1024. No document and no pointers — and, unlike
+ * rz_max_channels_at, no dimensions either: a guide is a line, not a plane,
+ * so no canvas size makes fewer of them fit. It is exported rather than
+ * hand-copied into a host because rz_doc_add_guide answers a single NULL for
+ * four different refusals, and a host must be able to tell "the list is full"
+ * apart from "that guide already exists". */
+size_t rz_max_guides(void);
+
+/* --- guide list (getters) ---
+ * Per-index, with no bulk getter on purpose: a host caches the list once per
+ * document change, so a canvas redraw makes no calls at all. */
+
+size_t rz_doc_guide_count(const RzDocument *doc);
+
+/* Guide i's STABLE IDENTITY: unique among every guide this process has
+ * minted, and the handle a host hangs per-guide state on (which guide a drag
+ * is moving). The list is re-SORTED by position on every edit, so an index
+ * cannot identify a guide across one; the id survives a move, the geometry
+ * ops and undo/redo, and a guide that is gone takes its id with it. NOT
+ * persisted — rz_doc_open mints new ids, so the identity holds for as long as
+ * a document is open, not across sessions. 0 on NULL doc / bad index, which
+ * no live guide ever answers. */
+uint64_t rz_doc_guide_id(const RzDocument *doc, size_t i);
+
+/* An RzGuideOrientation; -1 on NULL doc / bad index (outside the enum). */
+int rz_doc_guide_orientation(const RzDocument *doc, size_t i);
+
+/* The canvas coordinate of the line. -1.0 on NULL doc / bad index: a legal
+ * position is never negative, so the sentinel cannot collide with an answer. */
+double rz_doc_guide_position(const RzDocument *doc, size_t i);
+
+/* Writes the ruler origin as two doubles (x, y) into out_xy. false on a NULL
+ * doc or a NULL buffer. */
+bool rz_doc_ruler_origin(const RzDocument *doc, double *out_xy);
+
+/* --- guide list (pure mutators; NULL = refusal, per the doc comments) --- */
+
+/* Adds a guide. The list is kept sorted by (orientation, position), so the
+ * new guide's INDEX is wherever it sorts, not the end. NULL on NULL doc, an
+ * orientation outside RzGuideOrientation, a non-finite position, a position
+ * outside [0, canvas extent], a position a guide of the same orientation
+ * already occupies (adding a duplicate is not an edit), or a list already
+ * holding rz_max_guides(). The four are deliberately one answer: a host that
+ * needs to tell them apart checks the position and the count before calling,
+ * which is also how it phrases the refusal in its own words. */
+RzDocument *rz_doc_add_guide(const RzDocument *doc, int orientation,
+                             double position);
+
+/* Moves guide i along its own axis, keeping its identity and its orientation
+ * (and re-sorting, so its index may change). NULL on NULL doc, a bad index, a
+ * non-finite or out-of-canvas position, the position the guide already has,
+ * or a position another guide of the same orientation already occupies. */
+RzDocument *rz_doc_move_guide(const RzDocument *doc, size_t i, double position);
+
+/* NULL on NULL doc or a bad index. */
+RzDocument *rz_doc_remove_guide(const RzDocument *doc, size_t i);
+
+/* NULL on NULL doc or an already empty list — clearing nothing is not an
+ * edit, and an identical copy would register a phantom undo step. */
+RzDocument *rz_doc_clear_guides(const RzDocument *doc);
+
+/* Moves the ruler zero point to canvas (x, y). NULL on NULL doc, a non-finite
+ * component, a point outside the canvas, or the origin the document already
+ * has (after the four-decimal quantization). */
+RzDocument *rz_doc_set_ruler_origin(const RzDocument *doc, double x, double y);
 
 /* ---- Colour management and metadata -------------------------------------
  *
