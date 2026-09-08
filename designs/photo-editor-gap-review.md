@@ -1,6 +1,6 @@
 # From Compositor to Photo Editor: a Gap Review
 
-**Status: in progress (updated 7 September 2026) — phases 1 to 7 of the order in section 4 have shipped: §3F rows 1–6 and, with them, §3H's guides / rulers / grid / snapping row; section 0 records what landed, what was decided along the way, and where to restart.** A
+**Status: in progress (updated 8 September 2026) — phases 1 to 7 of the order in section 4 have shipped: §3F rows 1–6 and, with them, §3H's guides / rulers / grid / snapping row; section 0 records what landed, what was decided along the way, and where to restart.** A
 fresh-eyes review of the shipped feature set against what a working
 photographer actually reaches for in Photoshop, followed by a large, sized
 catalog of what to build. Companion to `next-features.md` (whose open
@@ -877,7 +877,7 @@ exports and **no changed signature**. Decisions worth knowing:
   exactly three layers selected; and the two Distribute SF Symbols, which
   fall back to "⇹"/"⇳" on an OS that lacks them.
 
-### Phase 7b — guides, rulers, the grid and snapping (§3H's last row): shipped on `refactor` (commit hash to fill in when the phase lands)
+### Phase 7b — guides, rulers, the grid and snapping (§3H’s last row): shipped, commit `25da0fd`
 
 The LAST row of §3H, and nothing else in it: arbitrary canvas rotation,
 perspective crop, the skew / distort / warp submodes, Content-Aware Scale and
