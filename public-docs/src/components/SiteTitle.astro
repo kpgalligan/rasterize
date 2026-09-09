@@ -1,0 +1,70 @@
+---
+/* Boppa Llewyn header lockup: the app icon, the wordmark in Cormorant Garamond
+   and a mono version badge. Starlight's own SiteTitle renders the logo image
+   and the title text only, and cannot carry the badge. */
+import { Image } from 'astro:assets';
+import { logos } from 'virtual:starlight/user-images';
+import config from 'virtual:starlight/user-config';
+import { APP_VERSION } from '../site';
+
+/* The icon is 1024px square; render it through <Image> so the header ships a
+   24pt asset rather than the full-size artwork. */
+const iconAttrs = { width: 24, height: 24, densities: [2, 3], alt: config.logo?.alt ?? '' };
+
+const { siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
+---
+
+<a href={siteTitleHref} class="site-title sl-flex">
+	{
+		logos.dark && (
+			<Image
+				src={logos.dark}
+				{...iconAttrs}
+				class:list={{ 'light:sl-hidden': Boolean(logos.light && logos.light !== logos.dark) }}
+			/>
+		)
+	}
+	{
+		logos.light && logos.light !== logos.dark && (
+			<Image src={logos.light} {...iconAttrs} class="dark:sl-hidden" />
+		)
+	}
+	<span class="wordmark" translate="no">{siteTitle}</span>
+	<span class="version" translate="no">v{APP_VERSION}</span>
+</a>
+
+<style>
+	@layer starlight.core {
+		.site-title {
+			align-items: center;
+			gap: 0.625rem;
+			color: var(--sl-color-white);
+			text-decoration: none;
+			white-space: nowrap;
+			min-width: 0;
+		}
+
+		.wordmark {
+			overflow: hidden;
+		}
+
+		img {
+			width: 1.5rem;
+			height: 1.5rem;
+			flex-shrink: 0;
+			object-fit: contain;
+		}
+
+		.version {
+			flex-shrink: 0;
+			font-family: var(--sl-font-mono);
+			font-size: 0.6875rem;
+			font-weight: 400;
+			line-height: 1;
+			color: var(--sl-color-gray-3);
+			border: 1px solid var(--sl-color-hairline-light);
+			border-radius: var(--bl-radius-1);
+			padding: 0.1875rem 0.3125rem;
+		}
+	}
+</style>

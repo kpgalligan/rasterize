@@ -1,49 +1,41 @@
-# Starlight Starter Kit: Basics
+# Rasterize docs
 
-[![Built with Starlight](https://astro.badg.es/v2/built-with-starlight/tiny.svg)](https://starlight.astro.build)
+The public documentation site for Rasterize, built with [Astro](https://astro.build)
+and [Starlight](https://starlight.astro.build).
 
-```
-npm create astro@latest -- --template starlight
-```
+## Commands
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+Run from `public-docs/`:
 
-## 🚀 Project Structure
+| Command | Action |
+| :--- | :--- |
+| `npm install` | Install dependencies |
+| `npm run dev` | Start the dev server at `localhost:4321` |
+| `npm run build` | Build the production site to `./dist/` |
+| `npm run preview` | Preview the built site |
+| `npm run astro ...` | Run CLI commands like `astro add`, `astro check` |
 
-Inside of your Astro + Starlight project, you'll see the following folders and files:
+Pages are `.md`/`.mdx` files under `src/content/docs/`; each one is a route named
+after its path. Images go in `src/assets/`, static files in `public/`.
 
-```
-.
-├── public/
-├── src/
-│   ├── assets/
-│   ├── content/
-│   │   └── docs/
-│   └── content.config.ts
-├── astro.config.mjs
-├── package.json
-└── tsconfig.json
-```
+## Theme
 
-Starlight looks for `.md` or `.mdx` files in the `src/content/docs/` directory. Each file is exposed as a route based on its file name.
+The site wears the **Boppa Llewyn** design system — warm-ebony neutrals with a
+cream light surface, brass accent, Cormorant Garamond display type, IBM Plex
+Sans/Mono, sharp corners and hairlines instead of shadows. The handoff it was
+built from is in `../designs/design_handoff_starlight_theme/`.
 
-Images can be added to `src/assets/` and embedded in Markdown with a relative link.
+| Where | What |
+| :--- | :--- |
+| `src/styles/custom.css` | The theme. Maps the `--bl-*` design tokens onto Starlight's `--sl-*` properties, then restyles the components the token layer cannot reach. Unlayered, so it wins over every Starlight cascade layer. |
+| `src/fonts/font-face.css` | `@font-face` rules for the three families, split by `unicode-range`. |
+| `public/fonts/` | Self-hosted WOFF2 (`latin` and `latin-ext` subsets from Google Fonts). Licences in `public/fonts/OFL.txt`. |
+| `src/components/` | The four component overrides — `SiteTitle` (wordmark and version badge), `ThemeSelect` (two-state toggle), `PageTitle` (eyebrow and description), `Hero` (eyebrow). |
+| `src/site.ts` | The version shown in the header badge. Keep in step with `CFBundleShortVersionString` in the repo's `project.yml`. |
 
-Static assets, like favicons, can be placed in the `public/` directory.
+Every page may set an `eyebrow` in its frontmatter — the mono uppercase label
+above the title. Without one, a page uses the name of the sidebar group it sits in.
 
-## 🧞 Commands
-
-All commands are run from the root of the project, from a terminal:
-
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `npm install`             | Installs dependencies                            |
-| `npm run dev`             | Starts local dev server at `localhost:4321`      |
-| `npm run build`           | Build your production site to `./dist/`          |
-| `npm run preview`         | Preview your build locally, before deploying     |
-| `npm run astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `npm run astro -- --help` | Get help using the Astro CLI                     |
-
-## 👀 Want to learn more?
-
-Check out [Starlight’s docs](https://starlight.astro.build/), read [the Astro documentation](https://docs.astro.build), or jump into the [Astro Discord server](https://astro.build/chat).
+Prefer `custom.css` over a new component override: unlayered CSS reaches almost
+everything, and each override is a copy of Starlight markup that has to be
+re-checked on upgrade.
