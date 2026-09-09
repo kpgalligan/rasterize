@@ -1,0 +1,399 @@
+/* =============================================================================
+   Boppa Llewyn × Starlight
+   Drop in at:  public-docs/src/styles/custom.css
+   Register in astro.config.mjs:
+
+     starlight({ customCss: ['./src/styles/custom.css'] })
+
+   This file is unlayered, so it wins over every Starlight cascade layer.
+   Font @font-face rules and Expressive Code config live in the theme notes.
+   ============================================================================= */
+
+/* --- Boppa Llewyn tokens, verbatim from the design system --------------- */
+:root {
+  --bl-cream: #FBF8F1;
+  --bl-cream-1: #F4EFE2;
+  --bl-cream-2: #EAE3D2;
+  --bl-ink: #101915;
+  --bl-on-cream-2: #40483F;
+  --bl-on-cream-3: #6B7268;
+
+  --bl-bg-0: oklch(0.16 0.011 70);
+  --bl-bg-1: oklch(0.195 0.012 70);
+  --bl-bg-2: oklch(0.23 0.013 70);
+  --bl-bg-3: oklch(0.275 0.014 70);
+  --bl-line-1: oklch(0.32 0.015 72);
+  --bl-line-2: oklch(0.43 0.018 75);
+  --bl-fg-1: oklch(0.94 0.014 88);
+  --bl-fg-2: oklch(0.74 0.02 82);
+  --bl-fg-3: oklch(0.57 0.018 78);
+
+  --bl-brass: #F2C14E;
+  --bl-brass-strong: #E0AB33;
+  --bl-brass-dim: oklch(0.3 0.05 84);
+  --bl-brass-faint: oklch(0.225 0.028 84);
+
+  --bl-teal: #1F8564;
+  --bl-teal-dim: oklch(0.26 0.04 165);
+  --bl-ember: #F4653F;
+  --bl-ember-dim: oklch(0.27 0.05 40);
+  --bl-danger: oklch(0.63 0.14 25);
+  --bl-danger-dim: oklch(0.25 0.05 25);
+
+  /* darkened brass for cream surfaces — brass itself fails contrast on cream */
+  --bl-brass-deep: #8A6410;
+  --bl-brass-deeper: #5C4208;
+  --bl-brass-pale: #F7E9C5;
+
+  --bl-radius-1: 2px;
+  --bl-radius-2: 4px;
+  --bl-radius-3: 8px;
+  --bl-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --bl-dur-fast: 120ms;
+  --bl-dur-base: 200ms;
+
+  --bl-font-display: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+}
+
+/* --- Type and layout ---------------------------------------------------- */
+:root {
+  --sl-font: 'IBM Plex Sans', system-ui, sans-serif;
+  --sl-font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  --sl-text-body: 0.9375rem;      /* 15px */
+  --sl-text-body-sm: 0.8125rem;   /* 13px */
+  --sl-text-code: 0.8125rem;
+  --sl-text-code-sm: 0.75rem;
+  --sl-line-height: 1.55;
+  --sl-line-height-headings: 1.06;
+
+  /* Cormorant sits small on its em, so display sizes run large */
+  --sl-text-h1: 2.625rem;
+  --sl-text-h2: 1.875rem;
+  --sl-text-h3: 1.5rem;
+  --sl-text-h4: 1.25rem;
+  --sl-text-h5: 1.0625rem;
+
+  --sl-nav-height: 3.75rem;       /* 60px, per the site header */
+  --sl-sidebar-width: 17.5rem;
+  --sl-content-width: 42.5rem;    /* --measure-prose, 680px */
+}
+
+@media (min-width: 50em) {
+  :root {
+    --sl-nav-height: 3.75rem;
+    --sl-nav-pad-x: 1.5rem;
+    --sl-text-h1: 3.25rem;        /* 52px, --text-3xl */
+    --sl-text-h2: 2.375rem;       /* 38px */
+    --sl-text-h3: 1.75rem;
+    --sl-text-h4: 1.3125rem;
+  }
+}
+
+/* --- Colour: dark (default) --------------------------------------------- */
+:root,
+::backdrop {
+  --sl-color-white: var(--bl-fg-1);
+  --sl-color-gray-1: var(--bl-fg-1);
+  --sl-color-gray-2: var(--bl-fg-2);
+  --sl-color-gray-3: var(--bl-fg-3);
+  --sl-color-gray-4: var(--bl-line-2);
+  --sl-color-gray-5: var(--bl-bg-3);
+  --sl-color-gray-6: var(--bl-bg-1);
+  --sl-color-gray-7: var(--bl-bg-2);
+  --sl-color-black: var(--bl-bg-0);
+
+  --sl-color-accent-low: var(--bl-brass-faint);
+  --sl-color-accent: var(--bl-brass);
+  --sl-color-accent-high: var(--bl-brass);
+
+  --sl-color-text: var(--bl-fg-2);
+  --sl-color-text-accent: var(--bl-brass);
+  --sl-color-text-invert: var(--bl-ink);
+  --sl-color-bg: var(--bl-bg-0);
+  --sl-color-bg-nav: var(--bl-bg-0);
+  --sl-color-bg-sidebar: var(--bl-bg-1);
+  --sl-color-bg-inline-code: var(--bl-bg-2);
+  --sl-color-bg-accent: var(--bl-brass);
+  --sl-color-hairline-light: var(--bl-line-1);
+  --sl-color-hairline: var(--bl-line-1);
+  --sl-color-hairline-shade: var(--bl-line-1);
+  --sl-color-backdrop-overlay: rgba(10, 9, 8, 0.65);
+
+  /* Aside hues remapped onto the palette: note→teal, tip→brass,
+     caution→ember, danger→danger. Starlight has no separate green/blue use. */
+  --sl-color-blue-low: var(--bl-teal-dim);
+  --sl-color-blue: var(--bl-teal);
+  --sl-color-blue-high: #8AD8B9;
+  --sl-color-green-low: var(--bl-teal-dim);
+  --sl-color-green: var(--bl-teal);
+  --sl-color-green-high: #8AD8B9;
+  --sl-color-purple-low: var(--bl-brass-faint);
+  --sl-color-purple: var(--bl-brass);
+  --sl-color-purple-high: var(--bl-brass);
+  --sl-color-orange-low: var(--bl-ember-dim);
+  --sl-color-orange: var(--bl-ember);
+  --sl-color-orange-high: #FFA487;
+  --sl-color-red-low: var(--bl-danger-dim);
+  --sl-color-red: var(--bl-danger);
+  --sl-color-red-high: #F6AA9E;
+
+  /* Shadows exist for true overlays only */
+  --sl-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --sl-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --sl-shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+
+/* --- Colour: cream (light) --------------------------------------------- */
+:root[data-theme='light'],
+[data-theme='light'],
+[data-theme='light'] ::backdrop {
+  --sl-color-white: var(--bl-ink);
+  --sl-color-gray-1: #1A2620;
+  --sl-color-gray-2: var(--bl-on-cream-2);
+  --sl-color-gray-3: var(--bl-on-cream-3);
+  --sl-color-gray-4: #98A093;
+  --sl-color-gray-5: var(--bl-cream-2);
+  --sl-color-gray-6: var(--bl-cream-1);
+  --sl-color-gray-7: #F8F5EC;
+  --sl-color-black: var(--bl-cream);
+
+  --sl-color-accent-low: var(--bl-brass-pale);
+  --sl-color-accent: var(--bl-brass-deep);
+  --sl-color-accent-high: var(--bl-brass-deeper);
+
+  --sl-color-text: var(--bl-on-cream-2);
+  --sl-color-text-accent: var(--bl-brass-deep);
+  --sl-color-text-invert: var(--bl-cream);
+  --sl-color-bg: var(--bl-cream);
+  --sl-color-bg-nav: var(--bl-cream);
+  --sl-color-bg-sidebar: var(--bl-cream-1);
+  --sl-color-bg-inline-code: var(--bl-cream-2);
+  --sl-color-bg-accent: var(--bl-brass-deep);
+  --sl-color-hairline-light: rgba(16, 25, 21, 0.14);
+  --sl-color-hairline: rgba(16, 25, 21, 0.14);
+  --sl-color-hairline-shade: rgba(16, 25, 21, 0.14);
+  --sl-color-backdrop-overlay: rgba(16, 25, 21, 0.5);
+
+  --sl-color-blue-low: #DCEFE7;
+  --sl-color-blue: var(--bl-teal);
+  --sl-color-blue-high: #0E5540;
+  --sl-color-green-low: #DCEFE7;
+  --sl-color-green: var(--bl-teal);
+  --sl-color-green-high: #0E5540;
+  --sl-color-purple-low: var(--bl-brass-pale);
+  --sl-color-purple: var(--bl-brass-deep);
+  --sl-color-purple-high: var(--bl-brass-deeper);
+  --sl-color-orange-low: #FBDED4;
+  --sl-color-orange: var(--bl-ember);
+  --sl-color-orange-high: #8A3116;
+  --sl-color-red-low: #F8DDD7;
+  --sl-color-red: #B03A22;
+  --sl-color-red-high: #8C2A1C;
+
+  --sl-shadow-sm: 0 1px 2px rgba(16, 25, 21, 0.10);
+  --sl-shadow-md: 0 4px 16px rgba(16, 25, 21, 0.12);
+  --sl-shadow-lg: 0 16px 48px rgba(16, 25, 21, 0.18);
+}
+
+/* --- Display type ------------------------------------------------------- */
+:is(.sl-markdown-content, .content-panel, .hero, .card, .sl-link-card) :is(h1, h2, h3, h4),
+.content-panel h1,
+.hero h1,
+.site-title {
+  font-family: var(--bl-font-display);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  line-height: 1.06;
+  color: var(--sl-color-white);
+}
+
+/* h5/h6 stay in the sans — small serif does not hold up */
+.sl-markdown-content :is(h5, h6) {
+  font-family: var(--sl-font);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.site-title {
+  font-size: 1.375rem;
+}
+
+/* Mono eyebrows: sidebar group labels, table headers, code captions, ToC label */
+.sidebar-content .group-label .large,
+.right-sidebar h2,
+.mobile-starlight-toc nav > button > span:first-child,
+.sl-markdown-content th,
+.expressive-code figcaption .title,
+.starlight-aside__title {
+  font-family: var(--sl-font-mono);
+  font-weight: 500;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Prices, versions, badges, fine print */
+.sl-markdown-content kbd,
+.sl-markdown-content code {
+  font-size: 0.8125rem;
+  border-radius: var(--bl-radius-1);
+}
+
+/* --- Joinery corners, borders over shadows ----------------------------- */
+.card,
+.sl-link-card,
+.starlight-aside,
+.expressive-code .frame,
+.sl-link-button,
+.right-sidebar-panel details {
+  border-radius: var(--bl-radius-2);
+}
+
+input,
+select,
+.search-input,
+site-search button {
+  border-radius: var(--bl-radius-1);
+}
+
+dialog,
+.dialog-frame,
+starlight-toc details {
+  border-radius: var(--bl-radius-3);
+}
+
+.card,
+.sl-link-card {
+  background-color: var(--sl-color-gray-6);
+  border: 1px solid var(--sl-color-hairline-light);
+  box-shadow: none;
+}
+
+.sl-link-card:hover {
+  background-color: var(--sl-color-gray-7);
+  border-color: var(--sl-color-gray-4);
+  box-shadow: none;
+}
+
+/* --- Asides: hairline box + mono eyebrow, not a left accent bar --------- */
+.starlight-aside {
+  border: 1px solid var(--sl-color-asides-border);
+  border-inline-start-width: 1px;
+  padding: 1rem 1.25rem;
+  color: var(--sl-color-gray-1);
+}
+
+.starlight-aside__icon {
+  display: none;
+}
+
+.starlight-aside__title {
+  color: var(--sl-color-asides-text-accent);
+  line-height: 1;
+}
+
+/* --- Code blocks -------------------------------------------------------- */
+.expressive-code .frame {
+  border: 1px solid var(--sl-color-hairline-light);
+  overflow: hidden;
+}
+
+.expressive-code .frame pre {
+  background: var(--sl-color-gray-6);
+  border: 0;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+/* --- Tables ------------------------------------------------------------- */
+.sl-markdown-content table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.875rem;
+}
+
+.sl-markdown-content :is(th, td) {
+  border: 0;
+  border-bottom: 1px solid var(--sl-color-hairline-light);
+  padding: 0.625rem 0.75rem;
+  text-align: start;
+}
+
+.sl-markdown-content th {
+  color: var(--sl-color-gray-3);
+}
+
+/* --- Header: the one blurred surface in the system ---------------------- */
+header.header {
+  background-color: color-mix(in srgb, var(--sl-color-bg) 85%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--sl-color-hairline-shade);
+}
+
+/* --- Links, buttons, motion -------------------------------------------- */
+.sl-markdown-content a:not(:where(.sl-link-card, .sl-link-button, .not-content *)) {
+  color: var(--sl-color-text-accent);
+  text-decoration: none;
+  text-underline-offset: 0.2em;
+  transition: color var(--bl-dur-fast) var(--bl-ease);
+}
+
+.sl-markdown-content a:not(:where(.sl-link-card, .sl-link-button, .not-content *)):hover {
+  color: var(--sl-color-accent-high);
+  text-decoration: underline;
+}
+
+.sl-link-button.primary {
+  background: var(--bl-brass);
+  color: var(--bl-ink);
+  border: 1px solid transparent;
+  font-weight: 500;
+}
+
+.sl-link-button.primary:hover {
+  background: var(--bl-brass-strong);
+  color: var(--bl-ink);
+  text-decoration: none;
+}
+
+.sl-link-button.secondary {
+  background: var(--sl-color-gray-6);
+  color: var(--sl-color-white);
+  border: 1px solid var(--sl-color-hairline-light);
+}
+
+.sl-link-button.secondary:hover {
+  background: var(--sl-color-gray-7);
+  border-color: var(--sl-color-gray-4);
+}
+
+.sl-link-button.minimal {
+  color: var(--sl-color-text-accent);
+}
+
+/* Nothing scales or shrinks; opacity and colour only */
+a,
+button,
+summary,
+.sl-link-card {
+  transition:
+    background-color var(--bl-dur-fast) var(--bl-ease),
+    border-color var(--bl-dur-fast) var(--bl-ease),
+    color var(--bl-dur-fast) var(--bl-ease);
+}
+
+/* --- Focus: 2px page-coloured offset plus a 4px brass ring ------------- */
+:is(a, button, summary, input, select, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--sl-color-bg),
+    0 0 0 4px var(--sl-color-accent);
+  border-radius: var(--bl-radius-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/boppa-llewyn-design-system-b7378112-b9f1-4eda-a83d-71af55645bdb/tokens/fonts.css">
+<link rel="stylesheet" href="_ds/boppa-llewyn-design-system-b7378112-b9f1-4eda-a83d-71af55645bdb/tokens/colors.css">
+<link rel="stylesheet" href="_ds/boppa-llewyn-design-system-b7378112-b9f1-4eda-a83d-71af55645bdb/tokens/typography.css">
+<link rel="stylesheet" href="_ds/boppa-llewyn-design-system-b7378112-b9f1-4eda-a83d-71af55645bdb/tokens/spacing.css">
+<link rel="stylesheet" href="_ds/boppa-llewyn-design-system-b7378112-b9f1-4eda-a83d-71af55645bdb/tokens/effects.css">
+<link rel="stylesheet" href="_ds/boppa-llewyn-design-system-b7378112-b9f1-4eda-a83d-71af55645bdb/styles.css">
+<script src="_ds/boppa-llewyn-design-system-b7378112-b9f1-4eda-a83d-71af55645bdb/_ds_bundle.js"></script>
+<link rel="stylesheet" href="starlight-custom.css">
+<style>
+body{margin:0}
+a{color:var(--sl-color-text-accent)}
+a:hover{color:var(--sl-color-accent-high)}
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:var(--bl-bg-0);font-family:var(--sl-font)">
+
+<div style="position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:0 20px;min-height:46px;background:var(--bl-bg-1);border-bottom:1px solid var(--bl-line-1)">
+<span style="font:500 12px/1 var(--sl-font-mono);letter-spacing:0.08em;text-transform:uppercase;color:var(--bl-fg-3)">Boppa Llewyn &times; Starlight &mdash; public-docs</span>
+<span style="flex:1"></span>
+<div style="display:flex;align-items:center;gap:2px">
+<button onClick="{{ goSplash }}" style="position:relative;background:none;border:0;padding:14px 12px;font:400 13px var(--sl-font);color:var(--bl-fg-2);cursor:pointer" style-hover="color:var(--bl-fg-1)">Splash<sc-if value="{{ isSplash }}" hint-placeholder-val="{{ true }}"><span style="position:absolute;left:8px;right:8px;bottom:0;height:2px;background:var(--bl-brass)"></span></sc-if></button>
+<button onClick="{{ goGuide }}" style="position:relative;background:none;border:0;padding:14px 12px;font:400 13px var(--sl-font);color:var(--bl-fg-2);cursor:pointer" style-hover="color:var(--bl-fg-1)">Guide<sc-if value="{{ isGuide }}" hint-placeholder-val="{{ false }}"><span style="position:absolute;left:8px;right:8px;bottom:0;height:2px;background:var(--bl-brass)"></span></sc-if></button>
+<button onClick="{{ goRef }}" style="position:relative;background:none;border:0;padding:14px 12px;font:400 13px var(--sl-font);color:var(--bl-fg-2);cursor:pointer" style-hover="color:var(--bl-fg-1)">Reference<sc-if value="{{ isRef }}" hint-placeholder-val="{{ false }}"><span style="position:absolute;left:8px;right:8px;bottom:0;height:2px;background:var(--bl-brass)"></span></sc-if></button>
+<button onClick="{{ goMobile }}" style="position:relative;background:none;border:0;padding:14px 12px;font:400 13px var(--sl-font);color:var(--bl-fg-2);cursor:pointer" style-hover="color:var(--bl-fg-1)">Mobile<sc-if value="{{ isMobile }}" hint-placeholder-val="{{ false }}"><span style="position:absolute;left:8px;right:8px;bottom:0;height:2px;background:var(--bl-brass)"></span></sc-if></button>
+</div>
+<button onClick="{{ toggleTheme }}" style="display:flex;align-items:center;gap:8px;background:var(--bl-bg-2);border:1px solid var(--bl-line-1);border-radius:2px;padding:5px 10px;font:500 11px var(--sl-font-mono);letter-spacing:0.08em;text-transform:uppercase;color:var(--bl-fg-2);cursor:pointer" style-hover="background:var(--bl-bg-3);border-color:var(--bl-line-2);color:var(--bl-fg-1)">
+<sc-if value="{{ isDark }}" hint-placeholder-val="{{ true }}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></svg></sc-if>
+<sc-if value="{{ isLight }}" hint-placeholder-val="{{ false }}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"></path></svg></sc-if>
+{{ themeLabel }}</button>
+</div>
+
+<div ref="{{ surfaceRef }}" data-theme="{{ theme }}" style="background:var(--sl-color-bg);color:var(--sl-color-text);min-height:calc(100vh - 46px)">
+
+<sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}">
+<div>
+<header class="header" style="position:sticky;top:46px;z-index:20;display:flex;align-items:center;gap:16px;height:60px;padding:0 24px">
+<div style="display:flex;align-items:baseline;gap:10px;min-width:0">
+<img src="assets/rasterize-1024.png" alt="Rasterize" style="width:26px;height:26px;border-radius:22.6%;display:block;align-self:center">
+<span class="site-title">Rasterize</span>
+<span style="font:500 11px/1 var(--sl-font-mono);letter-spacing:0.08em;text-transform:uppercase;color:var(--sl-color-gray-3)">docs</span>
+</div>
+<span style="flex:1"></span>
+<button style="display:flex;align-items:center;gap:8px;height:32px;min-width:200px;padding:0 8px 0 10px;background:var(--sl-color-gray-6);border:1px solid var(--sl-color-hairline-light);border-radius:2px;color:var(--sl-color-gray-3);font:400 13px var(--sl-font);cursor:pointer" style-hover="background:var(--sl-color-gray-7);border-color:var(--sl-color-gray-4)">
+<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
+<span>Search</span><span style="flex:1"></span>
+<kbd style="font:500 11px var(--sl-font-mono);background:var(--sl-color-gray-5);color:var(--sl-color-gray-2);border-radius:2px;padding:2px 5px">&#8984;K</kbd>
+</button>
+<a href="#" style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--sl-color-gray-2);text-decoration:none" style-hover="color:var(--sl-color-text-accent)">boppallewyn.com
+<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M15 3h6v6M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h6"></path></svg></a>
+<button onClick="{{ toggleTheme }}" aria-label="Toggle theme" style="display:flex;align-items:center;justify-content:center;width:32px;height:32px;background:none;border:1px solid var(--sl-color-hairline-light);border-radius:2px;color:var(--sl-color-gray-2);cursor:pointer" style-hover="background:var(--sl-color-gray-6);color:var(--sl-color-white)">
+<sc-if value="{{ isDark }}" hint-placeholder-val="{{ true }}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></svg></sc-if>
+<sc-if value="{{ isLight }}" hint-placeholder-val="{{ false }}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"></path></svg></sc-if>
+</button>
+</header>
+
+<sc-if value="{{ isSplash }}" hint-placeholder-val="{{ true }}">
+<main>
+<section style="max-width:1120px;margin:0 auto;padding:112px 24px 96px;display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:64px;align-items:center">
+<div class="hero">
+<sc-if value="{{ showEyebrow }}" hint-placeholder-val="{{ true }}"><div style="font:500 12px/1 var(--sl-font-mono);letter-spacing:0.08em;text-transform:uppercase;color:var(--sl-color-text-accent);margin-bottom:20px">Documentation</div></sc-if>
+<h1 style="font-size:clamp(52px,7vw,88px);margin:0 0 20px">Welcome to Starlight</h1>
+<p class="tagline" style="font-size:19px;line-height:1.5;color:var(--sl-color-gray-2);margin:0 0 36px;max-width:44ch">Congrats on setting up a new Starlight project!</p>
+<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+<a class="sl-link-button primary" href="#" style="display:inline-flex;align-items:center;gap:8px;padding:11px 22px;font-size:15px;text-decoration:none">Example Guide
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a>
+<a class="sl-link-button minimal" href="#" style="display:inline-flex;align-items:center;gap:8px;padding:11px 4px;font-size:15px;text-decoration:none">Read the Starlight docs
+<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M15 3h6v6M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h6"></path></svg></a>
+</div>
+</div>
+<img src="public-docs/src/assets/houston.webp" alt="Houston" style="width:100%;max-width:300px;height:auto;display:block;justify-self:end">
+</section>
+<div style="border-top:1px solid var(--sl-color-hairline-light)"></div>
+<section class="sl-markdown-content" style="max-width:1120px;margin:0 auto;padding:80px 24px 144px">
+<h2 style="font-size:38px;margin:0 0 40px">Next steps</h2>
+<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:start">
+<div style="display:flex;flex-direction:column;gap:20px">
+<article class="card" style="padding:24px;display:flex;flex-direction:column;gap:10px">
+<h3 style="font-size:24px;margin:0">Update content</h3>
+<p style="margin:0;font-size:14px;line-height:1.55;color:var(--sl-color-gray-2)">Edit <code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">src/content/docs/index.mdx</code> to see this page change.</p>
+</article>
+<article class="card" style="padding:24px;display:flex;flex-direction:column;gap:10px">
+<h3 style="font-size:24px;margin:0">Add new content</h3>
+<p style="margin:0;font-size:14px;line-height:1.55;color:var(--sl-color-gray-2)">Add Markdown or MDX files to <code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">src/content/docs</code> to create new pages.</p>
+</article>
+<article class="card" style="padding:24px;display:flex;flex-direction:column;gap:10px">
+<h3 style="font-size:24px;margin:0">Read the docs</h3>
+<p style="margin:0;font-size:14px;line-height:1.55;color:var(--sl-color-gray-2)">Learn more in <a href="#" style="color:var(--sl-color-text-accent)">the Starlight Docs</a>.</p>
+</article>
+</div>
+<div style="display:flex;flex-direction:column;gap:20px;margin-top:48px">
+<article class="card" style="padding:24px;display:flex;flex-direction:column;gap:10px">
+<h3 style="font-size:24px;margin:0">Change page layout</h3>
+<p style="margin:0;font-size:14px;line-height:1.55;color:var(--sl-color-gray-2)">Delete <code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">template: splash</code> in <code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">src/content/docs/index.mdx</code> to display a sidebar on this page.</p>
+</article>
+<article class="card" style="padding:24px;display:flex;flex-direction:column;gap:10px">
+<h3 style="font-size:24px;margin:0">Configure your site</h3>
+<p style="margin:0;font-size:14px;line-height:1.55;color:var(--sl-color-gray-2)">Edit your <code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">sidebar</code> and other config in <code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">astro.config.mjs</code>.</p>
+</article>
+</div>
+</div>
+</section>
+</main>
+</sc-if>
+
+<sc-if value="{{ isDoc }}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;align-items:flex-start">
+<nav class="sidebar-content" style="width:280px;flex:none;align-self:stretch;padding:32px 16px;background:var(--sl-color-bg-sidebar);border-right:1px solid var(--sl-color-hairline);display:flex;flex-direction:column;gap:28px">
+<div>
+<div class="group-label" style="padding:0 8px 10px"><span class="large" style="color:var(--sl-color-gray-3)">Guides</span></div>
+<ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px">
+<li><sc-if value="{{ isGuide }}" hint-placeholder-val="{{ false }}"><a href="#" aria-current="page" style="display:block;padding:6px 8px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;background:var(--sl-color-text-accent);color:var(--sl-color-text-invert)">Example Guide</a></sc-if><sc-if value="{{ isRef }}" hint-placeholder-val="{{ false }}"><a href="#" style="display:block;padding:6px 8px;border-radius:4px;font-size:14px;text-decoration:none;color:var(--sl-color-gray-2)" style-hover="color:var(--sl-color-white);background:var(--sl-color-gray-6)">Example Guide</a></sc-if></li>
+</ul>
+</div>
+<div>
+<div class="group-label" style="padding:0 8px 10px"><span class="large" style="color:var(--sl-color-gray-3)">Reference</span></div>
+<ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px">
+<li><sc-if value="{{ isRef }}" hint-placeholder-val="{{ false }}"><a href="#" aria-current="page" style="display:block;padding:6px 8px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;background:var(--sl-color-text-accent);color:var(--sl-color-text-invert)">Example Reference</a></sc-if><sc-if value="{{ isGuide }}" hint-placeholder-val="{{ false }}"><a href="#" style="display:block;padding:6px 8px;border-radius:4px;font-size:14px;text-decoration:none;color:var(--sl-color-gray-2)" style-hover="color:var(--sl-color-white);background:var(--sl-color-gray-6)">Example Reference</a></sc-if></li>
+</ul>
+</div>
+</nav>
+
+<div style="flex:1;min-width:0;display:flex;justify-content:center;padding:56px 24px 144px">
+<article class="sl-markdown-content" style="width:100%;max-width:var(--sl-content-width);color:var(--sl-color-text)">
+
+<sc-if value="{{ isGuide }}" hint-placeholder-val="{{ false }}">
+<div>
+<sc-if value="{{ showEyebrow }}" hint-placeholder-val="{{ true }}"><div style="font:500 12px/1 var(--sl-font-mono);letter-spacing:0.08em;text-transform:uppercase;color:var(--sl-color-text-accent);margin-bottom:16px">Guides</div></sc-if>
+<h1 style="font-size:52px;margin:0 0 18px">Example Guide</h1>
+<p style="font-size:17px;line-height:1.5;color:var(--sl-color-gray-2);margin:0 0 36px">A guide in my new Starlight docs site.</p>
+<div style="border-top:1px solid var(--sl-color-hairline-light);margin:0 0 36px"></div>
+<p style="margin:0 0 20px;font-size:15px;line-height:1.55">Guides lead a user through a specific task they want to accomplish, often with a sequence of steps. Writing a good guide requires thinking about what your users are trying to do.</p>
+<div class="starlight-aside starlight-aside--note" style="--sl-color-asides-border:var(--sl-color-blue);--sl-color-asides-text-accent:var(--sl-color-blue-high);background-color:var(--sl-color-blue-low);margin:0 0 32px">
+<p class="starlight-aside__title" style="margin:0 0 8px">Note</p>
+<p class="starlight-aside__content" style="margin:0;font-size:14px;line-height:1.55">Starlight looks for <code style="background:var(--sl-color-bg-inline-code);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">.md</code> or <code style="background:var(--sl-color-bg-inline-code);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">.mdx</code> files in the <code style="background:var(--sl-color-bg-inline-code);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">src/content/docs/</code> directory. Each file is exposed as a route based on its file name.</p>
+</div>
+<h2 style="font-size:38px;margin:0 0 20px">Running the site</h2>
+<p style="margin:0 0 20px;font-size:15px;line-height:1.55">All commands are run from the root of the project, from a terminal:</p>
+<figure class="expressive-code" style="margin:0 0 32px">
+<div class="frame" style="border:1px solid var(--sl-color-hairline-light);overflow:hidden">
+<figcaption style="display:flex;align-items:center;gap:8px;padding:9px 14px;background:var(--sl-color-gray-6);border-bottom:1px solid var(--sl-color-hairline-light)">
+<span class="title" style="color:var(--sl-color-gray-3)">Terminal</span>
+</figcaption>
+<pre style="margin:0;padding:16px;overflow:auto;background:var(--sl-color-gray-6);font:400 13px/1.7 var(--sl-font-mono);color:var(--sl-color-gray-1)"><code><div><span style="color:var(--sl-color-gray-4)"># install and start the dev server</span></div><div><span style="color:var(--sl-color-text-accent)">npm</span> install</div><div><span style="color:var(--sl-color-text-accent)">npm</span> run dev</div></code></pre>
+</div>
+</figure>
+<h2 style="font-size:38px;margin:0 0 20px">Further reading</h2>
+<ul style="margin:0;padding-left:22px;font-size:15px;line-height:1.7">
+<li>Read <a href="#" style="color:var(--sl-color-text-accent)">about how-to guides</a> in the Di&aacute;taxis framework</li>
+</ul>
+</div>
+</sc-if>
+
+<sc-if value="{{ isRef }}" hint-placeholder-val="{{ false }}">
+<div>
+<sc-if value="{{ showEyebrow }}" hint-placeholder-val="{{ true }}"><div style="font:500 12px/1 var(--sl-font-mono);letter-spacing:0.08em;text-transform:uppercase;color:var(--sl-color-text-accent);margin-bottom:16px">Reference</div></sc-if>
+<h1 style="font-size:52px;margin:0 0 18px">Example Reference</h1>
+<p style="font-size:17px;line-height:1.5;color:var(--sl-color-gray-2);margin:0 0 36px">A reference page in my new Starlight docs site.</p>
+<div style="border-top:1px solid var(--sl-color-hairline-light);margin:0 0 36px"></div>
+<p style="margin:0 0 20px;font-size:15px;line-height:1.55">Reference pages are ideal for outlining how things work in terse and clear terms. Less concerned with telling a story or addressing a specific use case, they should give a comprehensive outline of what you're documenting.</p>
+<h2 style="font-size:38px;margin:0 0 20px">Commands</h2>
+<table style="width:100%;border-collapse:collapse;font-size:14px;margin:0 0 32px">
+<thead><tr>
+<th style="border:0;border-bottom:1px solid var(--sl-color-hairline-light);padding:10px 12px;text-align:left;color:var(--sl-color-gray-3)">Command</th>
+<th style="border:0;border-bottom:1px solid var(--sl-color-hairline-light);padding:10px 12px;text-align:left;color:var(--sl-color-gray-3)">Action</th>
+</tr></thead>
+<tbody>
+<tr><td style="border:0;border-bottom:1px solid var(--sl-color-hairline-light);padding:10px 12px"><code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono);white-space:nowrap">npm install</code></td><td style="border:0;border-bottom:1px solid var(--sl-color-hairline-light);padding:10px 12px;color:var(--sl-color-gray-2)">Installs dependencies</td></tr>
+<tr><td style="border:0;border-bottom:1px solid var(--sl-color-hairline-light);padding:10px 12px"><code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono);white-space:nowrap">npm run dev</code></td><td style="border:0;border-bottom:1px solid var(--sl-color-hairline-light);padding:10px 12px;color:var(--sl-color-gray-2)">Starts local dev server at <code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">localhost:4321</code></td></tr>
+<tr><td style="border:0;border-bottom:1px solid var(--sl-color-hairline-light);padding:10px 12px"><code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono);white-space:nowrap">npm run build</code></td><td style="border:0;border-bottom:1px solid var(--sl-color-hairline-light);padding:10px 12px;color:var(--sl-color-gray-2)">Build your production site to <code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">./dist/</code></td></tr>
+<tr><td style="border:0;border-bottom:1px solid var(--sl-color-hairline-light);padding:10px 12px"><code style="background:var(--sl-color-bg-inline-code);color:var(--sl-color-white);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono);white-space:nowrap">npm run preview</code></td><td style="border:0;border-bottom:1px solid var(--sl-color-hairline-light);padding:10px 12px;color:var(--sl-color-gray-2)">Preview your build locally, before deploying</td></tr>
+</tbody>
+</table>
+<div class="starlight-aside starlight-aside--caution" style="--sl-color-asides-border:var(--sl-color-orange);--sl-color-asides-text-accent:var(--sl-color-orange-high);background-color:var(--sl-color-orange-low);margin:0 0 32px">
+<p class="starlight-aside__title" style="margin:0 0 8px">Caution</p>
+<p class="starlight-aside__content" style="margin:0;font-size:14px;line-height:1.55">Static assets, like favicons, can be placed in the <code style="background:var(--sl-color-bg-inline-code);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">public/</code> directory.</p>
+</div>
+<h2 style="font-size:38px;margin:0 0 20px">Further reading</h2>
+<ul style="margin:0;padding-left:22px;font-size:15px;line-height:1.7">
+<li>Read <a href="#" style="color:var(--sl-color-text-accent)">about reference</a> in the Di&aacute;taxis framework</li>
+</ul>
+</div>
+</sc-if>
+
+</article>
+</div>
+
+<div class="right-sidebar" style="width:224px;flex:none;padding:56px 24px 0 0">
+<div style="position:sticky;top:120px">
+<h2 style="color:var(--sl-color-gray-3);margin:0 0 14px">On this page</h2>
+<ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;font-size:13px;border-left:1px solid var(--sl-color-hairline-light)">
+<li style="padding-left:14px;margin-left:-1px;border-left:2px solid var(--sl-color-text-accent)"><a href="#" style="color:var(--sl-color-white);text-decoration:none">Overview</a></li>
+<sc-if value="{{ isGuide }}" hint-placeholder-val="{{ false }}"><li style="padding-left:14px"><a href="#" style="color:var(--sl-color-gray-2);text-decoration:none" style-hover="color:var(--sl-color-white)">Running the site</a></li></sc-if>
+<sc-if value="{{ isRef }}" hint-placeholder-val="{{ false }}"><li style="padding-left:14px"><a href="#" style="color:var(--sl-color-gray-2);text-decoration:none" style-hover="color:var(--sl-color-white)">Commands</a></li></sc-if>
+<li style="padding-left:14px"><a href="#" style="color:var(--sl-color-gray-2);text-decoration:none" style-hover="color:var(--sl-color-white)">Further reading</a></li>
+</ul>
+</div>
+</div>
+</div>
+</sc-if>
+</div>
+</sc-if>
+
+<sc-if value="{{ isMobile }}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;justify-content:center;padding:48px 24px 96px;background:var(--bl-bg-0)">
+<div style="width:390px;flex:none;background:var(--sl-color-bg);border:1px solid var(--bl-line-1);border-radius:8px;overflow:hidden">
+<header class="header" style="display:flex;align-items:center;gap:10px;height:56px;padding:0 14px">
+<button aria-label="Menu" style="display:flex;align-items:center;justify-content:center;width:32px;height:32px;background:none;border:1px solid var(--sl-color-hairline-light);border-radius:2px;color:var(--sl-color-gray-2);cursor:pointer">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"></path></svg>
+</button>
+<img src="assets/rasterize-1024.png" alt="Rasterize" style="width:24px;height:24px;border-radius:22.6%;display:block">
+<span class="site-title" style="font-size:19px">Rasterize</span>
+<span style="flex:1"></span>
+<button aria-label="Search" style="display:flex;align-items:center;justify-content:center;width:32px;height:32px;background:none;border:1px solid var(--sl-color-hairline-light);border-radius:2px;color:var(--sl-color-gray-2);cursor:pointer">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
+</button>
+<button onClick="{{ toggleTheme }}" aria-label="Toggle theme" style="display:flex;align-items:center;justify-content:center;width:32px;height:32px;background:none;border:1px solid var(--sl-color-hairline-light);border-radius:2px;color:var(--sl-color-gray-2);cursor:pointer">
+<sc-if value="{{ isDark }}" hint-placeholder-val="{{ true }}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></svg></sc-if>
+<sc-if value="{{ isLight }}" hint-placeholder-val="{{ false }}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"></path></svg></sc-if>
+</button>
+</header>
+<div class="mobile-starlight-toc" style="display:flex;align-items:center;gap:8px;height:48px;padding:0 14px;background:var(--sl-color-bg-sidebar);border-bottom:1px solid var(--sl-color-hairline-light)">
+<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--sl-color-gray-3)" stroke-width="1.75" stroke-linecap="round"><path d="m9 18 6-6-6-6"></path></svg>
+<span style="font-size:14px;color:var(--sl-color-gray-2)">On this page</span>
+<span style="flex:1"></span>
+<span style="font:500 11px var(--sl-font-mono);letter-spacing:0.08em;text-transform:uppercase;color:var(--sl-color-gray-3)">Overview</span>
+</div>
+<article class="sl-markdown-content" style="padding:28px 18px 56px;color:var(--sl-color-text)">
+<sc-if value="{{ showEyebrow }}" hint-placeholder-val="{{ true }}"><div style="font:500 12px/1 var(--sl-font-mono);letter-spacing:0.08em;text-transform:uppercase;color:var(--sl-color-text-accent);margin-bottom:14px">Guides</div></sc-if>
+<h1 style="font-size:40px;margin:0 0 14px">Example Guide</h1>
+<p style="font-size:16px;line-height:1.5;color:var(--sl-color-gray-2);margin:0 0 24px">A guide in my new Starlight docs site.</p>
+<div style="border-top:1px solid var(--sl-color-hairline-light);margin:0 0 24px"></div>
+<p style="margin:0 0 20px;font-size:15px;line-height:1.55">Guides lead a user through a specific task they want to accomplish, often with a sequence of steps. Writing a good guide requires thinking about what your users are trying to do.</p>
+<div class="starlight-aside starlight-aside--note" style="--sl-color-asides-border:var(--sl-color-blue);--sl-color-asides-text-accent:var(--sl-color-blue-high);background-color:var(--sl-color-blue-low);margin:0 0 24px">
+<p class="starlight-aside__title" style="margin:0 0 8px">Note</p>
+<p class="starlight-aside__content" style="margin:0;font-size:14px;line-height:1.55">Each file in <code style="background:var(--sl-color-bg-inline-code);border-radius:2px;padding:0.15em 0.35em;font:400 13px var(--sl-font-mono)">src/content/docs/</code> is exposed as a route based on its file name.</p>
+</div>
+<figure class="expressive-code" style="margin:0">
+<div class="frame" style="border:1px solid var(--sl-color-hairline-light);overflow:hidden">
+<figcaption style="padding:9px 12px;background:var(--sl-color-gray-6);border-bottom:1px solid var(--sl-color-hairline-light)"><span class="title" style="color:var(--sl-color-gray-3)">Terminal</span></figcaption>
+<pre style="margin:0;padding:14px;overflow:auto;background:var(--sl-color-gray-6);font:400 13px/1.7 var(--sl-font-mono);color:var(--sl-color-gray-1)"><code><span style="color:var(--sl-color-text-accent)">npm</span> run dev</code></pre>
+</div>
+</figure>
+</article>
+</div>
+</div>
+</sc-if>
+
+</div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accent&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;brass&quot;,&quot;ember&quot;],&quot;default&quot;:&quot;brass&quot;,&quot;tsType&quot;:&quot;'brass' | 'ember'&quot;,&quot;section&quot;:&quot;Theme&quot;},&quot;proseWidth&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:680,&quot;min&quot;:600,&quot;max&quot;:800,&quot;step&quot;:10,&quot;unit&quot;:&quot;px&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Theme&quot;},&quot;showEyebrow&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Theme&quot;}}">
+class Component extends DCLogic {
+  state = { screen: 'splash', theme: 'dark' };
+  surfaceRef = React.createRef();
+
+  componentDidMount() { this.applyVars(); }
+  componentDidUpdate() { this.applyVars(); }
+
+  applyVars() {
+    const el = this.surfaceRef.current;
+    if (!el) return;
+    const dark = this.state.theme === 'dark';
+    const accent = this.props.accent ?? 'brass';
+    const ramp = {
+      brass: { dark: ['#F2C14E', '#F2C14E', 'oklch(0.225 0.028 84)', '#101915'],
+               light: ['#8A6410', '#5C4208', '#F7E9C5', '#FBF8F1'] },
+      ember: { dark: ['#F4653F', '#FFA487', 'oklch(0.27 0.05 40)', '#FBF8F1'],
+               light: ['#A8391A', '#7A2810', '#FBDED4', '#FBF8F1'] }
+    }[accent][dark ? 'dark' : 'light'];
+    el.style.setProperty('--sl-color-accent', ramp[0]);
+    el.style.setProperty('--sl-color-accent-high', ramp[1]);
+    el.style.setProperty('--sl-color-accent-low', ramp[2]);
+    el.style.setProperty('--sl-color-text-accent', ramp[0]);
+    el.style.setProperty('--sl-color-bg-accent', ramp[0]);
+    el.style.setProperty('--sl-color-text-invert', ramp[3]);
+    el.style.setProperty('--sl-content-width', (this.props.proseWidth ?? 680) + 'px');
+  }
+
+  renderVals() {
+    const s = this.state.screen;
+    const dark = this.state.theme === 'dark';
+    return {
+      surfaceRef: this.surfaceRef,
+      theme: this.state.theme,
+      isDark: dark,
+      isLight: !dark,
+      themeLabel: dark ? 'Dark' : 'Cream',
+      isSplash: s === 'splash',
+      isGuide: s === 'guide',
+      isRef: s === 'reference',
+      isDoc: s === 'guide' || s === 'reference',
+      isMobile: s === 'mobile',
+      isDesktop: s !== 'mobile',
+      showEyebrow: this.props.showEyebrow ?? true,
+      goSplash: () => this.setState({ screen: 'splash' }),
+      goGuide: () => this.setState({ screen: 'guide' }),
+      goRef: () => this.setState({ screen: 'reference' }),
+      goMobile: () => this.setState({ screen: 'mobile' }),
+      toggleTheme: () => this.setState((p) => ({ theme: p.theme === 'dark' ? 'light' : 'dark' }))
+    };
+  }
+}
+
+</script>
+</body>
+</html>
