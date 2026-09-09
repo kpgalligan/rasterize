@@ -138,7 +138,23 @@ final class ChannelOptionsSheetController: NSViewController {
         // Both core calls chain inside ONE transform: either half may
         // legitimately refuse (nothing changed), so the second falls back to
         // the first's result rather than to nil.
-        document.applyEdit("Channel Options") { doc in
+        // Addressed by the channel's CURRENT name — what the replay document
+        // still calls it — with the new name in `name`, exactly as a layer
+        // rename records.
+        let record: [ActionStep] =
+            (document.doc?.channelInfo(index)?.name).map { current in
+                var arguments: [String: Any] = [
+                    "channel": current,
+                    "overlay_color": RasterImage.hexString(
+                        (r: red, g: green, b: blue, a: 255)),
+                    "overlay_opacity": (opacity * 100).rounded() / 100,
+                    "color_indicates": indicatesSelected ? "selected" : "masked",
+                ]
+                if !name.isEmpty { arguments["name"] = name }
+                return .channelCommand(
+                    "set_channel_options", arguments, note: "Channels ▸ Channel Options…")
+            } ?? .unrecorded("Channel Options")
+        document.applyEdit("Channel Options", record: record) { doc in
             let renamed = name.isEmpty ? doc : (doc.renamingChannel(index, name) ?? doc)
             let recoloured = renamed.settingChannelOverlay(
                 index, red: red, green: green, blue: blue, opacity: opacity,

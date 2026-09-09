@@ -387,6 +387,11 @@ extension AgentServer {
     /// reports which — the agent-side convention, since a modal prompt would
     /// block the MCP connection. A plain rect crop keeps every description
     /// valid.
+    ///
+    /// `sampler` is the straighten's resampling filter, in `transform_layer`'s
+    /// vocabulary, because the Crop tool straightens with whatever the Free
+    /// Transform options bar is set to. It is ignored at angle 0, where
+    /// nothing is resampled.
     func crop(_ a: [String: Any]) throws -> String {
         let document = try target(a)
         guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
@@ -398,6 +403,12 @@ extension AgentServer {
         let angle = doubleArg(a, "angle") ?? 0
         guard angle.isFinite, abs(angle) <= 45 else {
             throw ToolError(message: "angle must be between -45 and 45 degrees")
+        }
+        let samplerName = (stringArg(a, "sampler") ?? "bicubic").lowercased()
+        guard let sampler = Self.transformSamplers[samplerName] else {
+            throw ToolError(
+                message: "sampler must be nearest, bilinear, bicubic or lanczos "
+                    + "(got \"\(samplerName)\")")
         }
         guard angle != 0 else {
             // The plain rectangle crop: a canvas-window move only.
@@ -431,11 +442,11 @@ extension AgentServer {
             // set form is all-or-nothing under per-entry POSITION locks, so a
             // single locked layer refused the whole crop (the UI's twin has
             // the same note).
-            var current = base.straightenLayers(matrix, sampler: RZ_FILTER_CATMULL_ROM)
+            var current = base.straightenLayers(matrix, sampler: sampler.filter)
             // The channels ride the straighten too (the UI's commit does the
             // same): a saved selection that stayed put would no longer line
             // up with the picture it was saved from. nil = no channels.
-            current = current?.transformingChannels(matrix, sampler: RZ_FILTER_CATMULL_ROM)
+            current = current?.transformingChannels(matrix, sampler: sampler.filter)
                 ?? current
             for idx in described {
                 current = current?.withLayerMeta(idx, nil) ?? current
@@ -446,6 +457,7 @@ extension AgentServer {
         var result: [String: Any] = [
             "ok": true,
             "angle": Self.transformNumber(angle),
+            "sampler": sampler.name,
             "document": summary(document),
         ]
         if !described.isEmpty {

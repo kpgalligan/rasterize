@@ -83,7 +83,8 @@ final class WelcomeWindowController: NSWindowController {
         buttons.spacing = 12
 
         let formats = NSTextField(
-            labelWithString: "PNG · JPEG · PSD (layered) · TIFF · BMP · GIF · WebP · RZ")
+            labelWithString: "PNG · JPEG · PSD (layered) · TIFF · BMP · GIF · WebP · "
+                + "HEIC · Camera RAW · RZ")
         formats.translatesAutoresizingMaskIntoConstraints = false
         formats.font = DS.mono(11)
         formats.textColor = DS.textFaint

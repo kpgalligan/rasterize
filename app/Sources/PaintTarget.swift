@@ -145,6 +145,24 @@ enum PaintTarget: Equatable {
         }
     }
 
+    /// The `target` a WHOLE-LAYER pixel edit RECORDS — a filter, a
+    /// destructive adjustment, a bucket fill, a gradient.
+    ///
+    /// `agentName`'s answer for every case but `.mask`, which becomes
+    /// "layer". None of those commands edits the mask when the mask well is
+    /// selected: `applyToActiveLayer` sends the target to
+    /// `applyToTargetPlane`, which answers false for `.mask`, and the LAYER's
+    /// own pixels are rewritten — the Fill tool says so in its own comment.
+    /// So recording "mask" both misdescribed the edit and produced a step the
+    /// tool refuses outright (`apply_filter`, `fill` and `gradient` all parse
+    /// their target with `allowMask: false`), which halted the action there.
+    ///
+    /// A STROKE is the opposite case and keeps `agentName`: a mask stroke
+    /// really does paint the mask, and `brush_stroke` takes it.
+    func layerEditAgentName(in doc: RasterDocument?) -> String {
+        self == .mask ? "layer" : agentName(in: doc)
+    }
+
     /// The undo action name a coverage stroke on this target registers.
     /// `.layer` never reaches here (the canvas names layer strokes itself),
     /// but it answers the layer names so the function is total.

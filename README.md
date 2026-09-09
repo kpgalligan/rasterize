@@ -184,7 +184,8 @@ decoding, encoding, and manipulation.
   effect with Use Global Light on. The Free Transform preview shows the
   layer without its effects until commit
 - Open PNG, JPEG, Photoshop (PSD, layered), TIFF, BMP, GIF, WebP, HEIC/HEIF,
-  and Apple Live Photos — EXIF orientation is applied on open, so camera
+  Apple Live Photos, and camera RAW (CR3, CR2, NEF, ARW, DNG, Apple ProRAW,
+  ORF, RW2, RAF, SRW, PEF) — EXIF orientation is applied on open, so camera
   photos display upright
 - Export a copy to PNG, JPEG (with quality control), TIFF, BMP, GIF, WebP;
   failed saves never truncate or delete an existing destination file
@@ -557,6 +558,98 @@ decoding, encoding, and manipulation.
   text; the description is stored in `.rz` files, so the frame stays
   changeable across save and open as long as the original files are where
   they were
+- **Camera RAW**: open a CR3, CR2, NEF, ARW, DNG, Apple ProRAW, ORF, RW2,
+  RAF, SRW or PEF and a Develop window comes up **before** the pixels land —
+  a live preview beside exposure, white balance (As Shot, or a custom
+  temperature and tint), the global tone curve, shadow lift, local contrast,
+  sharpness, detail, luminance and colour noise reduction, lens correction
+  and, on macOS 26, highlight recovery. Every slider starts at the value the
+  file itself reports rather than a house default, Reset puts them all back,
+  a control this particular file's decoder does not support is disabled and
+  named in a footnote below the buttons, and Cancel opens nothing at all.
+  Open commits the same settings at full size, and the document takes the
+  colour profile the decode produced — often Display P3, never assumed sRGB
+  — plus the resolution the file states. A RAW is developed once, at open:
+  there is no re-develop and no RAW layer type, and Revert re-develops with
+  the settings you chose. Dropping several RAWs at once asks about each of
+  them — nothing can tell that five opens were one gesture — so a folder is
+  better run through an agent, which never sees the window at all. The
+  decode is Core Image's, so which controls a given camera supports is
+  its decoder's answer, not ours. EXIF, XMP and
+  IPTC are not carried across (the same limit the HEIC path has: the pixels
+  come from the platform, and nothing yet turns its property dictionary back
+  into a packet). Agents get the same controls without the window —
+  `open_document` takes an optional `raw` object, and a value outside its
+  range is refused by name rather than quietly clamped
+- **Actions** (File > Automate ▸): an Action is a recorded sequence of the
+  same MCP tool calls an agent makes. Start Recording, work — from the menus,
+  the panels, the options bar or the canvas, a brush stroke included — then
+  Stop Recording and name it, and it replays on any document as ONE undo
+  step — and as no undo step at all when nothing changed, so a run whose
+  steps all failed leaves no phantom entry behind. A replay long enough to
+  notice puts up a step counter with a Stop button; stopping keeps what has
+  already been applied, still as that one undo step. Every user-visible edit
+  already has an MCP twin, and that parity is
+  what makes recording possible at all: each of the app's edit entry points
+  states the call it is, so a new feature cannot quietly stop being
+  recordable — it does not compile until it says what it records. A command
+  with no twin (Paste, Quick Mask, a ⇧-click Auto-Select, a multi-layer Move,
+  playing another action) lands as a VISIBLE placeholder naming it, never as
+  a silent hole, and replaying that step reports the gap instead of skipping
+  it. A recording is bounded — 1,000 steps or 200,000 recorded stroke points,
+  which is a few megabytes of JSON — and reaching either appends one more
+  placeholder saying so rather than growing a file nothing can open;
+  deleting steps in the window gives the budget back. Steps that mean
+  "the active layer", "the layer called Sky" or "the current layer selection"
+  are recorded symbolically and resolve against the document being played,
+  while canvas coordinates stay absolute and are never remapped — a size
+  difference is reported, not guessed at, and Select All is a canvas-relative
+  step rather than a literal rectangle so it batches correctly. Actions are
+  plain JSON in `~/Library/Application Support/Rasterize/actions`, one file
+  per action, editable by hand; a file that will not parse is listed with the
+  exact reason rather than dropped. `RZ_ACTIONS_DIR` points that folder
+  somewhere else, which is what the test instances use. Agents get the whole
+  surface — `start_recording` / `stop_recording` record a person's session,
+  `save_action` writes one from a sentence, `run_action` plays it — with
+  three exceptions, all refused by step index when the action is read. An
+  action may not contain the Actions tools themselves: it does not run or
+  edit actions. It may not contain `save_copy`: an action says what to DO to
+  a picture, never where to write it — a step's path is the absolute one it
+  was written with, so in a batch every file would be written over that same
+  one, outside the output folder — and Batch is what chooses the folder, the
+  format and the name. And it may not contain `undo` or `redo`: an action is
+  one undo entry, so an undo inside it would throw the document's redo
+  history away and report success. A tool call from an agent or the
+  assistant that arrives while an action is playing is refused in band and
+  can simply be retried, rather than landing inside the run's single undo
+  entry and being reverted with it. The built-in assistant knows the symbol vocabulary, so "make me an action that
+  warms and sharpens" is a request it can fill. Filters > Repeat Last Filter
+  (⌃F) re-runs the last destructive filter or adjustment with the same
+  parameters, on the same machinery; unlike a replay inside an action, it
+  asks before rasterizing a text, shape or Live Photo layer, exactly as the
+  Filters menu itself does. Tools > Command Palette… (⇧⌘K — ⌘K is Crop
+  and stays Crop) fuzzy-searches every menu command in the app by name or by its
+  whole path, shows each one's own shortcut, and runs the top match on
+  Return; the list is a walk of the real menus rather than a second
+  catalogue, so it can never fall behind them, and it offers only what is
+  enabled right now — which is why it still lists File > Open… with no
+  document open. A command run from the palette is recorded like any other
+- **Batch** (File > Automate ▸ Batch…) runs one action over every image in a
+  folder — its top level only, not sub-folders — and writes each result into
+  an output folder that must not be the input folder, in a chosen format,
+  named by a `{name}`/`{n}` template whose extension always comes from the
+  format. Camera RAWs are developed with the action's own `raw` settings,
+  edited in the Batch window's RAW develop row and saved back to the action,
+  because no dialog can be shown per file. Stop on error says both halves: on, a
+  failed step halts the run and the file it was working on is not written;
+  off, that file is written as the action left it and every failed step is
+  listed against it. Nothing is written outside the output folder, a name a
+  file already written has claimed is refused rather than overwritten, and an
+  existing file is left alone unless Overwrite is on. The report says what
+  happened to every file — including what each format carried and dropped —
+  and copies to the clipboard as text. Batch has no MCP twin, deliberately:
+  it performs no edit of its own — it is `open_document` + `run_action` +
+  `save_copy` in a loop, and an agent already has all three
 - **Copy** (⌘C) puts the active layer's own pixels within the selection on
   the clipboard — raw, so layer opacity, blend mode and the layer mask stay
   out of it and the copy round-trips through Paste as New Layer unchanged —
@@ -666,7 +759,7 @@ model defaults to `claude-sonnet-5`; override with
 
 Tools > Allow Agent Connections hosts an MCP server (streamable HTTP) inside
 the app at `http://127.0.0.1:4816/mcp` (`RZ_AGENT_PORT` overrides; falls back
-to an ephemeral port). Any MCP client can drive the editor — 100 tools cover
+to an ephemeral port). Any MCP client can drive the editor — 107 tools cover
 opening documents, inspecting and rendering the canvas (the agent *sees* the
 image as PNG — `render`'s `channel` shows ONE plane as a grayscale PNG
 instead — and `sample_color` reads single pixels off the flattened
@@ -768,7 +861,10 @@ without resampling a pixel; `get_metadata` reports which EXIF/XMP/IPTC
 packets the document carries and how big they are; `get_document` reports
 all three, and `save_copy` takes `embed_profile` and `strip_metadata` and
 names what the chosen format actually wrote),
-undo/redo, and exporting. Agent edits run on the main thread through the same edit path
+undo/redo, Actions (`list_actions`, `run_action`, `save_action`,
+`delete_action`, and `start_recording` / `stop_recording`, which record the
+USER's session and hand the steps back), and exporting.
+Agent edits run on the main thread through the same edit path
 as the UI: each tool call is one undo step, marks the document edited, and
 updates the open window live. With [goose](https://github.com/aaif-goose/goose):
 

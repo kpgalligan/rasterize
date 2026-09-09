@@ -51,7 +51,18 @@ extension EditorViewController {
             .fill(
                 x: Int(point.x), y: Int(point.y), rgba: rgba,
                 tolerance: Int(options.tolerance.rounded()), contiguous: options.contiguous),
-            mask: canvas.selection?.maskBytes())
+            mask: canvas.selection?.maskBytes(),
+            // The AUTHORED colour, not the gray it becomes: the `fill` tool
+            // performs the same coverage conversion for a plane target
+            // (`PlaneAlgebra.coverageColor`), so recording the gray would
+            // convert it twice.
+            record: .fill(
+                at: point,
+                color: paintColor.withAlphaComponent(
+                    paintColor.alphaComponent * CGFloat(opacity)),
+                tolerance: Int(options.tolerance.rounded()),
+                contiguous: options.contiguous,
+                target: target.agentName(in: document.doc)))
     }
 
     /// The gradient tool's drag while a plane or channel is targeted.
@@ -80,7 +91,14 @@ extension EditorViewController {
         document.applyPlaneScratchEdit(
             "Gradient", target,
             .gradient(from: a, to: b, start: start, end: end, kind: kind),
-            mask: canvas.selection?.maskBytes())
+            mask: canvas.selection?.maskBytes(),
+            // The authored colours, for the reason `fillPlane` gives.
+            record: .gradient(
+                from: a, to: b,
+                start: fade(options.reverse ? backgroundColor : paintColor),
+                end: fade(options.reverse ? paintColor : backgroundColor),
+                radial: options.typeIndex == 1,
+                target: target.agentName(in: document.doc)))
     }
 
     /// A tool colour as the opaque gray a plane is filled with —

@@ -1,6 +1,6 @@
 # From Compositor to Photo Editor: a Gap Review
 
-**Status: in progress (updated 8 September 2026) — phases 1 to 7 of the order in section 4 have shipped: §3F rows 1–6 and, with them, §3H's guides / rulers / grid / snapping row; section 0 records what landed, what was decided along the way, and where to restart.** A
+**Status: in progress (updated 8 September 2026) — steps 1 to 8 of the order in section 4 have shipped, the last of them §3A's camera-RAW row and the whole of §3J (Actions, Batch, Repeat Last Filter, the command palette); what remains is the breadth of section 3. Section 0 records what landed, what was decided along the way, and where to restart.** A
 fresh-eyes review of the shipped feature set against what a working
 photographer actually reaches for in Photoshop, followed by a large, sized
 catalog of what to build. Companion to `next-features.md` (whose open
@@ -1121,9 +1121,85 @@ Decisions worth knowing:
   once per gesture, from a bottom-up fold); and the View menu's checkmarks
   and radio marks.
 
+### Phase 8 — RAW develop and Actions (§3A row 6 and the whole of §3J): shipped on `refactor`
+
+Section 4's step 8, both halves. The commit hash goes in the follow-up
+commit, as 7b's did. **This phase changed no Rust**: no new `rz_*` export, no
+`RZDC_VERSION` bump (still 8), core tests still **728 / 49 binaries**.
+Everything RAW is a platform decode reaching the core through the existing
+`rz_image_from_rgba` seam (the HEIC / Live Photo precedent), and an Action is
+a sidecar JSON file in Application Support, not document state. MCP: 100 →
+**107** tools; 24 new Swift files. Decisions worth knowing:
+
+- **The recorder is an explicit `record:` PARAMETER on `ImageDocument`'s four
+  commit entry points** (`applyEdit`, `applyGuideEdit`, `setGroupExpanded`,
+  `endLiveEdit`) and the nine forwarders above them — not a caller-armed
+  global slot, and the UI does **not** route through the MCP handlers. The
+  two halves genuinely diverge (UI Sharpen is 1.5 against the catalog's 1.0,
+  the UI prompts before rasterizing where the agent reports it, the UI reads
+  the ambient plane target), so making the UI call the handlers would
+  re-litigate a dozen visible behaviours, and a slot is unsound because
+  `performLayerEdit`'s three refusals return *before* any commit and would
+  leave it armed. As a parameter with no default, a new edit path **does not
+  compile** until it states its step, and a refused path carries its step
+  away with it. The vocabulary is one reviewable file, `ActionSteps.swift`.
+  The agent half needs one line, in `AgentServer.execute`, covering all 107
+  tools, the HTTP server and the assistant panel at once.
+- **An unrecordable edit produces a VISIBLE `__unrecorded` placeholder**,
+  named, refused at replay — never a silent hole. The standing gaps are
+  Paste, Quick Mask (its exit hands back a raw coverage mask no `select_*`
+  can express), a ⇧-click Auto-Select and a multi-layer Move; the rest are
+  conditional fallbacks that fire only when a symbol cannot be formed (a
+  clone stroke with no latched source, a channel whose name will not read).
+- **Symbols are `$layer` / `$layers` / `$guide` only.** Canvas geometry — x,
+  y, width, points, offsets, guide positions — is recorded ABSOLUTE and
+  replayed literally, because proportional remapping is right for a crop and
+  wrong for a 12 px text baseline; `recorded_canvas` carries the size so the
+  player can *say* the sizes differ rather than guess. Do not add
+  "smart" remapping later without re-reading that paragraph in `Action.swift`.
+- **Replay is ONE undo step per action.** That was made possible by hoisting
+  `performGroupedEdit`'s flush into `withUndoGroup` (`UndoGrouping.swift`) and
+  making the drain **level-relative**: the absolute `while groupingLevel > 0`
+  drain was correct only off the event path, and would close AppKit's own
+  implicit event group when a replay runs from a button, ⌃F or the palette.
+- **`select_all` was added to close a parity gap that predates the phase.**
+  Select All had been user-visible with no twin since the beginning, and
+  recording it as a literal `select_rect` would have selected 4000 × 3000 of a
+  1600 × 1200 batch file — the most natural first step of an action, failing
+  in exactly the case §3J exists for.
+- **A RAW is developed ONCE, at open.** `CIRAWFilter` on the Swift side
+  behind an app-modal Develop window (`ModalCardWindowController`, the first
+  `NSApp.runModal` in the app — a sheet is impossible because `read(from:)`
+  runs before there is a window or a document, and "Cancel opens nothing"
+  needs the modal). Every knob starts at the value the FILE reports, never a
+  house default; a control the file's decoder does not support is disabled
+  and named in a footnote; the document takes the decode's own colour space
+  (measured Display P3 for a synthetic DNG — **never assume sRGB**) and the
+  ppi the file states. Highlight recovery exists but is macOS 26+, so its row
+  is hidden below that. An agent open is always headless
+  (`RawImportRequest.mode`), because a dialog on the trampoline's
+  `DispatchQueue.main.sync` would hang the MCP connection. No re-develop, no
+  RAW layer type — Revert re-develops with the settings the user chose.
+- **Batch deliberately has no MCP twin.** It performs no edit of its own: it
+  is `open_document` + `run_action` + `save_copy` in a loop, and an agent
+  already has all three. It is the second `ModalCardWindowController`.
+- Two deferred gaps written down rather than hidden: **EXIF is dropped on the
+  RAW and HEIC paths** not because the core cannot carry it —
+  `rz_doc_set_metadata` exists and is wrapped — but because nothing
+  re-serialises ImageIO's property dictionary into an APP1 packet; and a
+  **recorded Move drag replays as an absolute snap**, because
+  `set_layer_properties` has no relative form.
+- Verified by reading and `make typecheck` rather than exercised, and worth a
+  by-hand pass: **no real camera RAW was decoded** anywhere in this phase (the
+  fixtures were hand-built DNGs Apple's decoder accepts), so `previewImage`,
+  the portrait mattes, realistic decode times and the `{TIFF}`/`{Exif}` ppi
+  fallback's success path are all unexercised; and no MCP call can reach a
+  modal window, so the Develop dialog, the Batch run and the command palette
+  were driven by reading only.
+
 ### Remaining order
 
-Section 4's step 8 next — RAW develop and Actions — then the breadth of
+Section 4 is done through step 8; what remains is the breadth of
 section 3. The REST of §3H (arbitrary canvas rotation and auto-straighten,
 perspective crop, the skew / distort / warp submodes, Content-Aware Scale,
 Trim and Reveal All) is untouched and is a phase of its own whenever it is
@@ -1345,7 +1421,7 @@ mode}`, `list_channels`, `target` on the paint tools, `render {channel}`.
 | Embed the profile on export — SHIPPED | S | PNG, JPEG, TIFF, WebP encoders take profile bytes. |
 | Preserve EXIF / XMP / IPTC on export, orientation reset to 1 — SHIPPED | M | Keep the raw metadata blobs from open and re-splice after encoding (the `img-parts` crate does this for JPEG/PNG/WebP). Export panel gets a "strip metadata" toggle. |
 | Image resolution (ppi) and print size in Image Size; File > Print — SHIPPED | S/M | `RzDocument` gains a ppi pair; the `.rz` bump carries it. |
-| Camera RAW (CR3, NEF, ARW, DNG, ProRAW) via Core Image's `CIRAWFilter` | M | Swift-side decode, like HEIC today. A small "Develop" sheet before the pixels land — exposure, temperature/tint, noise reduction, lens correction — is the whole reason to own a RAW workflow. Highest photo value per day in this table. |
+| Camera RAW (CR3, NEF, ARW, DNG, ProRAW) via Core Image's `CIRAWFilter` — SHIPPED | M | Swift-side decode, like HEIC today. A small "Develop" sheet before the pixels land — exposure, temperature/tint, noise reduction, lens correction — is the whole reason to own a RAW workflow. Highest photo value per day in this table. |
 | HEIC export; AVIF and JPEG XL open/export | S/M | `image` has AVIF behind a feature flag; JXL via `jxl-oxide`. HEIC export through ImageIO on the Swift side. |
 | Histogram panel with per-channel view and clipping warning — SHIPPED | S | Levels and Curves want it too. A parallel scan with merged bins (GIMP §8). |
 | Info panel: cursor position, RGB/HSB/Lab readout, selection bounds — SHIPPED | S | Table over values the eyedropper already samples. |
@@ -1496,7 +1572,7 @@ filter opts in.
 - **Autosave and version browsing** on `.rz` via `NSDocument`'s standard
   machinery, which the app already sits on. S.
 
-### 3J. Automation — the distinctive one
+### 3J. Automation — the distinctive one — SHIPPED (phase 8)
 
 The MCP catalog is already a complete scripting surface, and the
 assistant already drives it. **Actions** are recorded tool-call sequences:
@@ -1510,7 +1586,9 @@ as JSON. **M**, and unlike every other item here it compounds with each
 new tool that ships.
 
 Two smaller ones in the same spirit: **Filters > Repeat Last (⌃F)** and
-a **command palette** (⌘K-style fuzzy search over the whole menu).
+a **command palette** (⌘K-style fuzzy search over the whole menu). Both
+shipped in phase 8; the palette took ⇧⌘K, because ⌘K is Crop and a shortcut
+already in the user's fingers is never silently renegotiated.
 
 ---
 
@@ -1532,7 +1610,7 @@ a **command palette** (⌘K-style fuzzy search over the whole menu).
 7. ✅ **Groups, lock, multi-select** (§3F rows 1–6) and
    **guides / rulers / grid / snapping** (§3H's last row) — the workflow
    layer that 20-layer documents demand.
-8. ▶ **RAW develop** (§3A) and **Actions** (§3J) — the two features that
+8. ✅ **RAW develop** (§3A) and **Actions** (§3J) — the two features that
    would make this app a reason to leave Photoshop rather than a
    replacement for it.
 

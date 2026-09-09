@@ -40,7 +40,7 @@ extension EditorViewController {
         // the top level, so the number reads as "the next one".
         let name = "Group \(doc.layerTree.topLevel().count + 1)"
         var report: (group: Int, cleared: [Int], reordered: [Int])?
-        document.applyEdit("Group Layers") { doc in
+        document.applyEdit("Group Layers", record: .groupLayers(name: name)) { doc in
             guard let result = doc.groupLayers(indices, name: name) else { return nil }
             report = (result.group, result.clearedClip, result.reordered)
             return result.document
@@ -123,7 +123,7 @@ extension EditorViewController {
         // was baseless inside the group and would have gained a clip base at
         // the parent level, so its clipping mask was released instead.
         var clearedClip: [Int] = []
-        document.applyEdit("Ungroup Layers") { doc in
+        document.applyEdit("Ungroup Layers", record: .ungroupLayers) { doc in
             guard let result = doc.ungroupLayer(idx) else { return nil }
             clearedClip = result.clearedClip
             return result.document
@@ -292,7 +292,12 @@ extension EditorViewController {
         }
         let clipped = !doc.layerClipped(document.activeLayerIndex)
         document.applyToSelectedLayers(
-            clipped ? "Create Clipping Mask" : "Release Clipping Mask"
+            clipped ? "Create Clipping Mask" : "Release Clipping Mask",
+            // `set_layer_clipped` clips ONE layer; a multi-selection has no
+            // twin and records the visible placeholder.
+            record: document.selectedLayerIndices.count == 1
+                ? .setLayerClipped(clipped)
+                : .unrecorded(clipped ? "Create Clipping Mask" : "Release Clipping Mask")
         ) { $0.withLayerClipped($1, clipped: clipped) }
         if clipped { noteClippingOverPassThroughGroup(below) }
         updateStatus()
@@ -414,8 +419,19 @@ extension EditorViewController {
         else { return }
         if modifiers.contains(.shift) {
             setSelectedLayers(document.layerSelection.adding(hit))
+            // `auto_select_layer` has no ADD mode, so the ⇧-click form has no
+            // twin. Recorded as the visible placeholder rather than as the
+            // plain click it is not.
+            ActionRecorder.shared.record(.unrecorded("Auto-Select (add)"))
         } else {
             setActiveLayer(hit)
+            // Geometric, deliberately: an Auto-Select click replays on a
+            // different document without a layer name to miss.
+            // `setLayerSelection` itself is NOT hooked — it is re-entered by
+            // the app on every panel reload — so the gesture records here.
+            ActionRecorder.shared.record(
+                .autoSelectLayer(
+                    at: point, group: ToolOptionsStore.shared.move.autoSelectIndex == 1))
         }
     }
 }

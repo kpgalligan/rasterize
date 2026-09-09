@@ -122,7 +122,13 @@ extension EditorViewController {
         // wrapper the Spot Healing Brush's commit uses, whose worst case is
         // the shorter of the two.
         Self.whileBusy {
-            document.applyRasterizingEdit("Patch", layer: index) { current in
+            document.applyRasterizingEdit(
+                "Patch", layer: index,
+                record: .patchRegion(
+                    region: result.region, offset: result.offset,
+                    direction: PatchSession.isDestination ? "destination" : "source",
+                    sampleAllLayers: ToolOptionsStore.shared.patch.sampleAllLayers)
+            ) { current in
                 do {
                     // strength 1: the Patch tool has no Opacity dial (neither
                     // does Photoshop's), and a partial heal here would be a

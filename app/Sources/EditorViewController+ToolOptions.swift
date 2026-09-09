@@ -158,7 +158,11 @@ extension EditorViewController {
                         get: { ToolOptionsStore.shared.select.growAmount },
                         set: { [weak self] value in
                             ToolOptionsStore.shared.select.growAmount = value
-                            self?.applySelectionMorph { selection in
+                            self?.applySelectionMorph(
+                                record: .modifySelection(
+                                    operation: value >= 0 ? "grow" : "shrink",
+                                    radius: abs(value))
+                            ) { selection in
                                 value >= 0
                                     ? selection.grown(by: value)
                                     : selection.shrunk(by: -value)
@@ -172,7 +176,9 @@ extension EditorViewController {
                         get: { ToolOptionsStore.shared.select.borderWidth },
                         set: { [weak self] value in
                             ToolOptionsStore.shared.select.borderWidth = value
-                            self?.applySelectionMorph { $0.bordered(width: value) }
+                            self?.applySelectionMorph(
+                                record: .modifySelection(operation: "border", width: value)
+                            ) { $0.bordered(width: value) }
                         })),
                 OptionDescriptor(
                     id: "select.smooth", microLabel: "Smooth", overflowLabel: "Smooth",
@@ -182,7 +188,9 @@ extension EditorViewController {
                         get: { ToolOptionsStore.shared.select.smoothRadius },
                         set: { [weak self] value in
                             ToolOptionsStore.shared.select.smoothRadius = value
-                            self?.applySelectionMorph { $0.smoothed(by: value) }
+                            self?.applySelectionMorph(
+                                record: .modifySelection(operation: "smooth", radius: value)
+                            ) { $0.smoothed(by: value) }
                         })),
             ]),
             OptionCluster([
@@ -204,13 +212,18 @@ extension EditorViewController {
 
     /// A morphology field committed with a selection on canvas: apply the
     /// op to it (the field's value is remembered either way).
-    private func applySelectionMorph(_ transform: (CanvasSelection) -> CanvasSelection?) {
+    private func applySelectionMorph(
+        record: [ActionStep], _ transform: (CanvasSelection) -> CanvasSelection?
+    ) {
         guard let selection = canvas.selection, !canvas.quickMaskActive else { return }
         guard let changed = transform(selection) else {
             NSSound.beep()
             return
         }
         canvas.setSelection(changed)
+        // After the change, so a refused op records nothing — the same rule
+        // the document's commit hooks follow.
+        ActionRecorder.shared.record(record)
     }
 
     // MARK: - Crop

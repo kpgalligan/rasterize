@@ -94,11 +94,39 @@ final class AgentServer {
     /// in-band (isError: true) so the model can read and correct them.
     func execute(tool: String, argumentsJSON: String) -> String {
         assert(Thread.isMainThread)
+        // A replay owns the app for the length of its run: a call that
+        // landed inside one would be folded into the action's single undo
+        // entry and silently reverted with it (ActionPlayer.replayRefusal).
+        if let refusal = ActionPlayer.replayRefusal(tool: tool) { return errorResult(refusal) }
         let arguments =
             (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8)))
             as? [String: Any] ?? [:]
         do {
-            return try dispatch(tool, arguments)
+            // The canvas this call was WRITTEN against, sampled before it
+            // runs: a crop, a rotate or a resize has replaced the handle by
+            // the time the step is recorded, and the coordinates in it belong
+            // to the size it started from (ActionRecorder.noteCanvas). nil
+            // for a call that has no document yet — it creates its own — and
+            // the recorder then reads the size the call produced.
+            let before = try? target(arguments)
+            let canvas = before?.doc.map { (width: $0.width, height: $0.height) }
+            let result = try dispatch(tool, arguments)
+            // The agent half of the recording seam: ONE line covering all
+            // 107 tools, the HTTP MCP server and the assistant panel alike.
+            // Only a call that SUCCEEDED is recorded, and a read-only tool
+            // records nothing (ActionCatalogFacts.nonRecordable).
+            // `target(arguments)` resolves the SAME document the handler
+            // just edited — the id when one was passed, the front or only
+            // document otherwise — so the recording's canvas is bound to
+            // what the call touched rather than to whatever window happens
+            // to be open (ActionRecorder.noteCanvas). The size above is
+            // carried only when that is the same document it was read from,
+            // so a call that made a new one cannot be filed under the old
+            // one's canvas.
+            let after = try? target(arguments)
+            ActionRecorder.shared.recordAgentCall(
+                tool, arguments, on: after, canvas: after === before ? canvas : nil)
+            return result
         } catch let error as ToolError {
             return errorResult(error.message)
         } catch {
@@ -118,7 +146,13 @@ final class AgentServer {
     /// singleton. The single source of truth for what the server dispatches:
     /// catalogJSON() (AgentCatalog.swift) must describe exactly these names,
     /// and start() asserts the two sets match in debug builds.
-    private static let handlers: [String: (AgentServer) -> ([String: Any]) throws -> String] = [
+    /// Internal, not private: `Action.isKnownStepTool` reads these keys from
+    /// AgentServer+Actions.swift to refuse a recorded step that names no
+    /// tool, and Swift's type-scope `private` is file-scoped, so even an
+    /// extension of this very type cannot see it. Promoting the table is
+    /// strictly smaller than adding an `isKnownTool` method to this frozen
+    /// file, and `catalogParityFailure` below already reads it.
+    static let handlers: [String: (AgentServer) -> ([String: Any]) throws -> String] = [
         // Documents
         "list_documents": listDocuments,
         "open_document": openDocument,
@@ -210,6 +244,7 @@ final class AgentServer {
         "select_ellipse": selectEllipse,
         "select_polygon": selectPolygon,
         "select_magic_wand": selectMagicWand,
+        "select_all": selectAll,
         // Vision subject segmentation (AgentServer+SubjectSelection.swift)
         "select_subject": selectSubject,
         "deselect": deselect,
@@ -250,6 +285,16 @@ final class AgentServer {
         "undo": undo,
         "redo": redo,
         "save_copy": saveCopy,
+        // Actions — recorded sequences of these very tools
+        // (AgentServer+Actions.swift). Each mirrors the Actions window or a
+        // File > Automate item; Batch deliberately has none, because it is
+        // open_document + run_action + save_copy in a loop.
+        "list_actions": { $0.listActions },
+        "run_action": { $0.runAction },
+        "save_action": { $0.saveAction },
+        "delete_action": { $0.deleteAction },
+        "start_recording": { $0.startRecording },
+        "stop_recording": { $0.stopRecording },
     ]
 
     /// The debug-build enforcement behind the table's contract: nil when
@@ -292,6 +337,20 @@ final class AgentServer {
         try selectShape(a) { rect in .ellipse(rect) }
     }
 
+    /// Mirrors Select > All (EditorViewController.selectAll). The same
+    /// `applySelection` helper the marquee tools use, so feathering and the
+    /// combine modes behave identically — and, being canvas-RELATIVE by
+    /// construction, it is what lets a recorded Select All replay on a
+    /// differently sized document.
+    private func selectAll(_ a: [String: Any]) throws -> String {
+        let document = try target(a)
+        guard let doc = document.doc else { throw ToolError(message: "Document has no image") }
+        return try applySelection(
+            document,
+            .rect(CGRect(x: 0, y: 0, width: doc.width, height: doc.height)),
+            mode: selectionMode(a))
+    }
+
     private func undo(_ a: [String: Any]) throws -> String { try undoRedo(a, redo: false) }
 
     private func redo(_ a: [String: Any]) throws -> String { try undoRedo(a, redo: true) }
@@ -303,6 +362,13 @@ final class AgentServer {
     }
 
     private func id(for document: ImageDocument) -> Int {
+        // Prune first: this map only ever INSERTED, and its key is the
+        // object's address, so a closed document's entry would be inherited
+        // by whatever ImageDocument the allocator later put in the same
+        // place — after which document_id resolved to the wrong document.
+        // A batch of 200 files makes that certain rather than unlikely.
+        let live = Set(openDocuments().map(ObjectIdentifier.init))
+        documentIDs = documentIDs.filter { live.contains($0.key) }
         let key = ObjectIdentifier(document)
         if let existing = documentIDs[key] { return existing }
         documentIDs[key] = nextDocumentID
@@ -363,10 +429,23 @@ final class AgentServer {
             throw ToolError(message: "No file at \(url.path)")
         }
         let controller = NSDocumentController.shared
+        // Parsed BEFORE the already-open short-circuit, so a bad value is
+        // refused by name whether or not the file happens to be open — and so
+        // a caller who asked for a different develop is told their settings
+        // were dropped rather than handed the first develop in silence.
+        // A camera RAW develops HEADLESSLY for an agent — never the modal
+        // Develop dialog, which would hang this call (AgentServer+Raw.swift).
+        let raw = try rawOpenSettings(a)
         if let existing = controller.document(for: url) as? ImageDocument {
-            return try jsonResult(["already_open": true, "document": summary(existing)])
+            var result: [String: Any] = ["already_open": true, "document": summary(existing)]
+            if let note = rawAlreadyOpenNote(requested: raw, document: existing) {
+                result["note"] = note
+            }
+            return try jsonResult(result)
         }
         let type = try controller.typeForContents(of: url)
+        RawImportRequest.mode = .headless(raw ?? RawDevelopSettings())
+        defer { RawImportRequest.mode = .ask }
         guard let document = try controller.makeDocument(withContentsOf: url, ofType: type)
             as? ImageDocument
         else {
@@ -376,7 +455,9 @@ final class AgentServer {
         document.makeWindowControllers()
         document.showWindows()
         controller.noteNewRecentDocumentURL(url)
-        return try jsonResult(["document": summary(document)])
+        var result: [String: Any] = ["document": summary(document)]
+        if let note = rawOpenNote(requested: raw, document: document) { result["note"] = note }
+        return try jsonResult(result)
     }
 
     private func getDocument(_ a: [String: Any]) throws -> String {
@@ -625,12 +706,16 @@ final class AgentServer {
         guard let current = document.doc, let updated = transform(current) else {
             throw ToolError(message: "\(actionName) failed — check the parameters")
         }
-        let manager = document.undoManager
-        manager?.beginUndoGrouping()
-        document.applyEdit(actionName) { _ in updated }
-        manager?.endUndoGrouping()
-        while let manager = manager, manager.groupingLevel > 0 {
-            manager.endUndoGrouping()
+        // The explicit group AND its flush, hoisted into withUndoGroup
+        // (UndoGrouping.swift) so the drain is LEVEL-RELATIVE. Off the event
+        // path — which is every call that arrives through a trampoline's
+        // dispatch-to-main — the base is 0 and this is byte for byte the
+        // absolute drain it replaces. Called from inside a real AppKit event,
+        // as ActionPlayer does, it leaves the event's own implicit group for
+        // AppKit to close, and nests cleanly inside the player's group so a
+        // whole action collapses to one undo entry.
+        withUndoGroup(document.undoManager) {
+            document.applyEdit(actionName, record: .notACommand) { _ in updated }
         }
     }
 

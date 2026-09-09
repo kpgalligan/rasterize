@@ -175,7 +175,10 @@ extension EditorViewController {
             // refused and `applyEdit` beeped with nothing said.
             guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_PIXELS) else { return }
             let beforeEdit = document.doc
-            document.applyEdit("Edit Text Layer") { doc in
+            document.applyEdit(
+                "Edit Text Layer",
+                record: .editTextLayer(payload, layerNamed: info.name)
+            ) { doc in
                 guard let described = doc.rerenderingDescribedLayer(
                     idx, .text(payload), anchor: anchor)
                 else { return nil }
@@ -198,7 +201,9 @@ extension EditorViewController {
         // goes above the whole subtree, so `below + 1` would select the
         // wrong row (§4.5's one definition).
         let landing = before?.insertionIndex(above: below) ?? below + 1
-        document.applyEdit("Add Text Layer") {
+        document.applyEdit(
+            "Add Text Layer", record: .addTextLayer(payload, at: anchor)
+        ) {
             $0.addingDescribedLayer(above: below, .text(payload), anchor: anchor, name: name)
         }
         guard document.doc !== before else { return }

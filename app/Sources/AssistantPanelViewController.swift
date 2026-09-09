@@ -239,7 +239,8 @@ final class AssistantPanelViewController: NSViewController {
             Coordinates start at the canvas top-left corner with y increasing downward. Use the \
             render tool to look at the canvas before visual edits and again afterwards to \
             verify the result. Keep replies to a sentence or two; never repeat tool output \
-            the user can already see.
+            the user can already see. \
+            \(AssistantActionAuthoring.systemPromptSection)
             """
     }
 

@@ -151,7 +151,11 @@ final class LivePhotoFrameSheetController: NSViewController {
         // Choosing the moment already showing is not an edit: no undo step,
         // no dirty flag, and no beep from applyEdit's nil path.
         guard seconds != original.time else { return }
-        document.applyEdit("Select Live Photo Frame") {
+        document.applyEdit(
+            "Select Live Photo Frame",
+            record: .setLivePhotoFrame(
+                time: seconds, layerNamed: document.doc?.layerInfo(idx)?.name)
+        ) {
             $0.settingLivePhotoFrame(idx, seconds: seconds)
         }
     }

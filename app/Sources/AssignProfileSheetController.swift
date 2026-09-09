@@ -168,7 +168,11 @@ final class AssignProfileSheetController: NSViewController {
         dismiss(self)
         // `assigningProfile` answers nil for bytes the document already
         // carries, which `applyEdit` turns into a beep and no undo step.
-        document.applyEdit("Assign Profile") { $0.assigningProfile(bytes) }
+        document.applyEdit(
+            "Assign Profile",
+            record: .profileCommand(
+                "assign_profile", choice, note: "Image ▸ Assign Profile…")
+        ) { $0.assigningProfile(bytes) }
     }
 
     @objc private func cancelClicked(_ sender: Any?) {

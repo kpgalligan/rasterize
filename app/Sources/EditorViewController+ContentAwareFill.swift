@@ -115,7 +115,15 @@ extension EditorViewController {
         // feedback a blocked main thread can still deliver, and the Spot
         // Healing Brush's shorter commit already wears it.
         Self.whileBusy {
-            document.applyRasterizingEdit("Content-Aware Fill", layer: index) { current in
+            document.applyRasterizingEdit(
+                "Content-Aware Fill", layer: index,
+                // The seed crosses as a NON-NEGATIVE integer, which is the
+                // tool's own contract; the sheet's field cannot produce more
+                // than Int can hold, and a clamp keeps the conversion total.
+                record: .contentAwareFill(
+                    ring: ringPx, seed: Int(min(seed, UInt64(Int.max))),
+                    sampleAllLayers: sampleAllLayers)
+            ) { current in
                 do {
                     return try current.contentAwareFilled(
                         index, mask: mask, ring: ringPx, seed: seed,

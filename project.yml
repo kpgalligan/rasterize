@@ -107,6 +107,16 @@ targets:
             CFBundleTypeRole: Editor
             NSDocumentClass: Rasterize.ImageDocument
             LSHandlerRank: Alternate
+          # One umbrella type: every vendor RAW UTI (CR3, CR2, NEF, NRW, ARW,
+          # DNG including Apple ProRAW, ORF, RW2, RAF, SRW, PEF) conforms to
+          # it, and public.tiff does NOT — so a plain TIFF keeps its own core
+          # decode path. Opening one puts up the Develop dialog first
+          # (ImageDocument.openRaw); Core Image does the decode.
+          - CFBundleTypeName: Camera RAW Image
+            LSItemContentTypes: [public.camera-raw-image]
+            CFBundleTypeRole: Editor
+            NSDocumentClass: Rasterize.ImageDocument
+            LSHandlerRank: Alternate
     preBuildScripts:
       - name: Build Rust Core
         script: |

@@ -104,13 +104,27 @@ extension EditorViewController {
                 shape: .mask(bytes), canvasWidth: doc.width, canvasHeight: doc.height)
         else {
             switch mode {
-            case .replace, .intersect: canvas.setSelection(nil)
+            case .replace, .intersect:
+                // The load deselected, so it records what it DID — the same
+                // `.deselect` Select ▸ Deselect and Escape record. Returning
+                // before the `record` below (which describes a load that
+                // produced a selection) left this outcome as a silent hole,
+                // and a replay then carried the previous selection into
+                // every step after it.
+                if canvas.selection != nil { ActionRecorder.shared.record(.deselect) }
+                canvas.setSelection(nil)
             case .add, .subtract: break
             }
             return
         }
         // An all-zero combination comes back nil here too, and deselects.
         canvas.setSelection(CanvasSelection.combine(canvas.selection, with: selection, mode: mode))
+        // The command boundary for a load: `ImageCanvasView.setSelection` is
+        // a per-tick setter and is deliberately not hooked (see
+        // `ActionRecorder`), so each selection COMMAND records for itself.
+        ActionRecorder.shared.record(
+            .loadSelection(
+                from: source, mode: mode.agentName, invert: invert, in: doc))
     }
 
     /// Writes the current selection into a channel as ONE undo step: a new
@@ -141,11 +155,17 @@ extension EditorViewController {
             // than refuse if that ever stops being true.
             let width = selection.canvasWidth
             let height = selection.canvasHeight
-            document.applyEdit("Save Selection") { doc in
+            document.applyEdit(
+                "Save Selection",
+                record: .saveSelection(to: destination, mode: mode.agentName, in: doc)
+            ) { doc in
                 doc.addingChannel(name: name, plane: bytes, width: width, height: height)
             }
         case .channel(let index):
-            document.applyEdit("Save Selection") { doc in
+            document.applyEdit(
+                "Save Selection",
+                record: .saveSelection(to: destination, mode: mode.agentName, in: doc)
+            ) { doc in
                 // Read the channel INSIDE the transform: it is the handle
                 // the edit is being built on, not the one the sheet saw.
                 guard let existing = doc.channelPlane(index) else { return nil }

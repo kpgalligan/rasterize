@@ -312,6 +312,19 @@ extension EditorViewController {
         // The canvas names the action for a mask stroke only; the target
         // knows the rest, so its own name wins.
         let actionName = target.strokeActionName(erasing: currentTool == .eraser, in: doc)
+        // A COVERAGE stroke commits here and returns from `onStrokeEnd`
+        // before `endLiveEdit`, so this is its one record point — the same
+        // step a layer stroke records, with the target naming the mask, the
+        // plane or the channel it landed on.
+        //
+        // Built through `gestureRecord`, which is `recordGesture`'s guard on
+        // its own: this path commits through `applyEdit` /
+        // `applyRasterizingEdit`, whose `record:` the `lastRepeatable` latch
+        // makes an ordinary eager parameter, so without it every mask, plane
+        // and channel stroke paid the whole polyline-to-JSON build at mouse-up
+        // with nothing recording — the exact cost `endLiveEdit`'s
+        // `@autoclosure` removed from the layer-stroke path.
+        let record = ActionRecorder.shared.gestureRecord(strokeRecord(actionName))
         switch target {
         case .layer:
             return
@@ -320,7 +333,7 @@ extension EditorViewController {
                 NSSound.beep()
                 return
             }
-            document.applyEdit(actionName) { current in
+            document.applyEdit(actionName, record: record) { current in
                 bytes.withUnsafeBufferPointer { buffer -> RasterDocument? in
                     guard let base = buffer.baseAddress else { return nil }
                     return current.paintingLayerMask(idx, overlay: base, w: width, h: height)
@@ -329,7 +342,7 @@ extension EditorViewController {
         case .plane(let plane):
             // A plane stroke rewrites the layer's PIXELS, so it contradicts
             // a text/shape/Live Photo description exactly as a brush does.
-            document.applyRasterizingEdit(actionName, layer: idx) { current in
+            document.applyRasterizingEdit(actionName, layer: idx, record: record) { current in
                 bytes.withUnsafeBufferPointer { buffer -> RasterDocument? in
                     guard let base = buffer.baseAddress else { return nil }
                     return current.paintingLayerPlane(
@@ -339,7 +352,7 @@ extension EditorViewController {
         case .channel(let index):
             // A channel is document state: no layer pixels change, so no
             // description is contradicted and applyEdit is the right entry.
-            document.applyEdit(actionName) { current in
+            document.applyEdit(actionName, record: record) { current in
                 bytes.withUnsafeBufferPointer { buffer -> RasterDocument? in
                     guard let base = buffer.baseAddress else { return nil }
                     return current.paintingChannel(index, overlay: base, w: width, h: height)
@@ -373,7 +386,12 @@ extension EditorViewController {
         guard channelBudgetAllowsOneMore(doc) else { return }
         let name = doc.nextChannelName
         let plane = [UInt8](repeating: 0, count: doc.width * doc.height)
-        document.applyEdit("New Channel") {
+        document.applyEdit(
+            "New Channel",
+            record: .channelCommand(
+                "add_channel", ["name": name, "from": "empty"],
+                note: "Channels panel: New Channel")
+        ) {
             $0.addingChannel(name: name, plane: plane, width: doc.width, height: doc.height)
         }
     }
@@ -386,7 +404,11 @@ extension EditorViewController {
             return
         }
         guard channelBudgetAllowsOneMore(doc) else { return }
-        document.applyEdit("Duplicate Channel") { $0.duplicatingChannel(index) }
+        document.applyEdit(
+            "Duplicate Channel",
+            record: Self.channelStep(
+                "duplicate_channel", doc, index, note: "Channels panel: Duplicate Channel")
+        ) { $0.duplicatingChannel(index) }
     }
 
     /// The channel budget, asked before every UI path that CREATES a channel
@@ -416,7 +438,12 @@ extension EditorViewController {
         // The target goes with the channel; syncPaintTarget would clamp it
         // anyway, this just avoids a frame of a stale ring.
         setPaintTarget(.layer)
-        document.applyEdit("Delete Channel") { $0.removingChannel(index) }
+        document.applyEdit(
+            "Delete Channel",
+            record: Self.channelStep(
+                "delete_channel", document.doc, index,
+                note: "Channels panel: Delete Channel")
+        ) { $0.removingChannel(index) }
     }
 
     @objc func channelOptions(_ sender: Any?) {
@@ -434,7 +461,12 @@ extension EditorViewController {
             NSSound.beep()
             return
         }
-        document.applyEdit("Invert Channel") { $0.invertingChannel(index) }
+        document.applyEdit(
+            "Invert Channel",
+            record: Self.channelStep(
+                "invert_channel", document.doc, index,
+                note: "Channels panel: Invert Channel")
+        ) { $0.invertingChannel(index) }
     }
 
     /// The channels panel's inline rename, addressed by the channel's STABLE
@@ -449,10 +481,31 @@ extension EditorViewController {
     /// undo step.
     func renameChannel(id: UInt64, to name: String) {
         guard let document = document else { return }
-        document.applyEdit("Rename Channel") { current in
+        // Named by the channel's OLD name, which is what the replay document
+        // still carries — the same rule a layer rename follows.
+        let record: [ActionStep] =
+            (document.doc?.channelIndex(forID: id))
+            .flatMap { document.doc?.channelInfo($0)?.name }
+            .map {
+                .channelCommand(
+                    "rename_channel", ["channel": $0, "name": name],
+                    note: "Channels panel: rename")
+            } ?? .unrecorded("Rename Channel")
+        document.applyEdit("Rename Channel", record: record) { current in
             guard let index = current.channelIndex(forID: id) else { return nil }
             return current.renamingChannel(index, name)
         }
+    }
+
+    /// A one-channel command, addressed by NAME: names survive the
+    /// renumbering every channel add or delete causes, and they are what
+    /// `list_channels` reports. A channel whose name cannot be read records
+    /// the visible placeholder rather than an unresolvable index.
+    static func channelStep(
+        _ tool: String, _ doc: RasterDocument?, _ index: Int, note: String
+    ) -> [ActionStep] {
+        guard let name = doc?.channelInfo(index)?.name else { return .unrecorded(note) }
+        return .channelCommand(tool, ["channel": name], note: note)
     }
 
     // MARK: - Validation

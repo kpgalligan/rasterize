@@ -346,7 +346,15 @@ class AdjustmentSheet: NSViewController {
         dismiss(self)
         switch mode {
         case .destructive:
-            document.applyToActiveLayer(op.displayName) {
+            // The DESTRUCTIVE half of an adjustment is `apply_filter` with
+            // the op's own name as the filter and its parameters in `params`
+            // — the same shape `applyingAdjustment` takes.
+            document.applyToActiveLayer(
+                op.displayName,
+                record: .filter(
+                    name, ["params": params],
+                    target: document.planeEditTarget.layerEditAgentName(in: document.doc))
+            ) {
                 $0.applyingAdjustment(op: name, params: params)
             }
         case .create(let selection):
@@ -363,7 +371,10 @@ class AdjustmentSheet: NSViewController {
             // Above a GROUP the new entry lands above the whole subtree,
             // so the core answers where it went (§4.5).
             let landing = before?.insertionIndex(above: below) ?? below + 1
-            document.applyEdit("New \(layerName) Layer") {
+            document.applyEdit(
+                "New \(layerName) Layer",
+                record: .addAdjustmentLayer(meta: meta, name: layerName)
+            ) {
                 $0.addingAdjustmentLayer(
                     above: below, name: layerName, meta: meta, selection: selection)
             }
@@ -382,7 +393,11 @@ class AdjustmentSheet: NSViewController {
             // spellings of one picture are the norm rather than the
             // exception (`AdjustmentSchema.sameEffect`).
             guard !AdjustmentSchema.sameEffect(params, original.params, for: op) else { return }
-            document.applyEdit("Edit \(op.displayName) Layer") { doc in
+            document.applyEdit(
+                "Edit \(op.displayName) Layer",
+                record: .editAdjustmentLayer(
+                    meta: meta, layerNamed: document.doc?.layerInfo(idx)?.name)
+            ) { doc in
                 // The layer must still BE an adjustment layer (only an
                 // agent edit can move the stack under an open sheet).
                 guard doc.layerIsAdjustment(idx) else { return nil }

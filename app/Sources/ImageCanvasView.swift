@@ -309,7 +309,25 @@ final class ImageCanvasView: NSView {
     private var cloneDabMask: CGImage?
     /// Latched per stroke with the dab images: an options edit mid-drag
     /// cannot bend a live stroke.
-    private var strokeTip = BrushTip()
+    ///
+    /// `private(set)`, not private: the Actions recorder reads the LATCHED
+    /// tip (`EditorViewController+Actions.strokeRecord`) so a recorded stroke
+    /// carries the hardness, flow, spacing, angle and roundness the stroke
+    /// actually dabbed with rather than whatever the options bar holds later.
+    private(set) var strokeTip = BrushTip()
+
+    /// The stroke's FLATTENED vertices, in canvas pixels — exactly the
+    /// polyline `renderStroke` dabbed along, which is exactly what the
+    /// agent's stroke tools take. Accumulated here rather than rebuilt from
+    /// the spline afterwards: the spline is consumed span by span, and a
+    /// pixel-brush stroke never goes through it at all.
+    private(set) var recordedStrokePoints: [CGPoint] = []
+
+    /// The canvas point a clone or heal stroke sampled FROM — the source the
+    /// stroke's offset was latched against, which is what `clone_stamp` and
+    /// `heal_stroke` take. Not `cloneSource`: with Aligned on, the offset
+    /// outlives the ⌥-click and the real source moves with the brush.
+    private(set) var strokeCloneSource: CGPoint?
     private var strokeLeash = StrokeLeash(position: .zero, radius: 0)
     /// True when Pressure size is on AND the stroke came from a tablet:
     /// dab diameters then track the pen's pressure. Mouse strokes stay
@@ -1308,6 +1326,16 @@ final class ImageCanvasView: NSView {
         onSelectionChange?(new?.bounds)
     }
 
+    /// A canvas rect as `select_rect` / `select_ellipse` spell it. Absolute
+    /// canvas pixels, never remapped — see `ActionSymbol`.
+    private static func rectArguments(_ rect: CGRect) -> [String: Any] {
+        [
+            "x": Int(rect.minX.rounded()), "y": Int(rect.minY.rounded()),
+            "width": max(Int(rect.width.rounded()), 1),
+            "height": max(Int(rect.height.rounded()), 1),
+        ]
+    }
+
     /// Rectangle convenience used by Select All and the marquee drag.
     /// (Named distinctly: setSelection(nil) must stay unambiguous.)
     func setSelectionRect(_ rect: CGRect?) {
@@ -1328,8 +1356,26 @@ final class ImageCanvasView: NSView {
     /// options bar's radius, then combines it with the gesture's base
     /// selection under `mode`. A nil (empty) new shape deselects in replace
     /// mode and keeps the base otherwise.
+    ///
+    /// `record` is what this gesture is, as an action step. It is a
+    /// PARAMETER because only the caller knows which shape it committed —
+    /// and because `setSelection` below is not a command boundary: it fires
+    /// on every mouseDragged tick of a marquee (a few hundred times per
+    /// gesture) and again as a pure side effect whenever the canvas size
+    /// changes, so hooking it would record noise.
+    ///
+    /// An empty new shape records nothing: in replace mode it is the
+    /// click-to-deselect case, which the caller records itself, and in the
+    /// combine modes it restores the base and changes nothing at all.
+    ///
+    /// `record` is an `@autoclosure` for `closeLasso`'s sake: a lasso's step
+    /// carries the whole outline through `ActionArgs.points`, and it was
+    /// built on every closed lasso whether or not anyone was recording. A
+    /// selection gesture is never one of the `lastRepeatable` tools, which is
+    /// what lets `recordGesture` skip it entirely (it asserts as much).
     private func commitSelection(
-        _ new: CanvasSelection?, mode: SelectionCombineMode, base: CanvasSelection?
+        _ new: CanvasSelection?, mode: SelectionCombineMode, base: CanvasSelection?,
+        record: @autoclosure () -> [ActionStep]
     ) {
         guard var new = new else {
             setSelection(mode == .replace ? nil : base)
@@ -1339,6 +1385,7 @@ final class ImageCanvasView: NSView {
             new = feathered
         }
         setSelection(CanvasSelection.combine(base, with: new, mode: mode))
+        ActionRecorder.shared.recordGesture(record())
     }
 
     /// Reads a gesture's combine mode: an explicit modifier wins, otherwise
@@ -1364,7 +1411,11 @@ final class ImageCanvasView: NSView {
         let mode = lassoCombineMode
         lassoCombineMode = .replace
         if points.count >= 3 {
-            commitSelection(shapeSelection(.polygon(points)), mode: mode, base: selection)
+            commitSelection(
+                shapeSelection(.polygon(points)), mode: mode, base: selection,
+                record: .selectShape(
+                    "select_polygon", ["points": ActionArgs.points(points)],
+                    mode: mode.agentName, feather: selectionFeather))
         } else {
             needsDisplay = true
         }
@@ -1427,6 +1478,11 @@ final class ImageCanvasView: NSView {
         clearQuickMaskState()
         setSelection(
             CanvasSelection(shape: .mask(buffer), canvasWidth: width, canvasHeight: height))
+        // Quick Mask hands back a raw canvas-sized coverage mask, and no
+        // catalog tool can express one — every `select_*` takes geometry. So
+        // the whole session records ONE visible placeholder at its exit,
+        // naming the gap rather than leaving a silent hole in the action.
+        ActionRecorder.shared.record(.unrecorded("Quick Mask"))
     }
 
     /// Ends the session without converting the buffer (canvas size changed
@@ -1930,10 +1986,23 @@ final class ImageCanvasView: NSView {
                 // Treat a tiny drag as click-to-deselect; with a combine
                 // modifier held it restores the base selection instead.
                 setSelection(mode == .replace ? nil : base)
+                // A replace-mode click on empty canvas IS Deselect; with a
+                // combine modifier held the base comes back unchanged, which
+                // is not a command at all.
+                if mode == .replace { ActionRecorder.shared.record(.deselect) }
             } else if tool == .ellipseSelect {
-                commitSelection(shapeSelection(.ellipse(dragged)), mode: mode, base: base)
+                commitSelection(
+                    shapeSelection(.ellipse(dragged)), mode: mode, base: base,
+                    record: .selectShape(
+                        "select_ellipse", Self.rectArguments(dragged),
+                        mode: mode.agentName, feather: selectionFeather))
             } else {
-                commitSelection(shapeSelection(.rect(dragged.integral)), mode: mode, base: base)
+                let rect = dragged.integral
+                commitSelection(
+                    shapeSelection(.rect(rect)), mode: mode, base: base,
+                    record: .selectShape(
+                        "select_rect", Self.rectArguments(rect),
+                        mode: mode.agentName, feather: selectionFeather))
             }
         case .lasso, .wand, .fill, .eyedropper:
             break
@@ -1944,8 +2013,13 @@ final class ImageCanvasView: NSView {
             // Releasing over the background keeps the selection as it was
             // rather than clearing it: with this tool a miss is usually
             // the segmentation's, not the user's.
+            // Read BEFORE `end()`, which clears the session: the instance is
+            // 1-based and is exactly what `select_subject` takes.
+            let instance = subjectSession.subject
             if let found = subjectSession.end() {
-                commitSelection(found, mode: mode, base: base)
+                commitSelection(
+                    found, mode: mode, base: base,
+                    record: .selectSubject(instance: instance, mode: mode.agentName))
             }
             needsDisplay = true
         case .gradient:
@@ -2187,6 +2261,8 @@ final class ImageCanvasView: NSView {
         }
         strokeActive = true
         strokeLastPoint = point
+        recordedStrokePoints = [point]
+        strokeCloneSource = nil
         strokeLastPressure = pressure ?? 1
         strokeCursor = point
         strokeCursorPressure = pressure ?? 1
@@ -2203,6 +2279,11 @@ final class ImageCanvasView: NSView {
                 cloneOffset = CGVector(dx: point.x - source.x, dy: point.y - source.y)
                 cloneOffsetTool = tool
             }
+            // The source the stroke really samples from, derived from the
+            // latched offset: `points[0] - offset`, which is the inverse of
+            // the tools' own `offset = points[0] - source`.
+            strokeCloneSource = CGPoint(
+                x: point.x - cloneOffset.dx, y: point.y - cloneOffset.dy)
             stampCloneDab(in: context, at: point, pressure: strokeLastPressure)
         } else if let dab = strokeSoftDab {
             stampSoftDab(dab, in: context, at: point, pressure: strokeLastPressure)
@@ -2254,6 +2335,7 @@ final class ImageCanvasView: NSView {
             context.addLine(to: snapped)
             context.strokePath()
             strokeLastPoint = snapped
+            recordedStrokePoints.append(snapped)
             emitStrokeUpdate()
             return
         }
@@ -2276,6 +2358,7 @@ final class ImageCanvasView: NSView {
     /// joined and capped round by the stroke's gstate.
     private func renderStroke(through vertices: [StrokeVertex], in context: CGContext) {
         guard var from = strokeLastPoint, !vertices.isEmpty else { return }
+        recordedStrokePoints.append(contentsOf: vertices.map { $0.point })
         if tool == .clone || tool == .heal || strokeSoftDab != nil {
             var pressure = strokeLastPressure
             for vertex in vertices {
@@ -2757,6 +2840,14 @@ final class ImageCanvasView: NSView {
             }
             patchSession.cancel()
             redEyeSession.cancel()
+            // Escape on the canvas IS Deselect, and records like the other
+            // two spellings of it (the mouse-up click-to-deselect above,
+            // Select ▸ Deselect in the editor): `setSelection` is a per-tick
+            // setter and is deliberately not hooked, so each selection
+            // COMMAND records for itself. Recording nothing here left a
+            // replay running the rest of the action with the marquee from
+            // an earlier step still live.
+            if selection != nil { ActionRecorder.shared.record(.deselect) }
             setSelection(nil)
             return
         }

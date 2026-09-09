@@ -259,8 +259,21 @@ enum Bitmap {
     /// decode. Otherwise the answer is sRGB with no profile: the decode then
     /// converts into sRGB, which is exactly what the numbers will be.
     static func ingestSpace(of image: CGImage) -> (space: CGColorSpace, profile: Data?) {
-        guard let space = image.colorSpace, space.model == .rgb,
-              space.numberOfComponents == 3,
+        ingestSpace(of: image.colorSpace)
+    }
+
+    /// The same question asked of a bare space, for a decode that has one
+    /// without a `CGImage` to read it from — Core Image's RAW develop, which
+    /// renders into `CIImage.colorSpace` (`RawImage.develop`).
+    ///
+    /// It is the ONE home for the rule, and the CGImage form above is this
+    /// plus one property read. The two were written out twice, and a later
+    /// phase tightening the rule — refusing a space whose ICC bytes the
+    /// core's parser will not take, say — would have landed here and
+    /// silently missed the RAW path, so the same photograph would have been
+    /// labelled with a different profile depending on which decoder read it.
+    static func ingestSpace(of space: CGColorSpace?) -> (space: CGColorSpace, profile: Data?) {
+        guard let space = space, space.model == .rgb, space.numberOfComponents == 3,
               CGContext(
                 data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
                 space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) != nil,

@@ -121,7 +121,10 @@ final class EditorViewController: NSViewController {
     private(set) var strokeTool: EditorTool = .brush
     // The Blend option, latched at stroke begin (brush and clone only):
     // non-Normal ticks composite through the core's blend-mode paint op.
-    private var strokeBlendMode = RZ_BLEND_NORMAL
+    // private(set), like strokeTool above it: the record helper in
+    // EditorViewController+Actions.swift writes the latched mode into a
+    // recorded brush or clone step.
+    private(set) var strokeBlendMode = RZ_BLEND_NORMAL
 
     // The open crop session (logic in EditorViewController+Crop.swift; the
     // canvas draws its overlay and routes the gesture).
@@ -377,8 +380,10 @@ final class EditorViewController: NSViewController {
                 }
             }
             // endLiveEdit no-ops when the handle never changed, so a stroke
-            // that entirely missed the layer registers no undo step.
-            document.endLiveEdit(actionName)
+            // that entirely missed the layer registers no undo step — and,
+            // because the record hook sits inside that same test, records no
+            // action step either.
+            document.endLiveEdit(actionName, record: self.strokeRecord(actionName))
         }
         canvas.onStrokeCancel = { [weak self] in
             guard let self = self, let document = self.document else { return }
@@ -392,7 +397,9 @@ final class EditorViewController: NSViewController {
             // Restoring the snapshot makes endLiveEdit a same-handle no-op:
             // the abandoned stroke leaves no undo step and no image change.
             document.updateLiveEdit(base)
-            document.endLiveEdit("Cancel Stroke")
+            // The base handle is back, so endLiveEdit is a same-handle no-op:
+            // nothing to undo and nothing to record.
+            document.endLiveEdit("Cancel Stroke", record: .notACommand)
         }
         canvas.onTextClick = { [weak self] point in self?.textClicked(point) }
         canvas.onCommitText = { [weak self] payload, origin, editingLayer in
@@ -422,7 +429,12 @@ final class EditorViewController: NSViewController {
             // that earned them, and neither survives the mouse coming up
             // (MultiLayerEdit.moveDidEnd).
             self.moveDidEnd()
-            document.endLiveEdit("Move Layer")
+            // The drag's ticks already moved the layers, so the offsets in
+            // the document ARE the result: `dx: 0, dy: 0` reads them back.
+            // One layer records an absolute `set_layer_properties` and says
+            // so in its note; a set has no twin (MultiLayerEdit.moveRecord).
+            document.endLiveEdit(
+                "Move Layer", record: EditorViewController.moveEndRecord(document))
         }
         canvas.onMoveNudge = { [weak self] dx, dy in self?.moveNudge(dx, dy) }
         canvas.onTransformMouseDown = { [weak self] point, modifiers in
@@ -1036,6 +1048,22 @@ final class EditorViewController: NSViewController {
         }
         // An all-zero combination comes back nil and deselects.
         canvas.setSelection(CanvasSelection.combine(canvas.selection, with: selection, mode: mode))
+        // The wand's own commit point — `setSelection` is a per-tick setter
+        // and is deliberately not hooked. The bar's Feather rides along as a
+        // second step, since `select_magic_wand` has no feather argument —
+        // under the one rule that decides when that second step tells the
+        // truth (`ActionSteps.featherSteps`, which explains the ordering).
+        var record: [ActionStep] = .selectMagicWand(
+            at: point, tolerance: Int(options.tolerance.rounded()),
+            contiguous: options.contiguous, mode: mode.agentName)
+        if let feathering = [ActionStep].featherSteps(
+            radius: options.feather, mode: mode.agentName)
+        {
+            record += feathering
+        } else {
+            record = .unrecorded("Feathered \(mode.agentName) wand selection")
+        }
+        ActionRecorder.shared.record(record)
     }
 
     private func fillClicked(_ point: CGPoint) {
@@ -1062,7 +1090,11 @@ final class EditorViewController: NSViewController {
         let rgba = colorBytes(paintColor.withAlphaComponent(
             paintColor.alphaComponent * CGFloat(opacity)))
         let mask = canvas.selection?.maskBytes()
-        document.applyRasterizingEdit("Fill", layer: idx) { doc in
+        document.applyRasterizingEdit(
+            "Fill", layer: idx,
+            record: fillRecord(
+                at: point, color: paintColor, opacity: opacity, options: options)
+        ) { doc in
             doc.bucketFilled(
                 idx, x: Int(point.x), y: Int(point.y),
                 tolerance: Int(options.tolerance.rounded()),
@@ -1138,7 +1170,12 @@ final class EditorViewController: NSViewController {
         let kind: RzGradientKind =
             options.typeIndex == 1 ? RZ_GRADIENT_RADIAL : RZ_GRADIENT_LINEAR
         let mask = canvas.selection?.maskBytes()
-        document.applyRasterizingEdit("Gradient", layer: idx) { doc in
+        document.applyRasterizingEdit(
+            "Gradient", layer: idx,
+            record: gradientRecord(
+                from: a, to: b, foreground: paintColor, background: backgroundColor,
+                opacity: opacity, options: options)
+        ) { doc in
             doc.gradiented(idx, from: a, to: b, start: start, end: end, kind: kind, mask: mask)
         }
     }
@@ -1429,7 +1466,8 @@ final class EditorViewController: NSViewController {
         if describesSource, session.isSingleLayer {
             isCommittingTransform = true
             let outcome = commitDescribedTransform(
-                layer: idx, matrix: matrix, quad: quad, sampler: session.sampler)
+                layer: idx, matrix: matrix, quad: quad, sampler: session.sampler,
+                record: transformRecord(session, quad: quad))
             isCommittingTransform = false
             switch outcome {
             case .committed:
@@ -1455,7 +1493,9 @@ final class EditorViewController: NSViewController {
         let sampler = session.sampler
         let before = document.doc
         isCommittingTransform = true
-        document.applyEdit("Transform Layer") { doc in
+        document.applyEdit(
+            "Transform Layer", record: transformRecord(session, quad: quad)
+        ) { doc in
             let transformed = Self.transformedSet(
                 doc, layers: session.layers, quad: quad, matrix: matrix, sampler: sampler)
             guard let transformed else { return nil }
@@ -1808,17 +1848,22 @@ final class EditorViewController: NSViewController {
 
     // MARK: - Edit actions (responder chain)
 
-    private func performEdit(_ actionName: String, _ transform: (RasterDocument) -> RasterDocument?) {
+    private func performEdit(
+        _ actionName: String, record: [ActionStep],
+        _ transform: (RasterDocument) -> RasterDocument?
+    ) {
         guard let document = document else {
             NSSound.beep()
             return
         }
-        document.applyEdit(actionName, transform)
+        document.applyEdit(actionName, record: record, transform)
     }
 
     /// Internal, like the panels above: EditorViewController+AutoAdjust
     /// builds on it (Auto Tone and its two siblings are layer edits).
-    func performLayerEdit(_ actionName: String, _ op: (RasterImage) -> RasterImage?) {
+    func performLayerEdit(
+        _ actionName: String, record: [ActionStep], _ op: (RasterImage) -> RasterImage?
+    ) {
         guard let document = document else {
             NSSound.beep()
             return
@@ -1837,7 +1882,7 @@ final class EditorViewController: NSViewController {
         else { return }
         // …and a GROUP has no pixels for a filter to rewrite at all.
         guard paintTarget.isChannel || !refuseGroupPixelEdit() else { return }
-        document.applyToActiveLayer(actionName, op)
+        document.applyToActiveLayer(actionName, record: record, op)
     }
 
     // Whole-document geometry goes through applyingDocumentGeometry
@@ -1864,7 +1909,9 @@ final class EditorViewController: NSViewController {
     }
 
     private func performGeometry(_ op: DocumentGeometry) {
-        performEdit(op.actionName) { $0.applyingDocumentGeometry(op) }
+        performEdit(op.actionName, record: Self.geometryRecord(op)) {
+            $0.applyingDocumentGeometry(op)
+        }
     }
 
     @objc func cropToSelection(_ sender: Any?) {
@@ -1872,7 +1919,7 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        document.applyEdit("Crop") { doc in
+        document.applyEdit("Crop", record: .crop(selection)) { doc in
             doc.cropped(
                 x: Int(selection.minX), y: Int(selection.minY),
                 w: Int(selection.width), h: Int(selection.height))
@@ -1910,7 +1957,9 @@ final class EditorViewController: NSViewController {
         // wrong index the moment `idx` names a group), taken BEFORE the edit
         // because the handle is replaced by it.
         let landing = doc.insertionIndex(above: idx)
-        document.applyEdit("New Layer") { $0.addingLayer(above: idx, name: name) }
+        document.applyEdit("New Layer", record: .newLayer(name: name)) {
+            $0.addingLayer(above: idx, name: name)
+        }
         guard document.doc !== before else { return }
         // The active layer moved: setActiveLayer carries the whole invariant
         // (paint target, both panels, the canvas's mask base and rubylith).
@@ -1935,7 +1984,10 @@ final class EditorViewController: NSViewController {
         // …and the copies are made over the selection's INDEPENDENT ROOTS, so
         // the primary's landing is looked up by entry rather than by position.
         let landing = doc.layerTree.duplicateLanding(of: idx, in: indices) ?? idx
-        document.applyEdit("Duplicate Layer") { $0.duplicateLayers(indices) }
+        document.applyEdit(
+            "Duplicate Layer",
+            record: .selectedLayersCommand("duplicate_layer", note: "Layer ▸ Duplicate Layer")
+        ) { $0.duplicateLayers(indices) }
         guard document.doc !== before else { return }
         // The active layer moved: setActiveLayer carries the whole invariant.
         setActiveLayer(min(max(landing, 0), document.doc.layerCount - 1))
@@ -1950,7 +2002,10 @@ final class EditorViewController: NSViewController {
             return
         }
         let indices = document.selectedLayerIndices
-        document.applyEdit("Delete Layer") { $0.removeLayers(indices) }
+        document.applyEdit(
+            "Delete Layer",
+            record: .selectedLayersCommand("delete_layer", note: "Layer ▸ Delete Layer")
+        ) { $0.removeLayers(indices) }
         // Collapse onto ONE survivor, the lowest slot the deletion left.
         // `applyEdit`'s re-clamp only pulls stale numbers back into range,
         // and after a delete those numbers name layers that were never
@@ -1986,7 +2041,10 @@ final class EditorViewController: NSViewController {
             // The merged entry replaces the lowest member's picture, so that
             // member's Pixels / Transparency locks refuse the whole merge.
             guard !refuseLockedEdit(layer: indices[0], kind: RZ_EDIT_MERGE) else { return }
-            document.applyEdit("Merge Layers") { $0.mergeLayers(indices) }
+            document.applyEdit(
+                "Merge Layers",
+                record: .selectedLayersCommand("merge_down", note: "Layer ▸ Merge Layers")
+            ) { $0.mergeLayers(indices) }
             guard document.doc !== before else { return }
             setActiveLayer(min(landing, document.doc.layerCount - 1))
             return
@@ -2005,7 +2063,7 @@ final class EditorViewController: NSViewController {
         // and `below` is an unrelated layer the moment that sibling is a
         // non-empty group.
         let landing = doc.layerTree.subtree(of: below).lowerBound
-        document.applyEdit("Merge Down") { $0.mergingDown(idx) }
+        document.applyEdit("Merge Down", record: .mergeDown) { $0.mergingDown(idx) }
         guard document.doc !== before else { return }
         // The active layer moved: setActiveLayer carries the whole invariant.
         setActiveLayer(min(landing, document.doc.layerCount - 1))
@@ -2016,7 +2074,7 @@ final class EditorViewController: NSViewController {
             NSSound.beep()
             return
         }
-        document.applyEdit("Flatten Image") { $0.flattening() }
+        document.applyEdit("Flatten Image", record: .flattenImage) { $0.flattening() }
         // The active layer moved: any mask paint target goes with it.
         syncPaintTarget()
         layersPanel.reload()
@@ -2080,7 +2138,9 @@ final class EditorViewController: NSViewController {
             return
         }
         let idx = document.activeLayerIndex
-        document.applyEdit("Add Layer Mask") {
+        document.applyEdit(
+            "Add Layer Mask", record: .addLayerMask(kind: Self.layerMaskKindName(kind))
+        ) {
             $0.addingLayerMask(idx, kind: kind, selection: selection)
         }
         updateStatus()
@@ -2092,7 +2152,9 @@ final class EditorViewController: NSViewController {
             return
         }
         let idx = document.activeLayerIndex
-        document.applyEdit("Delete Layer Mask") { $0.removingLayerMask(idx, apply: false) }
+        document.applyEdit("Delete Layer Mask", record: .removeLayerMask(apply: false)) {
+            $0.removingLayerMask(idx, apply: false)
+        }
         updateStatus()
     }
 
@@ -2106,7 +2168,9 @@ final class EditorViewController: NSViewController {
         // which is exactly what Lock Transparency forbids — its own edit
         // kind in the core, so the refusal names the lock instead of beeping.
         guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_MASK_APPLY) else { return }
-        document.applyEdit("Apply Layer Mask") { $0.removingLayerMask(idx, apply: true) }
+        document.applyEdit("Apply Layer Mask", record: .removeLayerMask(apply: true)) {
+            $0.removingLayerMask(idx, apply: true)
+        }
         updateStatus()
     }
 
@@ -2119,7 +2183,10 @@ final class EditorViewController: NSViewController {
         }
         let idx = document.activeLayerIndex
         let enabled = !doc.layerMaskEnabled(idx)
-        document.applyEdit(enabled ? "Enable Layer Mask" : "Disable Layer Mask") {
+        document.applyEdit(
+            enabled ? "Enable Layer Mask" : "Disable Layer Mask",
+            record: .setLayerMaskEnabled(enabled)
+        ) {
             $0.withLayerMaskEnabled(idx, enabled)
         }
         updateStatus()
@@ -2194,7 +2261,10 @@ final class EditorViewController: NSViewController {
         let below = document.activeLayerIndex
         let before = document.doc
         let landing = before?.insertionIndex(above: below) ?? below + 1
-        document.applyEdit("New \(op.displayName) Layer") {
+        document.applyEdit(
+            "New \(op.displayName) Layer",
+            record: .addAdjustmentLayer(meta: meta, name: op.displayName)
+        ) {
             $0.addingAdjustmentLayer(
                 above: below, name: op.displayName, meta: meta, selection: selection)
         }
@@ -2402,28 +2472,37 @@ final class EditorViewController: NSViewController {
     // MARK: - One-shot filters (active layer)
 
     @objc func applyGrayscale(_ sender: Any?) {
-        performLayerEdit("Grayscale") { $0.grayscaled() }
+        performLayerEdit("Grayscale", record: filterRecord("grayscale")) { $0.grayscaled() }
     }
 
     @objc func applyInvert(_ sender: Any?) {
-        performLayerEdit("Invert") { $0.inverted() }
+        performLayerEdit("Invert", record: filterRecord("invert")) { $0.inverted() }
     }
 
     @objc func applySepia(_ sender: Any?) {
-        performLayerEdit("Sepia") { $0.sepia() }
+        performLayerEdit("Sepia", record: filterRecord("sepia")) { $0.sepia() }
     }
 
     @objc func applySharpen(_ sender: Any?) {
-        performLayerEdit("Sharpen") { $0.sharpened(amount: 1.5) }
+        // 1.5 is written out rather than left to the catalog, whose own
+        // default is 1.0: a recorded step never relies on a default, because
+        // the UI's and the agent's deliberately differ.
+        performLayerEdit(
+            "Sharpen", record: filterRecord("sharpen", ["amount": 1.5])
+        ) { $0.sharpened(amount: 1.5) }
     }
 
     @objc func applyEdgeDetect(_ sender: Any?) {
-        performLayerEdit("Edge Detect") { $0.edgeDetected() }
+        performLayerEdit("Edge Detect", record: filterRecord("edge_detect")) {
+            $0.edgeDetected()
+        }
     }
 
     @objc func applyEmboss(_ sender: Any?) {
-        performLayerEdit("Emboss") { $0.embossed() }
+        performLayerEdit("Emboss", record: filterRecord("emboss")) { $0.embossed() }
     }
+
+
 
     // MARK: - Zoom actions
 
@@ -2436,10 +2515,16 @@ final class EditorViewController: NSViewController {
 
     override func selectAll(_ sender: Any?) {
         canvas.setSelectionRect(CGRect(origin: .zero, size: canvas.bounds.size))
+        // `select_all`, not a literal `select_rect` of this canvas's size:
+        // the recorded step has to be canvas-RELATIVE or a batched action
+        // would select 4000 × 3000 of a 1600 × 1200 file. Closing that gap
+        // is why `select_all` exists as a tool at all.
+        ActionRecorder.shared.record(.selectAll(mode: "replace"))
     }
 
     @objc func deselect(_ sender: Any?) {
         canvas.setSelection(nil)
+        ActionRecorder.shared.record(.deselect)
     }
 
     /// Select > Invert Selection: the complement over the full canvas.
@@ -2451,6 +2536,7 @@ final class EditorViewController: NSViewController {
             return
         }
         canvas.setSelection(selection.inverted())
+        ActionRecorder.shared.record(.modifySelection(operation: "invert"))
     }
 
     /// Select > Feather Selection…: radius sheet, then a Gaussian feather
@@ -2469,34 +2555,34 @@ final class EditorViewController: NSViewController {
 
     @objc func growSelection(_ sender: Any?) {
         presentSelectionMorphSheet(
-            title: "Grow selection", label: "Radius:",
+            title: "Grow selection", operation: "grow", label: "Radius:",
             hint: "Expands the selection outward by the radius, rounding "
                 + "corners into circular arcs.") { $0.grown(by: $1) }
     }
 
     @objc func shrinkSelection(_ sender: Any?) {
         presentSelectionMorphSheet(
-            title: "Shrink selection", label: "Radius:",
+            title: "Shrink selection", operation: "shrink", label: "Radius:",
             hint: "Contracts the selection inward by the radius; a shrink "
                 + "past the middle deselects.") { $0.shrunk(by: $1) }
     }
 
     @objc func borderSelection(_ sender: Any?) {
         presentSelectionMorphSheet(
-            title: "Border selection", label: "Width:",
+            title: "Border selection", operation: "border", label: "Width:",
             hint: "Replaces the selection with a band of this width "
                 + "straddling its edge.") { $0.bordered(width: $1) }
     }
 
     @objc func smoothSelection(_ sender: Any?) {
         presentSelectionMorphSheet(
-            title: "Smooth selection", label: "Radius:",
+            title: "Smooth selection", operation: "smooth", label: "Radius:",
             hint: "Rounds corners and evens out jagged edges; long straight "
                 + "edges stay put.") { $0.smoothed(by: $1) }
     }
 
     private func presentSelectionMorphSheet(
-        title: String, label: String, hint: String,
+        title: String, operation: String, label: String, hint: String,
         transform: @escaping (CanvasSelection, Double) -> CanvasSelection?
     ) {
         guard canvas.selection != nil else {
@@ -2506,6 +2592,13 @@ final class EditorViewController: NSViewController {
         presentAsSheet(
             SelectionMorphSheetController(
                 canvas: canvas, title: title, label: label, hint: hint,
+                // Border's number is a WIDTH, everything else's a radius —
+                // the same split modify_selection makes.
+                step: { value in
+                    operation == "border"
+                        ? .modifySelection(operation: operation, width: value)
+                        : .modifySelection(operation: operation, radius: value)
+                },
                 transform: transform))
     }
 
@@ -2552,7 +2645,9 @@ final class EditorViewController: NSViewController {
         // Rewriting pixels invalidates a text layer's description, so this
         // goes through the rasterize prompt (Cancel abandons the edit).
         let before = document.doc
-        document.applyRasterizingEdit("Clear", layer: idx) { doc in
+        document.applyRasterizingEdit(
+            "Clear", layer: idx, record: .clearSelection(note: "Edit ▸ Clear")
+        ) { doc in
             doc.clearingSelection(idx, mask: mask)
         }
         // A frozen alpha makes a clear a byte-exact no-op, which the core
@@ -2589,7 +2684,15 @@ final class EditorViewController: NSViewController {
         guard copyToPasteboard(doc.layerCanvasImage(idx)) else { return }
         let mask = selection.maskBytes()
         let before = document.doc
-        document.applyRasterizingEdit("Cut", layer: idx) { doc in
+        // Cut's DOCUMENT half is exactly Clear; the clipboard half has no
+        // tool and cannot replay, which the note says out loud rather than
+        // leaving a reader to notice that a replayed Cut copies nothing.
+        document.applyRasterizingEdit(
+            "Cut", layer: idx,
+            record: .clearSelection(
+                note: "Edit ▸ Cut — the pixels also went to the clipboard, "
+                    + "which an action cannot do")
+        ) { doc in
             doc.clearingSelection(idx, mask: mask)
         }
         if document.doc === before { refuseFrozenAlpha(layer: idx) }
@@ -2757,6 +2860,11 @@ extension EditorViewController: NSUserInterfaceValidations {
         // themselves (EditorViewController+Rulers.swift). nil means "not one
         // of mine".
         if let handled = validateViewChromeItem(item) { return handled }
+
+        // Filters ▸ Repeat Last Filter — its own early-out, because it flips
+        // its own title and carries the ⌃F text-editing guard
+        // (EditorViewController+Actions.swift).
+        if let handled = validateActionsItem(item) { return handled }
 
         // While a text session, a shape-edit session or a Free Transform is
         // active, only tool switching (handled above — it commits the

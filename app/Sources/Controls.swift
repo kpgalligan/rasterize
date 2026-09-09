@@ -368,3 +368,181 @@ final class PanelTabsView: NSView {
         }
     }
 }
+
+// MARK: - Modal card control rows
+
+/// One row of a modal card's control grid: a 106pt right-aligned label, the
+/// control at 180pt, and — for a slider — a 52pt right-aligned mono readout,
+/// spaced 12pt. Exactly the 106/12/180/12/52 metrics the sheets in
+/// `Sheets.swift` lay out with `NSGridView`, but a stack view per row,
+/// because a modal card hides whole rows (a control this OS is too old for)
+/// and a hidden arranged subview simply detaches from a stack.
+///
+/// `AdjustmentSheet.sliderRow` is the instance-method twin of the slider
+/// case and is deliberately left alone: it is a method on a controller that
+/// owns the action, wired to that sheet's live preview, and folding the two
+/// together would drag the sheet's state into a shared control.
+///
+/// The row OWNS its callback. A free builder function has no `@objc` target
+/// to hang a control's action on, and the view hierarchy already owns the
+/// row, so the row is the target and the closure lives exactly as long as
+/// the card does.
+final class CardControlRow: NSStackView {
+    private let label: NSTextField
+    private var format: ((Double) -> String)?
+    private var readout: NSTextField?
+    private var onSlide: ((Double) -> Void)?
+    private var onToggle: ((Bool) -> Void)?
+    private var onSelect: ((Int) -> Void)?
+
+    private(set) var slider: NSSlider?
+    private(set) var checkbox: NSButton?
+    private(set) var popUp: NSPopUpButton?
+
+    /// House metrics, in points.
+    private static let labelWidth: CGFloat = 106
+    private static let controlWidth: CGFloat = 180
+    /// 64, not 52: "+0.00 EV" — the RAW Develop dialog's Exposure readout,
+    /// and the Batch pane's — is eight glyphs of `DS.mono(12)` and clipped
+    /// mid-glyph in the narrower column, because `NSTextField(labelWithString:)`
+    /// breaks by CLIPPING (the same failure `sheetFootnote` carries a comment
+    /// about). Both cards that use these rows are 560 pt wide with ~150 pt to
+    /// spare beside the readout, and no other row's value grows.
+    private static let readoutWidth: CGFloat = 64
+
+    fileprivate init(label text: String) {
+        label = fieldLabel(text)
+        label.alignment = .right
+        super.init(frame: .zero)
+        orientation = .horizontal
+        alignment = .centerY
+        spacing = 12
+        label.widthAnchor.constraint(equalToConstant: Self.labelWidth).isActive = true
+        addArrangedSubview(label)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("CardControlRow does not support NSCoder")
+    }
+
+    /// Enables or disables the whole row, dimming the label with the control
+    /// so a value the file cannot use still reads as a value, not a blank.
+    var isEnabled: Bool = true {
+        didSet {
+            slider?.isEnabled = isEnabled
+            checkbox?.isEnabled = isEnabled
+            popUp?.isEnabled = isEnabled
+            label.textColor = isEnabled ? DS.textStrong : DS.textFaint
+            readout?.textColor = isEnabled ? DS.textMuted : DS.textFaint
+        }
+    }
+
+    fileprivate func addSlider(
+        min: Double, max: Double, value: Double,
+        format: @escaping (Double) -> String, onChange: @escaping (Double) -> Void
+    ) {
+        let slider = NSSlider(
+            value: value, minValue: min, maxValue: max,
+            target: self, action: #selector(sliderChanged(_:)))
+        slider.isContinuous = true
+        slider.widthAnchor.constraint(equalToConstant: Self.controlWidth).isActive = true
+        let readout = NSTextField(labelWithString: format(value))
+        readout.font = DS.mono(12)
+        readout.textColor = DS.textMuted
+        readout.alignment = .right
+        readout.widthAnchor.constraint(equalToConstant: Self.readoutWidth).isActive = true
+        self.slider = slider
+        self.readout = readout
+        self.format = format
+        onSlide = onChange
+        addArrangedSubview(slider)
+        addArrangedSubview(readout)
+    }
+
+    fileprivate func addCheckbox(
+        title: String, on: Bool, onChange: @escaping (Bool) -> Void
+    ) {
+        let button = NSButton(
+            checkboxWithTitle: title, target: self, action: #selector(checkboxChanged(_:)))
+        button.state = on ? .on : .off
+        button.font = DS.sans(13)
+        checkbox = button
+        onToggle = onChange
+        addArrangedSubview(button)
+    }
+
+    fileprivate func addPopUp(
+        titles: [String], selected: Int, onChange: @escaping (Int) -> Void
+    ) {
+        let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
+        popUp.addItems(withTitles: titles)
+        popUp.selectItem(at: Swift.max(0, Swift.min(selected, titles.count - 1)))
+        popUp.target = self
+        popUp.action = #selector(popUpChanged(_:))
+        popUp.widthAnchor.constraint(equalToConstant: Self.controlWidth).isActive = true
+        self.popUp = popUp
+        onSelect = onChange
+        addArrangedSubview(popUp)
+    }
+
+    /// Moves the slider and its readout WITHOUT calling back — what a Reset
+    /// button needs, so restoring twelve controls does not fire twelve
+    /// changes.
+    func setValue(_ value: Double) {
+        slider?.doubleValue = value
+        if let format = format { readout?.stringValue = format(value) }
+    }
+
+    /// The silent twin of `setValue` for a checkbox row.
+    func setOn(_ on: Bool) {
+        checkbox?.state = on ? .on : .off
+    }
+
+    /// The silent twin of `setValue` for a pop-up row.
+    func setSelected(_ index: Int) {
+        popUp?.selectItem(at: index)
+    }
+
+    @objc private func sliderChanged(_ sender: NSSlider) {
+        let value = sender.doubleValue
+        if let format = format { readout?.stringValue = format(value) }
+        onSlide?(value)
+    }
+
+    @objc private func checkboxChanged(_ sender: NSButton) {
+        onToggle?(sender.state == .on)
+    }
+
+    @objc private func popUpChanged(_ sender: NSPopUpButton) {
+        onSelect?(sender.indexOfSelectedItem)
+    }
+}
+
+/// A labelled slider row with a formatted readout (see `CardControlRow`).
+func cardSliderRow(
+    label: String, min: Double, max: Double, value: Double,
+    format: @escaping (Double) -> String, onChange: @escaping (Double) -> Void
+) -> CardControlRow {
+    let row = CardControlRow(label: label)
+    row.addSlider(min: min, max: max, value: value, format: format, onChange: onChange)
+    return row
+}
+
+/// A labelled checkbox row (see `CardControlRow`).
+func cardCheckboxRow(
+    label: String, title: String, on: Bool, onChange: @escaping (Bool) -> Void
+) -> CardControlRow {
+    let row = CardControlRow(label: label)
+    row.addCheckbox(title: title, on: on, onChange: onChange)
+    return row
+}
+
+/// A labelled pop-up row (see `CardControlRow`).
+func cardPopupRow(
+    label: String, titles: [String], selected: Int, onChange: @escaping (Int) -> Void
+) -> CardControlRow {
+    let row = CardControlRow(label: label)
+    row.addPopUp(titles: titles, selected: selected, onChange: onChange)
+    return row
+}

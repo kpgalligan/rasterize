@@ -60,7 +60,9 @@ extension EditorViewController {
         let before = document.doc
         // The SOURCE is untouched by a copy, so no rasterize prompt and no
         // pixel-lock check: nothing is written to it.
-        document.applyEdit("Layer Via Copy") {
+        document.applyEdit(
+            "Layer Via Copy", record: .layerVia(cut: false, name: name)
+        ) {
             $0.layerVia(idx, mask: mask, cut: false, name: name)
         }
         guard document.doc !== before else { return }
@@ -95,7 +97,9 @@ extension EditorViewController {
         // layer is asked about — and its description dropped inside the same
         // undo step — exactly as a paint stroke would. That is what
         // `applyRasterizingEdit` is, so it is used rather than repeated.
-        document.applyRasterizingEdit("Layer Via Cut", layer: idx) {
+        document.applyRasterizingEdit(
+            "Layer Via Cut", layer: idx, record: .layerVia(cut: true, name: name)
+        ) {
             $0.layerVia(idx, mask: mask, cut: true, name: name)
         }
         guard document.doc !== before else {
@@ -152,7 +156,7 @@ extension EditorViewController {
         // counted against the entries that survive below it. nil is exactly
         // the case the core refuses (fewer than two contributing leaves).
         let landing = before?.mergeVisibleLanding()
-        document.applyEdit("Merge Visible") { $0.mergeVisible() }
+        document.applyEdit("Merge Visible", record: .mergeVisible) { $0.mergeVisible() }
         guard document.doc !== before, let landing = landing else { return }
         setActiveLayer(min(landing, document.doc.layerCount - 1))
     }
@@ -169,7 +173,9 @@ extension EditorViewController {
         let landing = doc.insertionIndex(above: idx)
         let before = document.doc
         // The same default name the `stamp_visible` tool uses.
-        document.applyEdit("Stamp Visible") { $0.stampVisible(above: idx, name: "Stamp") }
+        document.applyEdit("Stamp Visible", record: .stampVisible(name: "Stamp")) {
+            $0.stampVisible(above: idx, name: "Stamp")
+        }
         guard document.doc !== before else { return }
         setActiveLayer(min(landing, document.doc.layerCount - 1))
     }

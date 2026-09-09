@@ -42,7 +42,11 @@ extension EditorViewController {
         // correctable red in it returns nil and beeps — the refusal
         // convention every canvas gesture already follows, and the eyes were
         // never in question here the way they are on the automatic path.
-        document.applyRasterizingEdit("Remove Red Eye", layer: idx) { doc in
+        document.applyRasterizingEdit(
+            "Remove Red Eye", layer: idx,
+            record: .redEye(
+                rect: rect, pupilSize: options.pupilSize, darken: options.darken)
+        ) { doc in
             doc.redEyeLayer(idx, rect: rect, pupilSize: pupilSize, darken: darken)
         }
     }
@@ -82,7 +86,11 @@ extension EditorViewController {
         let options = ToolOptionsStore.shared.redEye
         let pupilSize = min(max(options.pupilSize, 1), 100) / 100
         let darken = min(max(options.darken, 0), 100) / 100
-        document.applyRasterizingEdit("Remove Red Eye", layer: idx) { doc in
+        document.applyRasterizingEdit(
+            "Remove Red Eye", layer: idx,
+            record: .redEyeAuto(
+                eyes: eyes, pupilSize: options.pupilSize, darken: options.darken)
+        ) { doc in
             var out = doc
             for eye in eyes {
                 out = out.redEyeLayer(

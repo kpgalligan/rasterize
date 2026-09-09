@@ -64,7 +64,11 @@ extension EditorViewController {
             return
         }
         let bytes = choice.data
-        document.applyEdit("Convert to Profile") { $0.convertingToProfile(bytes) }
+        document.applyEdit(
+            "Convert to Profile",
+            record: .profileCommand(
+                "convert_profile", choice, note: "Image ▸ Convert to Profile…")
+        ) { $0.convertingToProfile(bytes) }
     }
 
     /// Enablement for the two items above.

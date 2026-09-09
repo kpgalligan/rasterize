@@ -180,9 +180,16 @@ extension EditorViewController {
             }
         }
 
+        // The straighten resamples with the editor's shared Free Transform
+        // sampler, so the recorded step carries it: `crop` takes the same
+        // sampler vocabulary, and without it a replay of a Nearest straighten
+        // came back smoothed with nothing in the step saying so.
         let sampler = transformSampler
         let before = document.doc
-        document.applyEdit("Crop") { doc in
+        document.applyEdit(
+            "Crop",
+            record: .crop(rect, angle: angle, sampler: Self.samplerAgentName(sampler))
+        ) { doc in
             var current: RasterDocument? = doc
             if angle != 0 {
                 // The preview rotated the image by −angle about the box

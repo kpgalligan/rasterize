@@ -48,7 +48,9 @@ extension EditorViewController {
         // goes above the whole subtree, so `below + 1` would select the
         // wrong row (§4.5's one definition).
         let landing = before?.insertionIndex(above: below) ?? below + 1
-        document.applyEdit("Add \(name) Layer") {
+        document.applyEdit(
+            "Add \(name) Layer", record: .addShapeLayer(payload, at: anchor)
+        ) {
             $0.addingDescribedLayer(above: below, .shape(payload), anchor: anchor, name: name)
         }
         guard document.doc !== before else { return }
@@ -360,7 +362,11 @@ extension EditorViewController {
         // `applyEdit` beeped with nothing said.
         guard !refuseLockedEdit(layer: idx, kind: RZ_EDIT_PIXELS) else { return }
         let beforeEdit = document.doc
-        document.applyEdit("Edit Shape Layer") {
+        document.applyEdit(
+            "Edit Shape Layer",
+            record: .editShapeLayer(
+                payload, at: anchor, layerNamed: doc.layerInfo(idx)?.name)
+        ) {
             $0.rerenderingDescribedLayer(idx, .shape(payload), anchor: anchor)
         }
         // A TRANSPARENCY lock refuses a re-layout that resizes the raster, and

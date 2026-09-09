@@ -109,7 +109,12 @@ extension EditorViewController {
         let idx = document.activeLayerIndex
         let target: LayerStyle? = style.isIdentity ? nil : style
         guard target != doc.layerStylePayload(idx) else { return }
-        document.applyEdit("Paste Layer Style") { try? $0.withLayerStylePayload(idx, target) }
+        document.applyEdit(
+            "Paste Layer Style",
+            record: .setLayerStyle(
+                json: target?.json(), layerNamed: doc.layerInfo(idx)?.name,
+                note: "Layer ▸ Layer Style ▸ Paste Layer Style")
+        ) { try? $0.withLayerStylePayload(idx, target) }
     }
 
     /// Layer > Layer Style > Clear Layer Style — drops the active layer's
@@ -120,6 +125,11 @@ extension EditorViewController {
             return
         }
         let idx = document.activeLayerIndex
-        document.applyEdit("Clear Layer Style") { try? $0.withLayerStylePayload(idx, nil) }
+        document.applyEdit(
+            "Clear Layer Style",
+            record: .setLayerStyle(
+                json: nil, layerNamed: document.doc?.layerInfo(idx)?.name,
+                note: "Layer ▸ Layer Style ▸ Clear Layer Style")
+        ) { try? $0.withLayerStylePayload(idx, nil) }
     }
 }

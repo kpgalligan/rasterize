@@ -109,7 +109,17 @@ extension EditorViewController {
         let name = flag == .all
             ? (on ? "Lock All" : "Unlock Layer")
             : (on ? "Lock \(flag.displayName)" : "Unlock \(flag.displayName)")
-        document.applyToSelectedLayers(name) { doc, idx in
+        // The resulting lock SET of the primary entry, which is what
+        // `set_layer_lock` writes — the menu item toggles a bit, the tool
+        // states the whole set. A multi-selection has no twin (the tool locks
+        // one layer), so it records the visible placeholder.
+        var primaryLocks = doc.lockFlags(document.activeLayerIndex)
+        if on { primaryLocks.formUnion(flag) } else { primaryLocks.subtract(flag) }
+        let record: [ActionStep] =
+            document.selectedLayerIndices.count == 1
+            ? .setLayerLock(primaryLocks.isEmpty ? ["none"] : primaryLocks.names)
+            : .unrecorded(name)
+        document.applyToSelectedLayers(name, record: record) { doc, idx in
             var locks = doc.lockFlags(idx)
             if on {
                 locks.formUnion(flag)

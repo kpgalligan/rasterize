@@ -355,7 +355,17 @@ final class LayerStyleSheetController: NSViewController {
         // "nothing changed" compare is exact for an unstyled layer).
         let target: LayerStyle? = style.isIdentity ? nil : style
         guard target != original || light != originalLight else { return }
-        document.applyEdit("Layer Style") { doc in
+        // Two tools, one commit: the sheet writes the layer's style and the
+        // document's global light together, and `[ActionStep]` is an array
+        // exactly so one gesture can record both. The light is recorded only
+        // when it moved, since it is document-wide.
+        var record: [ActionStep] = .setLayerStyle(
+            json: target?.json(), layerNamed: document.doc?.layerInfo(idx)?.name,
+            note: target == nil ? "Layer ▸ Layer Style (cleared)" : "Layer ▸ Layer Style…")
+        if light != originalLight {
+            record += .setGlobalLight(angle: light.angle, altitude: light.altitude)
+        }
+        document.applyEdit("Layer Style", record: record) { doc in
             // The layer must still be what the sheet opened on: agent edits
             // can land under a sheet and move the stack.
             guard idx < doc.layerCount, !doc.layerIsAdjustment(idx) else { return nil }

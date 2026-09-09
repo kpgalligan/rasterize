@@ -35,10 +35,12 @@ extension ImageDocument {
     /// own nil path does — but it still returns true, because the target
     /// WAS a plane: falling back to the whole-layer path would silently
     /// paint the colour image the user did not aim at.
-    func applyToTargetPlane(_ actionName: String, _ op: (RasterImage) -> RasterImage?) -> Bool {
+    func applyToTargetPlane(
+        _ actionName: String, record: [ActionStep], _ op: (RasterImage) -> RasterImage?
+    ) -> Bool {
         let target = planeEditTarget
         guard target.targetsPlaneOrChannel else { return false }
-        applyPlaneRewrite(actionName, target) { current in
+        applyPlaneRewrite(actionName, target, record: record) { current in
             guard let source = targetPlaneSource(current, target),
                   let filtered = op(source.image), let bytes = filtered.lumaPlane()
             else { return nil }
@@ -111,9 +113,10 @@ extension ImageDocument {
     /// core refuses because no byte would change) beeps and mints no undo
     /// step, exactly as `applyEdit`'s own nil path does.
     func applyPlaneScratchEdit(
-        _ actionName: String, _ target: PaintTarget, _ op: PlaneScratchOp, mask: [UInt8]?
+        _ actionName: String, _ target: PaintTarget, _ op: PlaneScratchOp, mask: [UInt8]?,
+        record: [ActionStep]
     ) {
-        applyPlaneRewrite(actionName, target) { current in
+        applyPlaneRewrite(actionName, target, record: record) { current in
             guard let source = targetPlaneSource(current, target) else { return nil }
             let placement = source.placement
             guard let bytes = RasterDocument.planeThroughScratch(source.image, { scratch in
@@ -129,14 +132,14 @@ extension ImageDocument {
     /// exactly as a brush stroke does — and `applyEdit` for a channel, which
     /// is document state and describes nothing.
     func applyPlaneRewrite(
-        _ actionName: String, _ target: PaintTarget,
+        _ actionName: String, _ target: PaintTarget, record: [ActionStep],
         _ rewrite: (RasterDocument) -> RasterDocument?
     ) {
         switch target {
         case .plane:
-            applyRasterizingEdit(actionName, layer: activeLayerIndex, rewrite)
+            applyRasterizingEdit(actionName, layer: activeLayerIndex, record: record, rewrite)
         case .channel:
-            applyEdit(actionName, rewrite)
+            applyEdit(actionName, record: record, rewrite)
         case .layer, .mask:
             // Not a plane target: the caller asked for something this path
             // cannot do, so refuse rather than edit the wrong pixels.

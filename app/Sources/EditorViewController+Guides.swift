@@ -69,7 +69,10 @@ extension EditorViewController {
             unit: rulerUnit, ppi: rulerPPI, canvas: doc.canvasSize,
             rulerOrigin: CGPoint(x: origin.x, y: origin.y)
         ) { [weak self] orientation, position in
-            self?.document?.applyGuideEdit("New Guide") {
+            self?.document?.applyGuideEdit(
+                "New Guide",
+                record: .addGuide(orientation: orientation.agentName, position: position)
+            ) {
                 $0.addingGuide(orientation, at: position)
             }
         }
@@ -81,7 +84,7 @@ extension EditorViewController {
     /// list disables the menu item, so the core's nil for "cleared nothing"
     /// cannot be reached from here.)
     @objc func clearGuides(_ sender: Any?) {
-        document?.applyGuideEdit("Clear Guides") { $0.clearingGuides() }
+        document?.applyGuideEdit("Clear Guides", record: .clearGuides) { $0.clearingGuides() }
     }
 
     // MARK: - The canvas drag
@@ -182,7 +185,10 @@ extension EditorViewController {
             // on screen, and a beep would report a refusal for an outcome
             // that already looks like success.
             guard !guideOccupied(orientation, at: position, excluding: 0) else { return }
-            document?.applyGuideEdit("New Guide") { $0.addingGuide(orientation, at: position) }
+            document?.applyGuideEdit(
+                "New Guide",
+                record: .addGuide(orientation: orientation.agentName, position: position)
+            ) { $0.addingGuide(orientation, at: position) }
             return
         }
 
@@ -213,7 +219,17 @@ extension EditorViewController {
             deleteGuide(id: id)
             return
         }
-        document?.applyGuideEdit("Move Guide") { doc in
+        // ONE commit, TWO calls: there is no move tool, so a drag is a
+        // remove of the guide where it was plus an add where it landed. This
+        // is exactly what the record parameter being an ARRAY is for, and
+        // the removal names the guide by POSITION — a list index would name
+        // a different guide after any earlier guide edit in the same action.
+        let from = doc.guideInfo(index)?.position ?? position
+        document?.applyGuideEdit(
+            "Move Guide",
+            record: .moveGuide(
+                orientation: drag.orientation.agentName, from: from, to: position)
+        ) { doc in
             // Resolved from the STABLE ID against the document the edit is
             // applied to, never from an index remembered at mouse-down: the
             // list re-sorts by position on every edit.
@@ -307,8 +323,14 @@ extension EditorViewController {
     /// user on release for an edit nothing had refused. The move path in
     /// `guideMouseUp` already guarded this way; this one did not.
     private func deleteGuide(id: UInt64) {
-        guard document?.doc?.guideIndex(id: id) != nil else { return }
-        document?.applyGuideEdit("Delete Guide") { doc in
+        guard let doc = document?.doc, let index = doc.guideIndex(id: id),
+              let info = doc.guideInfo(index)
+        else { return }
+        document?.applyGuideEdit(
+            "Delete Guide",
+            record: .removeGuide(
+                orientation: info.orientation.agentName, position: info.position)
+        ) { doc in
             guard let index = doc.guideIndex(id: id) else { return nil }
             return doc.removingGuide(index)
         }
@@ -437,7 +459,9 @@ extension EditorViewController {
         guard let doc = document?.doc else { return }
         let current = doc.rulerOrigin
         guard current.x != x || current.y != y else { return }
-        document?.applyGuideEdit("Set Ruler Origin") { $0.settingRulerOrigin(x: x, y: y) }
+        document?.applyGuideEdit("Set Ruler Origin", record: .setRulerOrigin(x: x, y: y)) {
+            $0.settingRulerOrigin(x: x, y: y)
+        }
     }
 
     // MARK: - Cache

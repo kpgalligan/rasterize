@@ -343,7 +343,10 @@ final class CanvasSizeSheetController: NSViewController {
         let originY = Int((Double(h - originalHeight) * fy).rounded())
         dismiss(self)
         guard w != originalWidth || h != originalHeight else { return }
-        document.applyEdit("Canvas Size") {
+        document.applyEdit(
+            "Canvas Size",
+            record: .canvasSize(width: w, height: h, anchor: anchorGrid.anchor)
+        ) {
             $0.canvasResized(w: w, h: h, originX: originX, originY: originY)
         }
     }
@@ -493,7 +496,17 @@ final class AdjustSheetController: NSViewController {
         // Compose on the document's CURRENT active layer, not the captured
         // preview base, so any edit that slipped in while the sheet was open
         // survives.
-        document.applyToActiveLayer(AdjustmentLayerOp.bcs.displayName) {
+        document.applyToActiveLayer(
+            AdjustmentLayerOp.bcs.displayName,
+            record: .filter(
+                "adjust",
+                [
+                    "brightness": ActionArgs.number(brightness),
+                    "contrast": ActionArgs.number(contrast),
+                    "saturation": ActionArgs.number(saturation),
+                ],
+                target: document.planeEditTarget.layerEditAgentName(in: document.doc))
+        ) {
             $0.adjusted(brightness: brightness, contrast: contrast, saturation: saturation)
         }
     }
@@ -599,7 +612,12 @@ final class BlurSheetController: NSViewController {
         renderer.cancel()
         canvas?.previewImage = nil
         dismiss(self)
-        document.applyToActiveLayer("Gaussian Blur") { $0.blurred(sigma: sigma) }
+        document.applyToActiveLayer(
+            "Gaussian Blur",
+            record: .filter(
+                "blur", ["sigma": ActionArgs.number(sigma)],
+                target: document.planeEditTarget.layerEditAgentName(in: document.doc))
+        ) { $0.blurred(sigma: sigma) }
     }
 
     @objc private func cancelClicked(_ sender: Any?) {
@@ -683,6 +701,11 @@ final class FeatherSheetController: NSViewController {
         // A feather that spreads all coverage to zero comes back nil and
         // deselects — the same all-empty rule as the combine modes.
         canvas.setSelection(selection.feathered(by: radius))
+        // Recorded HERE and not in `setSelection`: that setter is a per-tick
+        // side effect (a marquee drag calls it hundreds of times, and every
+        // canvas resize calls it to clear a selection that no longer means
+        // anything), while this is the command boundary.
+        ActionRecorder.shared.record(.modifySelection(operation: "feather", radius: radius))
     }
 
     @objc private func cancelClicked(_ sender: Any?) {
@@ -702,6 +725,11 @@ final class SelectionMorphSheetController: NSViewController {
     private let valueLabel: String
     private let hint: String
     private let transform: (CanvasSelection, Double) -> CanvasSelection?
+    /// What Apply records, from the chosen value. A parameter for the same
+    /// reason SliderSheetController has one: this class is generic over four
+    /// Select-menu commands and only its caller knows which `operation` its
+    /// number belongs to.
+    private let step: (Double) -> [ActionStep]
 
     // The same log-feel travel as Feather: log10(0.5)…log10(250), so the
     // useful small values get most of the slider.
@@ -715,12 +743,14 @@ final class SelectionMorphSheetController: NSViewController {
     /// value to the new selection (nil deselects).
     init(
         canvas: ImageCanvasView, title: String, label: String, hint: String,
+        step: @escaping (Double) -> [ActionStep],
         transform: @escaping (CanvasSelection, Double) -> CanvasSelection?
     ) {
         self.canvas = canvas
         self.sheetTitle = title
         self.valueLabel = label
         self.hint = hint
+        self.step = step
         self.transform = transform
         super.init(nibName: nil, bundle: nil)
     }
@@ -779,6 +809,8 @@ final class SelectionMorphSheetController: NSViewController {
         // of an empty contour) comes back nil and deselects — the same
         // all-empty rule as Feather and the combine modes.
         canvas.setSelection(transform(selection, value))
+        // The command boundary, exactly as in FeatherSheetController.
+        ActionRecorder.shared.record(step(value))
     }
 
     @objc private func cancelClicked(_ sender: Any?) {
@@ -827,6 +859,11 @@ final class SliderSheetController: NSViewController {
     private let descriptors: [FilterSliderDescriptor]
     private let compute: (RasterImage, [Double]) -> RasterImage?
     private let willChange: ((Int, inout [Double]) -> Void)?
+    /// What this sheet's Apply records, from the sliders' MAPPED values. It
+    /// is a parameter because the class is generic over five filters: only
+    /// the factory that built it knows which tool and which argument names
+    /// its numbers belong to (`ActionSteps.swift`).
+    private let step: ([Double]) -> [ActionStep]
     private let baseDoc: RasterDocument?
     private let layerIndex: Int
     private let baseLayer: RasterImage?
@@ -848,6 +885,7 @@ final class SliderSheetController: NSViewController {
         title: String, actionName: String,
         sliders: [FilterSliderDescriptor],
         willChange: ((Int, inout [Double]) -> Void)? = nil,
+        step: @escaping ([Double]) -> [ActionStep],
         compute: @escaping (RasterImage, [Double]) -> RasterImage?
     ) {
         self.document = document
@@ -856,6 +894,7 @@ final class SliderSheetController: NSViewController {
         self.actionName = actionName
         self.descriptors = sliders
         self.willChange = willChange
+        self.step = step
         self.compute = compute
         self.baseDoc = document.doc
         self.layerIndex = document.activeLayerIndex
@@ -971,7 +1010,7 @@ final class SliderSheetController: NSViewController {
         renderer.cancel()
         canvas?.previewImage = nil
         dismiss(self)
-        document.applyToActiveLayer(actionName) { compute($0, values) }
+        document.applyToActiveLayer(actionName, record: step(values)) { compute($0, values) }
     }
 
     @objc private func cancelClicked(_ sender: Any?) {
@@ -1356,7 +1395,9 @@ final class AdjustmentLayerSheetController: NSViewController {
             // Above a GROUP the new entry lands above the whole subtree,
             // so the core answers where it went (§4.5).
             let landing = before?.insertionIndex(above: below) ?? below + 1
-            document.applyEdit("New \(name) Layer") {
+            document.applyEdit(
+                "New \(name) Layer", record: .addAdjustmentLayer(meta: meta, name: name)
+            ) {
                 $0.addingAdjustmentLayer(
                     above: below, name: name, meta: meta, selection: selection)
             }
@@ -1367,7 +1408,11 @@ final class AdjustmentLayerSheetController: NSViewController {
             // undo step or dirty the file (sorted-key encoding makes the
             // comparison byte-stable).
             guard meta != original.json() else { return }
-            document.applyEdit("Edit \(op.displayName) Layer") { doc in
+            document.applyEdit(
+                "Edit \(op.displayName) Layer",
+                record: .editAdjustmentLayer(
+                    meta: meta, layerNamed: document.doc?.layerInfo(idx)?.name)
+            ) { doc in
                 // The layer must still BE an adjustment layer (only an agent
                 // edit can move the stack under an open sheet).
                 guard doc.layerIsAdjustment(idx) else { return nil }
@@ -1592,7 +1637,9 @@ final class CurvesAdjustmentSheetController: NSViewController {
             // Above a GROUP the new entry lands above the whole subtree,
             // so the core answers where it went (§4.5).
             let landing = before?.insertionIndex(above: below) ?? below + 1
-            document.applyEdit("New \(name) Layer") {
+            document.applyEdit(
+                "New \(name) Layer", record: .addAdjustmentLayer(meta: meta, name: name)
+            ) {
                 $0.addingAdjustmentLayer(
                     above: below, name: name, meta: meta, selection: selection)
             }
@@ -1603,7 +1650,11 @@ final class CurvesAdjustmentSheetController: NSViewController {
             // undo step or dirty the file (sorted-key encoding makes the
             // comparison byte-stable for metas this app wrote).
             guard meta != original.json() else { return }
-            document.applyEdit("Edit \(name) Layer") { doc in
+            document.applyEdit(
+                "Edit \(name) Layer",
+                record: .editAdjustmentLayer(
+                    meta: meta, layerNamed: document.doc?.layerInfo(idx)?.name)
+            ) { doc in
                 // The layer must still BE an adjustment layer (only an agent
                 // edit can move the stack under an open sheet).
                 guard doc.layerIsAdjustment(idx) else { return nil }
@@ -1624,7 +1675,11 @@ final class CurvesAdjustmentSheetController: NSViewController {
 
 extension SliderSheetController {
     static func hueRotate(document: ImageDocument, canvas: ImageCanvasView) -> SliderSheetController {
-        SliderSheetController(
+        // The ambient plane/channel target, captured with the sheet: a
+        // recorded filter step names its target explicitly, because the UI
+        // reads it from the document where the agent reads an argument.
+        let target = document.planeEditTarget.layerEditAgentName(in: document.doc)
+        return SliderSheetController(
             document: document, canvas: canvas,
             title: "Hue Rotate", actionName: "Hue Rotate",
             sliders: [
@@ -1632,13 +1687,21 @@ extension SliderSheetController {
                     label: "Angle:", min: -180, max: 180, initial: 0,
                     format: { String(format: "%.0f°", $0) })
             ],
+            step: { values in
+                .filter(
+                    "hue_rotate", ["degrees": ActionArgs.number(values[0])], target: target)
+            },
             compute: { image, values in
                 image.hueRotated(degrees: values[0])
             })
     }
 
     static func threshold(document: ImageDocument, canvas: ImageCanvasView) -> SliderSheetController {
-        SliderSheetController(
+        // The ambient plane/channel target, captured with the sheet: a
+        // recorded filter step names its target explicitly, because the UI
+        // reads it from the document where the agent reads an argument.
+        let target = document.planeEditTarget.layerEditAgentName(in: document.doc)
+        return SliderSheetController(
             document: document, canvas: canvas,
             title: "Threshold", actionName: "Threshold",
             sliders: [
@@ -1646,13 +1709,20 @@ extension SliderSheetController {
                     label: "Level:", min: 0, max: 1, initial: 0.5,
                     format: { String(format: "%.2f", $0) })
             ],
+            step: { values in
+                .filter("threshold", ["level": ActionArgs.number(values[0])], target: target)
+            },
             compute: { image, values in
                 image.thresholded(level: values[0])
             })
     }
 
     static func posterize(document: ImageDocument, canvas: ImageCanvasView) -> SliderSheetController {
-        SliderSheetController(
+        // The ambient plane/channel target, captured with the sheet: a
+        // recorded filter step names its target explicitly, because the UI
+        // reads it from the document where the agent reads an argument.
+        let target = document.planeEditTarget.layerEditAgentName(in: document.doc)
+        return SliderSheetController(
             document: document, canvas: canvas,
             title: "Posterize", actionName: "Posterize",
             sliders: [
@@ -1660,13 +1730,20 @@ extension SliderSheetController {
                     label: "Levels:", min: 2, max: 16, initial: 4, isInteger: true,
                     format: { String(Int($0.rounded())) })
             ],
+            step: { values in
+                .filter("posterize", ["levels": Int(values[0].rounded())], target: target)
+            },
             compute: { image, values in
                 image.posterized(levels: Int(values[0].rounded()))
             })
     }
 
     static func pixelate(document: ImageDocument, canvas: ImageCanvasView) -> SliderSheetController {
-        SliderSheetController(
+        // The ambient plane/channel target, captured with the sheet: a
+        // recorded filter step names its target explicitly, because the UI
+        // reads it from the document where the agent reads an argument.
+        let target = document.planeEditTarget.layerEditAgentName(in: document.doc)
+        return SliderSheetController(
             document: document, canvas: canvas,
             title: "Pixelate", actionName: "Pixelate",
             sliders: [
@@ -1674,6 +1751,9 @@ extension SliderSheetController {
                     label: "Block size:", min: 2, max: 64, initial: 8, isInteger: true,
                     format: { String(Int($0.rounded())) })
             ],
+            step: { values in
+                .filter("pixelate", ["block": Int(values[0].rounded())], target: target)
+            },
             compute: { image, values in
                 image.pixelated(block: Int(values[0].rounded()))
             })
@@ -1683,6 +1763,8 @@ extension SliderSheetController {
         // One seed per sheet open, shared by preview and Apply, so the
         // committed noise is exactly what was previewed.
         let seed = UInt64.random(in: UInt64.min ... UInt64.max)
+        // See the sibling factories: the target is captured with the sheet.
+        let target = document.planeEditTarget.layerEditAgentName(in: document.doc)
         return SliderSheetController(
             document: document, canvas: canvas,
             title: "Add Noise", actionName: "Add Noise",
@@ -1691,6 +1773,17 @@ extension SliderSheetController {
                     label: "Amount:", min: 0.02, max: 1, initial: 0.1,
                     format: { String(format: "%.2f", $0) })
             ],
+            step: { values in
+                // The seed crosses as the Int64 BIT PATTERN the tool reads it
+                // back as (`UInt64(bitPattern: Int64(intArg))`), so a replayed
+                // Add Noise lands the identical grain.
+                .filter(
+                    "add_noise",
+                    [
+                        "amount": ActionArgs.number(values[0]),
+                        "seed": Int(bitPattern: UInt(seed)),
+                    ], target: target)
+            },
             compute: { image, values in
                 image.noised(amount: values[0], seed: seed)
             })

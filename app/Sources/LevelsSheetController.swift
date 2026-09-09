@@ -159,7 +159,17 @@ final class LevelsSheetController: NSViewController {
         renderer.cancel()
         canvas?.previewImage = nil
         dismiss(self)
-        document.applyToActiveLayer("Levels") {
+        document.applyToActiveLayer(
+            "Levels",
+            record: .filter(
+                "levels",
+                [
+                    "black": ActionArgs.number(values.black),
+                    "white": ActionArgs.number(values.white),
+                    "gamma": ActionArgs.number(values.gamma),
+                ],
+                target: document.planeEditTarget.layerEditAgentName(in: document.doc))
+        ) {
             $0.levels(black: values.black, white: values.white, gamma: values.gamma)
         }
     }

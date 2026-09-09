@@ -115,6 +115,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 && spaces[item.tag] == ColorSettings.workingSpace ? .on : .off
             return true
         }
+        // The four File ▸ Automate items and the palette, all of which must
+        // work with no document open — which is why they are here and not in
+        // the editor's table.
+        if item.action == #selector(toggleActionRecording(_:)) {
+            item.title = ActionRecorder.shared.isRecording ? "Stop Recording" : "Start Recording"
+            return true
+        }
+        if item.action == #selector(playLastAction(_:)) {
+            // The SUMMARY only. This runs on every File-menu update, and
+            // decoding the steps of the last recorded paint session to put a
+            // name in a menu item was the single worst stall in the feature
+            // (Action.decodeSummary). The steps are read by the command
+            // itself, once, when it is actually chosen.
+            let last = ActionLibrary.mostRecentlyModified()
+            item.title = last.map { "Play “\($0.summary.name)”" } ?? "Play Last Action"
+            // The SAME lookup the command itself uses, and the same one the
+            // Actions window's Play button uses: `currentDocument` is nil
+            // whenever a non-document window is main — including the Actions
+            // window this item is meant to be used beside — and this item
+            // used to grey itself out with a document plainly open behind it.
+            return last != nil && ActionPlayer.frontDocument() != nil
+        }
         if item.action == #selector(toggleAgentServer(_:)) {
             let server = AgentServer.shared
             item.state = server.isRunning ? .on : .off
@@ -124,6 +146,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 : "Allow Agent Connections"
         }
         return true
+    }
+
+    // MARK: - Automate (File ▸ Automate, Tools ▸ Command Palette…)
+
+    /// File ▸ Automate ▸ Actions… — the app-wide library window.
+    @objc func showActions(_ sender: Any?) {
+        ActionsWindowController.shared.show()
+    }
+
+    /// File ▸ Automate ▸ Start/Stop Recording, and the Actions window's own
+    /// Record and Stop buttons, which target this selector through the
+    /// responder chain. Stopping opens the library window, which is where the
+    /// recording is named and kept.
+    ///
+    /// Starting DISCARDS a stopped-but-unsaved recording, so it asks first:
+    /// those steps live only in memory, no file holds them, and no undo
+    /// covers Application Support. The window lists them as "Unsaved
+    /// recording — N steps" and its Save Recording button is the only way to
+    /// keep them, so the alert points at exactly that.
+    @objc func toggleActionRecording(_ sender: Any?) {
+        let recorder = ActionRecorder.shared
+        if recorder.isRecording {
+            recorder.stop()
+        } else {
+            guard confirmDiscardingRecording() else { return }
+            recorder.start()
+        }
+        ActionsWindowController.shared.show()
+    }
+
+    /// True when recording may start: nothing is pending, or the user said to
+    /// throw it away.
+    private func confirmDiscardingRecording() -> Bool {
+        let recorder = ActionRecorder.shared
+        guard recorder.hasUnsavedRecording else { return true }
+        let count = recorder.steps.count
+        let alert = NSAlert()
+        alert.messageText =
+            "Discard the unsaved recording of \(count) step\(count == 1 ? "" : "s")?"
+        alert.informativeText =
+            "Starting a new recording replaces it. To keep it, cancel and use Save Recording "
+            + "in the Actions window."
+        alert.addButton(withTitle: "Discard and Record")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// File ▸ Automate ▸ Play "<name>" — the most recently modified action,
+    /// on the frontmost document, as one undo step.
+    ///
+    /// The steps are read HERE, by the file the menu item named, and not by
+    /// name: two files may claim one display name only through a hand-edit,
+    /// and the item must play the one it was titled after. A file whose
+    /// header read cleanly can still fail to decode — a malformed symbol, a
+    /// non-finite number — and that reason is shown rather than beeped away,
+    /// since it names the step and the argument that need fixing.
+    @objc func playLastAction(_ sender: Any?) {
+        guard let last = ActionLibrary.mostRecentlyModified(),
+              let document = ActionPlayer.frontDocument()
+        else {
+            NSSound.beep()
+            return
+        }
+        let action: Action
+        switch ActionLibrary.action(at: last.url) {
+        case .ok(let decoded):
+            action = decoded
+        case .broken(let file, let reason):
+            NSSound.beep()
+            let alert = NSAlert()
+            alert.messageText = "“\(last.summary.name)” could not be read"
+            alert.informativeText = "\(file): \(reason)"
+            alert.runModal()
+            return
+        }
+        let report = ActionPlayer.run(
+            action, on: document, stopOnError: nil, progress: ActionRunProgress())
+        ActionPlayer.notePlayed(action, report, on: document)
+        if !report.ok { NSSound.beep() }
+    }
+
+    /// File ▸ Automate ▸ Batch…
+    @objc func showBatch(_ sender: Any?) {
+        BatchWindowController.present()
+    }
+
+    /// Tools ▸ Command Palette… (⇧⌘K).
+    @objc func showCommandPalette(_ sender: Any?) {
+        CommandPaletteWindowController.shared.show()
     }
 
     // MARK: - Menu construction
@@ -199,6 +310,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let openRecentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         openRecentItem.submenu = openRecent
         menu.addItem(openRecentItem)
+
+        // File ▸ Automate — Actions and Batch. All four live on AppDelegate
+        // rather than the editor because `EditorViewController
+        // .validateUserInterfaceItem` returns false at its first line with no
+        // document open, and every one of these must work with none.
+        let automate = NSMenu(title: "Automate")
+        automate.addItem(
+            item("Actions…", #selector(showActions(_:)), "t", [.control, .command]))
+        // The title flips to Stop Recording, the idiom toggleAgentServer uses.
+        automate.addItem(item("Start Recording", #selector(toggleActionRecording(_:))))
+        // …and this one to Play "<name>".
+        automate.addItem(item("Play Last Action", #selector(playLastAction(_:))))
+        automate.addItem(.separator())
+        automate.addItem(item("Batch…", #selector(showBatch(_:))))
+        let automateItem = NSMenuItem(title: "Automate", action: nil, keyEquivalent: "")
+        automateItem.submenu = automate
+        menu.addItem(automateItem)
 
         menu.addItem(.separator())
         menu.addItem(item("Close", #selector(NSWindow.performClose(_:)), "w"))
@@ -680,6 +808,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// menu can carry — same selectors, same shortcuts, same behaviour.
     private func filtersMenu() -> NSMenu {
         let menu = NSMenu(title: "Filters")
+        // ⌃F, as Photoshop spells it. The title becomes Repeat "Sharpen"
+        // when there is something to repeat (EditorViewController+Actions
+        // .validateActionsItem), which also disables it while text is being
+        // edited: NSTextView binds ⌃F to moveForward:, and a menu key
+        // equivalent is resolved AHEAD of the first responder — the same trap
+        // Edit ▸ Clear's bare ⌫ carries, and answered the same way.
+        menu.addItem(
+            item(
+                "Repeat Last Filter",
+                #selector(EditorViewController.repeatLastFilter(_:)), "f", [.control]))
+        menu.addItem(.separator())
         menu.addItem(item("Gaussian Blur…", #selector(EditorViewController.showBlur(_:))))
         menu.addItem(item("Sharpen", #selector(EditorViewController.applySharpen(_:))))
         menu.addItem(item("Pixelate…", #selector(EditorViewController.showPixelate(_:))))
@@ -708,6 +847,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
         }
         menu.addItem(.separator())
+        // ⇧⌘K, not the ⌘K the brief asks for: ⌘K is Crop, and a shortcut
+        // already in the user's fingers is never silently renegotiated.
+        // The Tools menu is the right home — it already carries the one
+        // app-utility item that is not a tool.
+        menu.addItem(
+            item(
+                "Command Palette…", #selector(showCommandPalette(_:)), "k",
+                [.command, .shift]))
         menu.addItem(item("Allow Agent Connections", #selector(toggleAgentServer(_:))))
         return menu
     }

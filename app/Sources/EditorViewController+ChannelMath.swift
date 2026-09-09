@@ -45,7 +45,9 @@ extension EditorViewController {
             presentChannelBudgetAlert(reason)
             return
         }
-        document.applyEdit("Add Luminosity Masks") { $0.addingLuminosityMasks() }
+        document.applyEdit("Add Luminosity Masks", record: .addLuminosityMasks) {
+            $0.addingLuminosityMasks()
+        }
     }
 
     /// Commits `ChannelMath.applyImage` as ONE undo step.
@@ -61,10 +63,11 @@ extension EditorViewController {
     /// blend that changed nothing — beeps inside `applyEdit` and registers no
     /// undo step.
     func applyImage(_ p: ApplyImageParameters) {
-        guard let document = document else {
+        guard let document = document, let doc = document.doc else {
             NSSound.beep()
             return
         }
+        let record: [ActionStep] = .applyImage(p, in: doc)
         switch p.target {
         case .layer, .plane:
             // An adjustment layer's pixels are ignored by the compositor, so
@@ -75,11 +78,13 @@ extension EditorViewController {
             // rejectAdjustmentPixelEdit). A CHANNEL target is document state
             // and is never refused.
             if refuseAdjustmentPixelEdit() { return }
-            document.applyRasterizingEdit("Apply Image", layer: p.targetLayer) {
+            document.applyRasterizingEdit(
+                "Apply Image", layer: p.targetLayer, record: record
+            ) {
                 ChannelMath.applyImage($0, p)
             }
         case .channel:
-            document.applyEdit("Apply Image") { ChannelMath.applyImage($0, p) }
+            document.applyEdit("Apply Image", record: record) { ChannelMath.applyImage($0, p) }
         case .mask:
             // A layer mask is not one of the planes this arithmetic is
             // defined over; the sheet disables Apply, so this is reachable
@@ -101,7 +106,9 @@ extension EditorViewController {
             // same alert rather than applyEdit's bare beep
             // (EditorViewController+Channels.channelBudgetAllowsOneMore).
             guard channelBudgetAllowsOneMore(doc) else { return }
-            document.applyEdit("Calculations") { current in
+            document.applyEdit(
+                "Calculations", record: .calculations(p, result: "new_channel", in: doc)
+            ) { current in
                 guard let plane = ChannelMath.calculated(current, p) else { return nil }
                 return current.addingChannel(
                     name: p.name, plane: plane, width: current.width, height: current.height)
@@ -119,6 +126,9 @@ extension EditorViewController {
             canvas.setSelection(
                 CanvasSelection(
                     shape: .mask(plane), canvasWidth: doc.width, canvasHeight: doc.height))
+            // No undo step means no commit hook, so this selection command
+            // records for itself — the rule every selection command follows.
+            ActionRecorder.shared.record(.calculations(p, result: "selection", in: doc))
         }
     }
 }

@@ -311,7 +311,8 @@ extension EditorViewController {
     /// past its cap — where keeping the session open lets the drag be
     /// pulled back.
     func commitDescribedTransform(
-        layer idx: Int, matrix: CGAffineTransform, quad: [CGPoint]?, sampler: RzResizeFilter
+        layer idx: Int, matrix: CGAffineTransform, quad: [CGPoint]?, sampler: RzResizeFilter,
+        record: [ActionStep]
     ) -> DescribedTransformCommit {
         guard let document = document, let doc = document.doc, let info = doc.layerInfo(idx)
         else { return .unrenderable }
@@ -334,7 +335,7 @@ extension EditorViewController {
         guard let composed = doc.transformingDescribedLayer(
             idx, affine, placement: placement, sampler: sampler)
         else { return .unrenderable }
-        document.applyEdit("Transform Layer") { _ in composed }
+        document.applyEdit("Transform Layer", record: record) { _ in composed }
         return .committed
     }
 }

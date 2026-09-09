@@ -44,12 +44,38 @@ extension LayersPanelViewController {
         guard selection != document.layerSelection else { return }
         // Panel selection only retargets future edits: no undo, no dirty.
         document.setLayerSelection(selection)
+        // Recorded HERE, at the gesture, and NOT in `setLayerSelection`:
+        // that setter is re-entered by the app itself on every panel reload,
+        // after every structural agent edit and from `setGroupExpanded`, so
+        // hooking it would record a step for things the user never did. This
+        // is the row click and the ⇧/⌘-click multi-selection, which is where
+        // AppKit routes both.
+        ActionRecorder.shared.record(Self.selectionRecord(document, selection))
         updateHeaderControls()
         updateButtonStates()
         onActiveLayerChange?()
         // The paint-target ring follows the active layer (and the editor has
         // just dropped any mask target the old layer had).
         refreshTargetRings()
+    }
+
+    /// A panel selection as a step: one row is `set_active_layer`, several
+    /// `set_selected_layers`, both addressed by layer NAME so "the layer
+    /// called Sky" means the same thing on another document. A name that is
+    /// missing at replay fails the step with that name in the message, which
+    /// is the honest outcome — the alternative, a row index, would silently
+    /// act on a different layer.
+    static func selectionRecord(
+        _ document: ImageDocument, _ selection: LayerSelection
+    ) -> [ActionStep] {
+        guard let doc = document.doc else { return .notACommand }
+        let indices = selection.all
+        guard indices.count > 1 else {
+            return .selectLayer(named: doc.layerInfo(selection.primary)?.name)
+        }
+        return .selectLayers(
+            named: indices.map { doc.layerInfo($0)?.name },
+            primary: doc.layerInfo(selection.primary)?.name)
     }
 
     /// A click on one of a row's thumbnails: make that layer the whole
@@ -59,6 +85,8 @@ extension LayersPanelViewController {
         guard let document = document, document.doc != nil else { return }
         if document.layerSelection != .single(idx) {
             document.selectLayer(idx)
+            ActionRecorder.shared.record(
+                .selectLayer(named: document.doc?.layerInfo(idx)?.name))
             if let row = row(forLayerIndex: idx), row < tableView.numberOfRows {
                 isReloading = true
                 tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -141,7 +169,25 @@ extension LayersPanelViewController {
         // The reorder was computed from this very handle a moment ago (so the
         // no-op above could be detected before an undo step existed), which
         // is why the closure has nothing left to do with its argument.
-        document.applyEdit("Reorder Layer") { _ in outcome.document }
+        //
+        // ONE dragged entry records a real `reorder_layer`, with `to`
+        // computed the way `dragReorder`'s single-move branch computes it —
+        // the core's remove-then-insert numbering, which is what the tool
+        // documents. A multi-entry drag is N moves each expressed in the
+        // numbering the previous one produced, and `reorder_layer` moves one
+        // layer, so it records the visible placeholder rather than a step
+        // that would land the wrong entries.
+        let record: [ActionStep]
+        if sources.count == 1, let from = sources.first,
+           let bounds = doc.layerSubtree(from)
+        {
+            let subtree = bounds.start..<bounds.end
+            let to = drop.at <= subtree.lowerBound ? drop.at : drop.at - subtree.count
+            record = .reorderLayer(from: from, to: to, depth: drop.depth)
+        } else {
+            record = .unrecorded("Reorder Layers")
+        }
+        document.applyEdit("Reorder Layer", record: record) { _ in outcome.document }
         // Keep the moved entries selected at their NEW indices — a subtree
         // that moved renumbered everything it passed — with the primary still
         // the entry it was whenever that entry was one of the dragged ones.
@@ -156,7 +202,11 @@ extension LayersPanelViewController {
         // vanished, so the group opens to show them. Not part of the undo
         // step (disclosure never is) and a no-op when it was open already.
         if let into = outcome.into {
-            document.setGroupExpanded(into, true)
+            document.setGroupExpanded(
+                into, true,
+                record: .layerProperty(
+                    "open", true, layerNamed: document.doc?.layerInfo(into)?.name,
+                    note: "Layers panel: a drop opened the group it landed in"))
         }
         reload()
         onActiveLayerChange?()

@@ -46,11 +46,14 @@ final class ImageSizeSheetController: NSViewController, NSTextFieldDelegate {
     private let lengthUnitPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let filterPopup = NSPopUpButton(frame: .zero, pullsDown: false)
 
-    private static let filters: [(title: String, value: RzResizeFilter)] = [
-        ("Nearest", RZ_FILTER_NEAREST),
-        ("Bilinear", RZ_FILTER_BILINEAR),
-        ("Catmull-Rom", RZ_FILTER_CATMULL_ROM),
-        ("Lanczos3", RZ_FILTER_LANCZOS3),
+    /// The resampling filters, in popup order. `agentName` is the spelling
+    /// `image_size` parses, kept beside the title so a recorded Image Size
+    /// step and the popup cannot drift apart.
+    private static let filters: [(title: String, agentName: String, value: RzResizeFilter)] = [
+        ("Nearest", "nearest", RZ_FILTER_NEAREST),
+        ("Bilinear", "bilinear", RZ_FILTER_BILINEAR),
+        ("Catmull-Rom", "catmull-rom", RZ_FILTER_CATMULL_ROM),
+        ("Lanczos3", "lanczos3", RZ_FILTER_LANCZOS3),
     ]
 
     init(document: ImageDocument) {
@@ -366,7 +369,17 @@ final class ImageSizeSheetController: NSViewController, NSTextFieldDelegate {
             current.hasSameResolution(as: original) ? nil : current.ppi
 
         dismiss(self)
-        document.applyEdit("Image Size") { doc in
+        // The dialog is one undo step and up to TWO tool calls — resizing and
+        // retagging the resolution are different tools — which is what the
+        // record parameter being an ARRAY is for. A half that changed nothing
+        // contributes no step.
+        var record: [ActionStep] = []
+        if geometry != nil {
+            record += .imageSize(
+                width: w, height: h, filter: Self.filters[index].agentName)
+        }
+        if let ppi = resolution { record += .setResolution(x: ppi.x, y: ppi.y) }
+        document.applyEdit("Image Size", record: record) { doc in
             // Both halves chain through one closure so the dialog is one undo
             // step, and neither half changing returns nil — the app's rule
             // that a dialog which changes nothing registers no undo step.

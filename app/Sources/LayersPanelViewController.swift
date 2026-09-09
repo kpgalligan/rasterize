@@ -636,7 +636,13 @@ final class LayersPanelViewController: NSViewController {
         guard let document = document else { return }
         guard let tag = blendPopup.selectedItem?.tag, tag >= 0 else { return }
         let mode = RzBlendMode(rawValue: UInt32(tag))
-        document.applyToSelectedLayers("Layer Blend Mode") { $0.withLayerBlendMode($1, mode) }
+        document.applyToSelectedLayers(
+            "Layer Blend Mode",
+            record: .selectionProperty(
+                "blend_mode", RzBlendMode.displayName(for: mode),
+                selectionCount: document.selectedLayerIndices.count,
+                note: "Layer Blend Mode")
+        ) { $0.withLayerBlendMode($1, mode) }
     }
 
     @objc private func opacityChanged(_ sender: Any?) {
@@ -678,7 +684,11 @@ final class LayersPanelViewController: NSViewController {
         }
         if !stillDragging {
             opacityDragActive = false
-            document.endLiveEdit("Layer Opacity")
+            document.endLiveEdit(
+                "Layer Opacity",
+                record: .selectionProperty(
+                    "opacity", ActionArgs.number(value), selectionCount: indices.count,
+                    note: "Layer Opacity"))
         }
     }
 }
@@ -729,18 +739,34 @@ extension LayersPanelViewController: NSTableViewDataSource, NSTableViewDelegate 
         }
         cell.onToggleVisible = { [weak self] in
             guard let document = self?.document else { return }
-            document.applyEdit(visible ? "Hide Layer" : "Show Layer") {
+            document.applyEdit(
+                visible ? "Hide Layer" : "Show Layer",
+                record: .layerProperty(
+                    "visible", !visible, layerNamed: model.info.name,
+                    note: "Layers panel: the eye toggle")
+            ) {
                 $0.withLayerVisible(idx, !visible)
             }
         }
         cell.onToggleExpanded = { [weak self] in
             // Not an undo step, but a real document change: `open` is saved
             // in the .rz record (ImageDocument.setGroupExpanded).
-            self?.document?.setGroupExpanded(idx, !model.expanded)
+            self?.document?.setGroupExpanded(
+                idx, !model.expanded,
+                record: .layerProperty(
+                    "open", !model.expanded, layerNamed: model.info.name,
+                    note: "Layers panel: a group's disclosure triangle"))
         }
         cell.onRename = { [weak self] newName in
             guard let document = self?.document else { return }
-            document.applyEdit("Rename Layer") { $0.withLayerName(idx, newName) }
+            // Named by the layer's OLD name: on replay the layer still
+            // carries it, which is exactly what the symbol has to find.
+            document.applyEdit(
+                "Rename Layer",
+                record: .layerProperty(
+                    "name", newName, layerNamed: model.info.name,
+                    note: "Layers panel: inline rename")
+            ) { $0.withLayerName(idx, newName) }
         }
         return cell
     }

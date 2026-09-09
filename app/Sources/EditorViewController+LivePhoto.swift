@@ -122,7 +122,13 @@ extension EditorViewController {
         // goes above the whole subtree, so `below + 1` would select the
         // wrong row (§4.5's one definition).
         let landing = doc.insertionIndex(above: below)
-        document.applyEdit("Place Live Photo") {
+        document.applyEdit(
+            "Place Live Photo",
+            // The absolute path of the file the user picked; a replay opens
+            // the same pair, or fails naming the path if it has moved.
+            record: .addLivePhotoLayer(
+                path: url.path, name: LivePhoto.layerName(for: source), time: payload.time)
+        ) {
             $0.addingLivePhotoLayer(above: below, payload, name: LivePhoto.layerName(for: source))
         }
         guard document.doc !== before, let updated = document.doc else { return }

@@ -167,7 +167,38 @@ extension EditorViewController {
         let indices = document.selectedLayerIndices
         guard !refuseLockedEdit(layers: doc.movingSet(indices), kind: RZ_EDIT_POSITION)
         else { return }
-        document.applyEdit("Move Layer") { $0.moveLayers(indices, dx: dx, dy: dy) }
+        document.applyEdit("Move Layer", record: Self.moveRecord(doc, indices, dx: dx, dy: dy)) {
+            $0.moveLayers(indices, dx: dx, dy: dy)
+        }
+    }
+
+    /// What a Move — a nudge or a drag — records.
+    ///
+    /// ONE layer becomes a real `set_layer_properties` step carrying the
+    /// layer's offset AFTER the move; the tool writes an absolute position
+    /// where the gesture was relative, and the step's own note says so
+    /// (`ActionSteps.layerOffset`). A SET has no twin at all —
+    /// `set_layer_properties` moves one layer and there is no multi-layer
+    /// move tool — so it records the visible placeholder instead of a step
+    /// that would move the wrong thing.
+    ///
+    /// **The set is the EXPANDED one, not the panel selection.** The gesture
+    /// moves `movingSet(indices)` — the subtree and the link group with it —
+    /// while `set_layer_properties`' offset setter deliberately does not
+    /// follow links (its own doc comment in `core/src/doc.rs` says so). So
+    /// one selected layer that is LINKED to another recorded a step that
+    /// moved the watermark and left the caption behind, silently. This is the
+    /// same rule `transformRecord` already applies through
+    /// `TransformSession.layers`.
+    static func moveRecord(
+        _ doc: RasterDocument, _ indices: [Int], dx: Int, dy: Int
+    ) -> [ActionStep] {
+        let moving = doc.movingSet(indices)
+        guard moving.count == 1, let idx = moving.first,
+              let info = doc.layerInfo(idx)
+        else { return .unrecorded("Move Layers") }
+        return .layerOffset(
+            x: info.offsetX + dx, y: info.offsetY + dy, layerNamed: info.name)
     }
 
     /// What the status line says while a Free Transform is open. A SET names

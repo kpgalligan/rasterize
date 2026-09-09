@@ -35,6 +35,10 @@ extension EditorViewController {
                 return
             }
             canvas.setSelection(selection)
+            // The menu command selects EVERY subject and carries no combine
+            // modifier, so it records no `instance` and the replace mode.
+            ActionRecorder.shared.record(
+                .selectSubject(instance: nil, mode: "replace"))
         } catch {
             presentSubjectFailure(error)
         }

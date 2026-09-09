@@ -45,6 +45,21 @@ extension EditorViewController {
     /// arrange whatever moved into the next index. Photoshop's own Arrange
     /// over a multi-selection is a sequence of these, and pressing ⌘] twice
     /// is the honest way to spell it.
+    /// `arrange_layer`'s `to` vocabulary, in the core's own enum order.
+    private static func arrangeName(_ how: RzArrange) -> String {
+        switch how {
+        case RZ_ARRANGE_FRONT: return "front"
+        case RZ_ARRANGE_FORWARD: return "forward"
+        case RZ_ARRANGE_BACKWARD: return "backward"
+        default: return "back"
+        }
+    }
+
+    /// `align_layers`' `edge` vocabulary, parallel to `alignEdges`.
+    private static let alignEdgeNames = [
+        "left", "horizontal_center", "right", "top", "vertical_center", "bottom",
+    ]
+
     private func arrange(_ how: RzArrange, _ actionName: String) {
         guard let document = document, let before = document.doc else {
             NSSound.beep()
@@ -54,7 +69,9 @@ extension EditorViewController {
         // Where it will land, derived from the stack BEFORE the move: the
         // entry keeps its identity, not its address.
         let landing = before.layerTree.arrangeLanding(of: idx, how)
-        document.applyEdit(actionName) { $0.arrangeLayer(idx, to: how) }
+        document.applyEdit(
+            actionName, record: .arrangeLayer(to: Self.arrangeName(how))
+        ) { $0.arrangeLayer(idx, to: how) }
         guard document.doc !== before, let doc = document.doc else { return }
         setActiveLayer(min(max(landing, 0), doc.layerCount - 1))
     }
@@ -126,7 +143,11 @@ extension EditorViewController {
         // core to align a set to itself is a refusal — a bare beep — where
         // the one-row case would happily align to the canvas.
         let roots = document.doc?.layerTree.independentRoots(indices).count ?? indices.count
-        document.applyEdit(choice.name) {
+        document.applyEdit(
+            choice.name,
+            record: .alignLayers(
+                edge: Self.alignEdgeNames[index], to: roots < 2 ? "canvas" : "layers")
+        ) {
             $0.alignLayers(indices, edge: choice.edge, toCanvas: roots < 2)
         }
     }
@@ -143,7 +164,10 @@ extension EditorViewController {
         let indices = document.selectedLayerIndices
         guard !refuseLockedEdit(layers: movingIndices(indices), kind: RZ_EDIT_POSITION)
         else { return }
-        document.applyEdit(vertical ? "Distribute Vertically" : "Distribute Horizontally") {
+        document.applyEdit(
+            vertical ? "Distribute Vertically" : "Distribute Horizontally",
+            record: .distributeLayers(axis: vertical ? "vertical" : "horizontal")
+        ) {
             $0.distributeLayers(indices, vertical: vertical)
         }
     }
@@ -190,7 +214,9 @@ extension EditorViewController {
             return
         }
         let indices = document.selectedLayerIndices
-        document.applyEdit("Link Layers") { $0.linkLayers(indices) }
+        document.applyEdit("Link Layers", record: .linkLayers(unlink: false)) {
+            $0.linkLayers(indices)
+        }
     }
 
     @objc func unlinkLayers(_ sender: Any?) {
@@ -199,7 +225,9 @@ extension EditorViewController {
             return
         }
         let indices = document.selectedLayerIndices
-        document.applyEdit("Unlink Layers") { $0.unlinkLayers(indices) }
+        document.applyEdit("Unlink Layers", record: .linkLayers(unlink: true)) {
+            $0.unlinkLayers(indices)
+        }
     }
 
     /// Linking is a statement about two or more entries.

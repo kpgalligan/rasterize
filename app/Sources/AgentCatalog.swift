@@ -24,6 +24,39 @@ extension AgentServer {
         "description": "Target document id from list_documents; omit for the frontmost document.",
     ]
 
+    /// `open_document`'s develop settings — the mirror of the RAW Develop
+    /// dialog the UI puts up before a camera RAW opens
+    /// (RawDevelopWindowController; the parsing and the refusals are in
+    /// AgentServer+Raw.swift). An argument rather than a tool of its own
+    /// because a RAW is developed ONCE, at open: there is no re-develop.
+    ///
+    /// Written as an array of literals joined, never a `+` chain — the type
+    /// checker resolves a long chain combinatorially and gives up, worst of
+    /// all at type scope where there is no contextual type.
+    private static let rawDevelopProperty: [String: Any] = [
+        "type": "object",
+        "description": [
+            "Develop settings for a CAMERA RAW (CR3, CR2, NEF, ARW, DNG, Apple ProRAW, ",
+            "ORF, RW2, RAF, SRW, PEF). Omit it, or any key in it, to keep the value the ",
+            "file itself reports \u{2014} an empty object is a valid \"as shot\" develop, ",
+            "and an agent open never shows the Develop dialog either way. Ignored, with a ",
+            "note in the result, for a file that is not developed as a camera RAW \u{2014} ",
+            "one Core Image will not develop, and one that is already open, since a RAW is ",
+            "developed once, when it is opened. Keys: exposure (stops, ",
+            "-4..4); temperature (2000..50000 K) and tint (-150..150) \u{2014} one coupled ",
+            "white balance, so passing either leaves the as-shot balance and the other ",
+            "half comes from the file; tone_curve (0..1, the global curve, 0 = linear); ",
+            "shadows (0..2, no effect while tone_curve is 0); contrast (0..1, LOCAL ",
+            "contrast on edges); sharpness (0..1); detail (0..3); luminance_noise (0..1); ",
+            "color_noise (0..1); lens_correction (bool); highlight_recovery (bool, needs ",
+            "macOS 26 or newer and refused by name below it). A value outside its range is ",
+            "refused by name rather than clamped. A control this particular file's decoder ",
+            "does not support is accepted and changes nothing \u{2014} Core Image's own ",
+            "behaviour; get_color_profile reports the profile the decode produced, which ",
+            "is often not sRGB.",
+        ].joined(),
+    ]
+
     /// The op vocabulary `add_adjustment_layer` publishes and `apply_filter`
     /// points at — one constant, so the two surfaces can never describe the
     /// same op differently.
@@ -299,9 +332,12 @@ extension AgentServer {
                 [:]),
             tool(
                 "open_document",
-                "Opens an image file (PNG, JPEG, PSD, TIFF, BMP, GIF, WebP, RZ) in a new "
-                    + "editor window and returns its document id.",
-                ["path": ["type": "string", "description": "Absolute or ~ path to the file."]],
+                "Opens an image file (PNG, JPEG, PSD, TIFF, BMP, GIF, WebP, HEIC/HEIF, "
+                    + "camera RAW, RZ) in a new editor window and returns its document id.",
+                [
+                    "path": ["type": "string", "description": "Absolute or ~ path to the file."],
+                    "raw": Self.rawDevelopProperty,
+                ],
                 required: ["path"]),
             tool(
                 "get_document",
@@ -1986,6 +2022,16 @@ extension AgentServer {
                     "document_id": docID,
                 ]),
             tool(
+                "select_all",
+                "Selects the whole canvas. Mirrors Select > All. Prefer this over a "
+                    + "full-canvas select_rect: it is canvas-RELATIVE, so a recorded "
+                    + "action replays correctly on a differently sized document, where "
+                    + "literal coordinates would not.",
+                [
+                    "mode": selectionMode,
+                    "document_id": docID,
+                ]),
+            tool(
                 "deselect", "Clears the selection.", ["document_id": docID]),
             tool(
                 "modify_selection",
@@ -2463,6 +2509,15 @@ extension AgentServer {
                             + "picture counter-clockwise on screen — the same sign as the "
                             + "app's Straighten field.",
                     ],
+                    "sampler": [
+                        "type": "string",
+                        "enum": ["nearest", "bilinear", "bicubic", "catmull-rom", "lanczos"],
+                        "description": "How the straighten resamples (default bicubic, the "
+                            + "same vocabulary as transform_layer). Ignored at angle 0, "
+                            + "which resamples nothing. The Crop tool straightens with "
+                            + "whatever the Free Transform options bar is set to, so a "
+                            + "recorded straighten carries that choice here.",
+                    ],
                     "document_id": docID,
                 ], required: ["x", "y", "width", "height"]),
             tool(
@@ -2747,6 +2802,105 @@ extension AgentServer {
                     ],
                     "document_id": docID,
                 ], required: ["path"]),
+
+            // Actions — recorded sequences of these very tools
+            // (AgentServer+Actions.swift). Batch deliberately has no tool: it
+            // is open_document + run_action + save_copy in a loop.
+            tool(
+                "list_actions",
+                "Lists the saved Actions — named, replayable sequences of these tools. "
+                    + "Mirrors the Actions window's list. Files that could not be read "
+                    + "come back in \"broken\" with the exact reason, never silently "
+                    + "dropped.",
+                [
+                    "name": [
+                        "type": "string",
+                        "description": "Omit to list every action; give one to return "
+                            + "that action's full steps.",
+                    ]
+                ]),
+            tool(
+                "run_action",
+                "Plays a saved Action on a document, as ONE undo step for the whole run. "
+                    + "Mirrors the Actions window's Play button. Steps that reference "
+                    + "\"the active layer\" or \"the current selection\" resolve against "
+                    + "THIS document; coordinates are absolute canvas pixels and are not "
+                    + "remapped, so a size difference is reported in canvas_mismatch "
+                    + "rather than guessed at.",
+                [
+                    "name": ["type": "string"],
+                    "stop_on_error": [
+                        "type": "boolean",
+                        "description": "Overrides every step's own on_error for this run.",
+                    ],
+                    "document_id": docID,
+                ], required: ["name"]),
+            tool(
+                "save_action",
+                "Creates or replaces an Action. Mirrors Stop Recording > name it, and "
+                    + "the Actions window's JSON editor. Each step is "
+                    + "{\"tool\", \"arguments\", optional \"enabled\", \"on_error\", "
+                    + "\"note\"} with document_id omitted — the player rebinds it. Write "
+                    + "{\"$layer\": \"active\"} for the active layer, {\"$layer\": "
+                    + "\"Sky\"} for one by name, {\"$layers\": \"selected\"} for the "
+                    + "current layer selection. Every step is validated before a byte is "
+                    + "written, and an unknown tool is refused by step index. A step may "
+                    + "not name the Actions tools themselves (run_action, save_action, "
+                    + "delete_action, list_actions, start_recording, stop_recording): an "
+                    + "action does not run or edit actions. save_copy is refused too — an "
+                    + "action says what to DO to a picture, never where to write it, and "
+                    + "its recorded path is absolute, so in a batch every file would be "
+                    + "written over the same one outside the output folder. Batch chooses "
+                    + "the folder, the format and the name. undo and redo are refused as "
+                    + "steps as well: an action IS one undo entry, so an undo inside it "
+                    + "throws the document's redo history away and reports success.",
+                [
+                    "name": ["type": "string"],
+                    "steps": ["type": "array", "items": ["type": "object"]],
+                    "raw": [
+                        "type": "object",
+                        "description": "Camera RAW develop settings Batch opens RAW files "
+                            + "with. Same shape as open_document's raw.",
+                    ],
+                    "overwrite": [
+                        "type": "boolean",
+                        "description": "Replace an action of this name (default false).",
+                    ],
+                ], required: ["name", "steps"]),
+            tool(
+                "delete_action",
+                "Deletes a saved Action. Mirrors the Actions window's Delete button.",
+                ["name": ["type": "string"]], required: ["name"]),
+            tool(
+                "start_recording",
+                "Starts recording every edit — yours and the user's alike — into a new "
+                    + "Action. Mirrors File > Automate > Start Recording. Read-only "
+                    + "tools, undo, redo, save_copy and open_document are not recorded "
+                    + "(an action is replayed on a document that already exists, and in "
+                    + "Batch on a different file every time); a user command with no tool "
+                    + "of its own (Paste, Quick Mask) lands as a visible \"__unrecorded\" "
+                    + "placeholder that names it rather than a silent gap. Refused while a "
+                    + "stopped-but-unsaved recording is still pending, since starting one "
+                    + "throws those steps away.",
+                [
+                    "discard": [
+                        "type": "boolean",
+                        "description": "Throw away a pending unsaved recording and start a "
+                            + "new one anyway. Default false.",
+                    ]
+                ]),
+            tool(
+                "stop_recording",
+                "Stops recording and returns the steps. Mirrors File > Automate > Stop "
+                    + "Recording. Pass name to save them as an Action; omit it to read "
+                    + "the steps back without saving.",
+                [
+                    "name": [
+                        "type": "string",
+                        "description": "Save the recording under this name; omit to "
+                            + "return the steps without saving.",
+                    ]
+                ]),
         ]
         let data = try JSONSerialization.data(withJSONObject: catalog)
         return String(decoding: data, as: UTF8.self)

@@ -312,12 +312,13 @@ extension AgentServer {
             throw ToolError(message: "Document has no image")
         }
         guard let updated = transform(current) else { return false }
-        let manager = document.undoManager
-        manager?.beginUndoGrouping()
-        document.applyGuideEdit(actionName) { _ in updated }
-        manager?.endUndoGrouping()
-        while let manager = manager, manager.groupingLevel > 0 {
-            manager.endUndoGrouping()
+        // The grouping loop this comment used to ask a third caller to hoist
+        // is hoisted: `withUndoGroup` (UndoGrouping.swift) is the one copy,
+        // shared with `performGroupedEdit`, and its drain is level-relative
+        // so a guide edit replayed from inside an AppKit event does not close
+        // the event's own implicit group.
+        withUndoGroup(document.undoManager) {
+            document.applyGuideEdit(actionName, record: .notACommand) { _ in updated }
         }
         return true
     }
@@ -327,8 +328,9 @@ extension AgentServer {
     /// carry on instead of retrying the identical call.
     ///
     /// Copied from `AgentServer+Channels`, where it is `private`. A THIRD
-    /// feature needing it should hoist this and `editGuides`' grouping loop
-    /// into a shared file rather than make a third copy.
+    /// feature needing it should hoist this into a shared file rather than
+    /// make a third copy — as `editGuides`' grouping loop now is
+    /// (`withUndoGroup`).
     private func noOpResult(_ fields: [String: Any], why: String) throws -> String {
         // The tool's own keys never overwrite the shared ones, so a refusal
         // cannot be disguised as a success.
