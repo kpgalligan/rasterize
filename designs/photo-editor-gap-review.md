@@ -1121,7 +1121,7 @@ Decisions worth knowing:
   once per gesture, from a bottom-up fold); and the View menu's checkmarks
   and radio marks.
 
-### Phase 8 — RAW develop and Actions (§3A row 6 and the whole of §3J): shipped on `refactor`
+### Phase 8 — RAW develop and Actions (§3A row 6 and the whole of §3J): shipped on `refactor` — commit `93af0d8`
 
 Section 4's step 8, both halves. The commit hash goes in the follow-up
 commit, as 7b's did. **This phase changed no Rust**: no new `rz_*` export, no
